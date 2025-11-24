@@ -1,0 +1,28 @@
+[project]
+name = "abstention-reasoning"
+version = "0.1.0"
+description = "Abstention Reasoning"
+readme = "README.md"
+requires-python = ">=3.10.12"
+authors = [{ name = "Anthony Fei", email = "ayf7@cornell.edu" }]
+
+dependencies = [
+  "torch>=2.1",
+  "transformers==4.55.4",
+  "matplotlib",
+  "tqdm",
+  "numpy",
+  "accelerate",
+  "trl",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "." }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["exploration_scripts*", "models*", "src*", "utils*"]

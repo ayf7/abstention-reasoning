@@ -1,0 +1,22 @@
+You are solving a word-grouping puzzle with the following rules:
+- There are 16 words.
+- Your goal is to group them into 4 groups of 4 words each.
+- Each group of 4 words shares a common theme or category.
+- Each word belongs to exactly one group (no overlaps).
+
+Contest: {contest}
+
+Here are the 16 words:
+{words}
+
+Your task:
+- Group the 16 words into 4 groups of 4 words each.
+- For each group, give a short description of what the words have in common.
+- Think step by step, explaining how you identify each group before giving the final groups.
+
+Output format:
+- After your reasoning, provide a single line beginning with `Answer:`.
+- Each group of words must be enclosed in square brackets `[]`, with the 4 words (in all caps) separated by commas.
+- The 4 groups themselves must also be separated by commas.
+- Concretely, the format should be:
+  Answer: [<word>, <word>, <word>, <word>], [<word>, <word>, <word>, <word>], [<word>, <word>, <word>, <word>], [<word>, <word>, <word>, <word>]

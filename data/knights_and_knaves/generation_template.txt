@@ -1,0 +1,12 @@
+{quiz}
+
+Think step by step:
+- Consider possible assignments of knight/knave to each person.
+- For each assignment, check whether their statements would be true or false.
+- Rule out any assignments that lead to contradictions.
+
+Output format:
+- After your reasoning, write a single line beginning with `Answer:`.
+- On that line, list each person and their role, using the exact words `Knight` or `Knave`.
+- Concretely, the format should be:
+  Answer: <Name1> = Knight, <Name2> = Knave, ...
