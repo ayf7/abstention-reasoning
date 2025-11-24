@@ -1,0 +1,19 @@
+You are playing a numbers game similar to Countdown.
+
+Your goal is to reach the target number using the given numbers and basic arithmetic operations (+, -, ×, ÷).
+
+Target: {target}
+Numbers: {nums}
+
+Rules:
+- You may use each number at most once.
+- You can use addition, subtraction, multiplication, and division.
+- You do not have to use all the numbers, but you should try to get exactly the target.
+
+Think step by step, showing your intermediate calculations, then give the final expression that reaches (or is as close as possible to) the target.
+
+Output format:
+- After your reasoning, write a single line beginning with `Answer:`.
+- On that line, include your final expression and its value, with the final value enclosed in LaTeX-style box notation.
+- Concretely, the format should be:
+  Answer: <expression> = \boxed{{<value>}}
