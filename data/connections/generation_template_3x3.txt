@@ -1,0 +1,20 @@
+You are solving a word-grouping puzzle with the following rules:
+- There are 9 words.
+- Your goal is to group them into 3 groups of 3 words each.
+- Each group of 3 words shares a common theme or category.
+- Each word belongs to exactly one group (no overlaps).
+
+Here are the 9 words:
+{words}
+
+Your task:
+- Group the 9 words into 3 groups of 3 words each.
+- Think step by step and justify your choices.
+
+Output format:
+- After your thinking, provide a single line beginning with `Answer:`.
+- Each group of words must be enclosed in square brackets `[]`, with the 3 words (in all caps) separated by commas.
+- The 3 groups themselves must also be separated by commas, enclosed in braces `{{}}`.
+- Concretely, the format should be:
+  Answer: {{[<word>, <word>, <word>], [<word>, <word>, <word>], [<word>, <word>, <word>]}}
+- Finally, end your response with <|endoftext|>.

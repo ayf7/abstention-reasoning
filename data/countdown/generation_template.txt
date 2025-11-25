@@ -14,6 +14,5 @@ Think step by step, showing your intermediate calculations, then give the final 
 
 Output format:
 - After your reasoning, write a single line beginning with `Answer:`.
-- On that line, include your final expression and its value, with the final value enclosed in LaTeX-style box notation.
-- Concretely, the format should be:
-  Answer: <expression> = \boxed{{<value>}}
+- On that line, include your final expression and its value, with the expression and value enclosed in LaTeX-style box notation.
+- Concretely, the format should be: Answer: \boxed{<expression> = <value>}.

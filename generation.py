@@ -13,7 +13,7 @@ from data.prompt_loader import (
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DATASETS_DIR = BASE_DIR / "datasets"
+DATASETS_DIR = BASE_DIR / "data"
 
 
 def _load_first_jsonl_example(path: Path) -> dict:
@@ -57,8 +57,8 @@ def generate_cot_responses(tokenizer, model) -> None:
 
     prompts = {
         "Connections": generate_connections_prompt(connections_example),
-        "Countdown": generate_countdown_prompt(countdown_example),
-        "Knights and Knaves": generate_knights_and_knaves_prompt(knights_example),
+        # "Countdown": generate_countdown_prompt(countdown_example),
+        # "Knights and Knaves": generate_knights_and_knaves_prompt(knights_example),
     }
 
     for name, prompt in prompts.items():
@@ -70,7 +70,7 @@ def generate_cot_responses(tokenizer, model) -> None:
         with torch.no_grad():
             output_ids = model.generate(
                 **inputs,
-                max_new_tokens=512,
+                max_new_tokens=8192,
                 do_sample=True,
                 temperature=0.7,
                 top_p=0.9,

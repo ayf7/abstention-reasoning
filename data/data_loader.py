@@ -40,6 +40,9 @@ def download_and_save(dataset_name: str, target_subdir: str) -> None:
 
     # Save each split (or sub-dataset) to its own JSONL file.
     for split_name, split_dataset in dataset_dict.items():
+        # Add an index column
+        split_dataset = split_dataset.map(lambda _, idx: {"index": idx}, with_indices=True)
+        
         out_path = target_dir / f"{split_name}.jsonl"
         split_dataset.to_json(out_path)
         print(f"Saved {dataset_name!r} ({split_name}) to {out_path}")
@@ -62,6 +65,9 @@ def download_and_save_configs_combined(
     for config_name in configs:
         dataset_dict = load_dataset(dataset_name, config_name)
         combined = concatenate_datasets(list(dataset_dict.values()))
+
+        # Add an index column
+        combined = combined.map(lambda _, idx: {"index": idx}, with_indices=True)
 
         json_path = target_dir / f"{config_name}.jsonl"
         # parquet_path = target_dir / f"{config_name}.parquet"

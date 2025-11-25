@@ -4,8 +4,6 @@ You are solving a word-grouping puzzle with the following rules:
 - Each group of 4 words shares a common theme or category.
 - Each word belongs to exactly one group (no overlaps).
 
-Contest: {contest}
-
 Here are the 16 words:
 {words}
 
@@ -17,6 +15,7 @@ Your task:
 Output format:
 - After your reasoning, provide a single line beginning with `Answer:`.
 - Each group of words must be enclosed in square brackets `[]`, with the 4 words (in all caps) separated by commas.
-- The 4 groups themselves must also be separated by commas.
+- The 4 groups themselves must also be separated by commas, enclosed in braces `{{}}`.
 - Concretely, the format should be:
-  Answer: [<word>, <word>, <word>, <word>], [<word>, <word>, <word>, <word>], [<word>, <word>, <word>, <word>], [<word>, <word>, <word>, <word>]
+  Answer: {{[<word>, <word>, <word>, <word>], [<word>, <word>, <word>, <word>], [<word>, <word>, <word>, <word>], [<word>, <word>, <word>, <word>]}}
+- End your response with <|endoftext|>.
