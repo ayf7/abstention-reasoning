@@ -1,27 +1,26 @@
 """
 Standardized manager for NYT Connections dataset.
 
-Manages the full pipeline from CSV -> raw_dataset -> train/test splits ->
-CoT generation -> SFT training -> RL data creation.
+Manages the full pipeline from groups.jsonl + synthetic_groups.jsonl ->
+raw_dataset -> train/test splits -> CoT generation -> SFT training ->
+RL data creation.
+
+Supports multiple puzzle variants: 2x3, 3x2, 3x3.
 """
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import random
 import re
-import unicodedata
-from collections import defaultdict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import pandas as pd
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 from trl import SFTTrainer, SFTConfig
+from vllm import LLM, SamplingParams
 
 from data.dataset_manager import DatasetManager
 from data.prompt_loader import generate_connections_prompt
@@ -33,7 +32,8 @@ class ConnectionsManager(DatasetManager):
 
     Directory structure:
         data/connections/
-            connections_data.csv     # Raw CSV data (expected to exist)
+            groups.jsonl             # Original groups from CSV (expected to exist)
+            synthetic_groups.jsonl   # Synthetic groups from OpenAI (expected to exist)
             generation_template.txt  # Prompt template (expected to exist)
             artifacts/
                 raw_dataset.jsonl
@@ -47,20 +47,33 @@ class ConnectionsManager(DatasetManager):
         self,
         path: Path = None,
         prompt_template: Path = None,
+        groups_path: Path = None,
+        synthetic_groups_path: Path = None,
         test_split_ratio: float = 0.2,
         seed: int = 42,
+        count_2x3: int = 500,
+        count_3x2: int = 500,
+        count_3x3: int = 500,
     ):
         if path is None:
             path = Path(__file__).resolve().parent
         if prompt_template is None:
             prompt_template = path / "generation_template.txt"
+        if groups_path is None:
+            groups_path = path / "groups.jsonl"
+        if synthetic_groups_path is None:
+            synthetic_groups_path = path / "synthetic_groups.jsonl"
 
         super().__init__(path, prompt_template)
 
-        self.csv_path = path / "connections_data.csv"
+        self.groups_path = groups_path
+        self.synthetic_groups_path = synthetic_groups_path
         self.test_split_ratio = test_split_ratio
         self.seed = seed
         self.rng = random.Random(seed)
+        self.count_2x3 = count_2x3
+        self.count_3x2 = count_3x2
+        self.count_3x3 = count_3x3
 
     # ========================================================================
     # Dataset Creation
@@ -68,42 +81,65 @@ class ConnectionsManager(DatasetManager):
 
     def create_dataset(self):
         """
-        Creates raw_dataset.jsonl from connections_data.csv.
+        Creates raw_dataset.jsonl from groups.jsonl and synthetic_groups.jsonl.
 
         Each record in raw_dataset.jsonl:
         {
             "index": <int>,
-            "question": <dict with words, answers, etc.>,
+            "question": {
+                "words": <list of shuffled words>,
+                "answers": [{"answerDescription": <str>, "words": <list>}, ...]
+            },
             "answer": <str>,  # Canonical answer format
             "metadata": {
-                "game_id": <int>,
-                "puzzle_date": <str>,
-                "contest": <str>,
+                "variant": <str>,  # e.g., "2x3", "3x2", "3x3"
                 "total_words": <int>,
                 "group_count": <int>,
-                "words_per_group": <int>
+                "words_per_group": <int>,
+                "indexes_used": <list of group indices used>
             }
         }
         """
-        if not self.csv_path.exists():
-            raise FileNotFoundError(f"CSV file not found: {self.csv_path}")
+        if not self.groups_path.exists():
+            raise FileNotFoundError(f"Groups file not found: {self.groups_path}")
+        if not self.synthetic_groups_path.exists():
+            raise FileNotFoundError(f"Synthetic groups file not found: {self.synthetic_groups_path}")
 
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         output_path = self.artifact_dir / "raw_dataset.jsonl"
 
-        print(f"Creating dataset from {self.csv_path}...")
+        print(f"Creating dataset from {self.groups_path} and {self.synthetic_groups_path}...")
 
-        # Load CSV and group by puzzle
-        puzzles = self._load_puzzles_from_csv()
+        # Load groups from both sources
+        orig_pool = self._load_groups(self.groups_path, source="orig")
+        synth_pool = self._load_groups(self.synthetic_groups_path, source="synth")
 
-        # Sort chronologically
-        sorted_puzzles = self._sort_puzzles(puzzles)
+        if not orig_pool:
+            raise ValueError("No original groups loaded.")
+        if not synth_pool:
+            raise ValueError("No synthetic groups loaded.")
 
-        # Build records
+        print(f"Loaded {len(orig_pool)} original groups and {len(synth_pool)} synthetic groups")
+
+        # Shuffle pools
+        self.rng.shuffle(orig_pool)
+        self.rng.shuffle(synth_pool)
+
+        # Build puzzles for each variant
         records = []
-        for idx, (game_id, puzzle_date, rows) in enumerate(sorted_puzzles):
-            record = self._build_puzzle_record(idx, game_id, puzzle_date, rows)
-            records.append(record)
+
+        print(f"Generating {self.count_2x3} puzzles with 2x3 variant...")
+        records.extend(self._generate_variant(2, 3, self.count_2x3, orig_pool, synth_pool))
+
+        print(f"Generating {self.count_3x2} puzzles with 3x2 variant...")
+        records.extend(self._generate_variant(3, 2, self.count_3x2, orig_pool, synth_pool))
+
+        print(f"Generating {self.count_3x3} puzzles with 3x3 variant...")
+        records.extend(self._generate_variant(3, 3, self.count_3x3, orig_pool, synth_pool))
+
+        # Assign sequential indices
+        for idx, rec in enumerate(records):
+            rec["index"] = idx
 
         # Write to JSONL
         with output_path.open("w", encoding="utf-8") as f:
@@ -113,81 +149,172 @@ class ConnectionsManager(DatasetManager):
         print(f"Created {len(records)} puzzles in {output_path}")
         return records
 
-    def _load_puzzles_from_csv(self) -> Dict[int, List[dict]]:
-        """Load CSV and group rows by Game ID."""
-        puzzles = defaultdict(list)
-        with self.csv_path.open(newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                game_id = int(row["Game ID"])
-                puzzles[game_id].append(row)
-        return puzzles
+    def _load_groups(self, path: Path, source: str) -> List[dict]:
+        """Load groups from a JSONL file."""
+        groups = []
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                desc = rec.get("description")
+                words = rec.get("words")
+                rec_idx = rec.get("index")
+                if not isinstance(desc, str) or not isinstance(words, list):
+                    continue
+                cleaned_words = [str(w).strip().upper() for w in words if str(w).strip()]
+                if len(cleaned_words) < 2:
+                    continue
+                groups.append({
+                    "description": desc.strip(),
+                    "words": cleaned_words,
+                    "source": source,
+                    "idx": rec_idx if isinstance(rec_idx, int) else None,
+                })
+        return groups
 
-    def _sort_puzzles(self, puzzles: Dict[int, List[dict]]) -> List[Tuple[int, str, List[dict]]]:
-        """Sort puzzles chronologically."""
-        sorted_puzzles = []
-        for game_id, rows in puzzles.items():
-            if not rows:
-                continue
-            puzzle_date = rows[0]["Puzzle Date"]
-            date_ms = self._parse_date_ms(puzzle_date)
-            sorted_puzzles.append((date_ms, game_id, puzzle_date, rows))
-
-        sorted_puzzles.sort(key=lambda t: (t[0], t[1]))
-        return [(gid, pdate, rows) for _, gid, pdate, rows in sorted_puzzles]
-
-    def _build_puzzle_record(
+    def _generate_variant(
         self,
-        idx: int,
-        game_id: int,
-        puzzle_date: str,
-        rows: List[dict]
-    ) -> dict:
-        """Build a single puzzle record from CSV rows."""
-        # Group words by group name
-        groups = defaultdict(list)
-        for r in rows:
-            group_name = self._normalize_text(r["Group Name"])
-            word = self._normalize_text(r["Word"])
-            row_idx = int(r["Starting Row"])
-            col_idx = int(r["Starting Column"])
-            groups[group_name].append((row_idx, col_idx, word))
+        group_count: int,
+        words_per_group: int,
+        count: int,
+        orig_pool: List[dict],
+        synth_pool: List[dict]
+    ) -> List[dict]:
+        """Generate puzzles for a specific variant."""
+        records = []
+        attempts = 0
+        while len(records) < count and attempts < count * 100:
+            attempts += 1
+            result = self._build_puzzle(group_count, words_per_group, orig_pool, synth_pool)
+            if result is None:
+                continue
+            orig_used, synth_used, puzzle_record = result
+            # Remove used groups
+            self._pop_indices(orig_pool, orig_used)
+            self._pop_indices(synth_pool, synth_used)
+            records.append(puzzle_record)
 
-        # Sort groups alphabetically; words by board position
+        if len(records) < count:
+            print(f"Warning: generated {len(records)}/{count} for variant {group_count}x{words_per_group}")
+
+        return records
+
+    def _build_puzzle(
+        self,
+        group_count: int,
+        words_per_group: int,
+        orig_pool: List[dict],
+        synth_pool: List[dict]
+    ) -> Optional[Tuple[List[int], List[int], dict]]:
+        """Build a single puzzle with the specified variant."""
+        if not orig_pool or not synth_pool:
+            return None
+
+        used_words = set()
         answers = []
-        all_words = []
-        for group_name in sorted(groups):
-            word_entries = sorted(groups[group_name], key=lambda t: (t[0], t[1]))
-            words = [w for _, _, w in word_entries]
-            all_words.extend(words)
-            answers.append({
-                "answerDescription": group_name,
-                "words": words
-            })
+        orig_used = []
+        synth_used = []
+        indexes_used = []
 
-        # Shuffle words for the puzzle
-        shuffled_words = list(all_words)
-        self.rng.shuffle(shuffled_words)
+        # Sample one from each source first
+        first = self._sample_group(orig_pool, words_per_group, used_words)
+        second = self._sample_group(synth_pool, words_per_group, used_words) if first else None
 
-        # Build canonical answer format
+        if not first or not second:
+            return None
+
+        for idx, grp, sampled in (first, second):
+            used_words.update(sampled)
+            answers.append({"answerDescription": grp["description"], "words": sampled})
+            if grp["source"] == "orig":
+                orig_used.append(idx)
+            else:
+                synth_used.append(idx)
+            if isinstance(grp.get("idx"), int):
+                indexes_used.append(grp["idx"])
+
+        # Add additional groups until reaching group_count
+        combined = list(enumerate(orig_pool)) + [(len(orig_pool) + i, g) for i, g in enumerate(synth_pool)]
+        self.rng.shuffle(combined)
+
+        while len(answers) < group_count and combined:
+            global_idx, grp = combined.pop()
+            if len(grp["words"]) < words_per_group:
+                continue
+            sampled = self.rng.sample(grp["words"], words_per_group)
+            if any(w in used_words for w in sampled):
+                continue
+            used_words.update(sampled)
+            answers.append({"answerDescription": grp["description"], "words": sampled})
+            if global_idx < len(orig_pool):
+                orig_used.append(global_idx)
+            else:
+                synth_used.append(global_idx - len(orig_pool))
+            if isinstance(grp.get("idx"), int):
+                indexes_used.append(grp["idx"])
+
+        # Require at least one orig and one synth group
+        if not orig_used or not synth_used or len(answers) != group_count:
+            return None
+
+        # Shuffle answers and words
+        self.rng.shuffle(answers)
+        words_flat = []
+        for ans in answers:
+            words_flat.extend(ans["words"])
+        self.rng.shuffle(words_flat)
+
+        # Build standardized record
+        variant = f"{group_count}x{words_per_group}"
         canonical_answer = self._format_canonical_answer(answers)
 
-        return {
-            "index": idx,
+        record = {
+            "index": 0,  # Will be set later
             "question": {
-                "words": shuffled_words,
+                "words": words_flat,
                 "answers": answers,
             },
             "answer": canonical_answer,
             "metadata": {
-                "game_id": game_id,
-                "puzzle_date": puzzle_date,
-                "contest": f"NYT Connections {game_id} - {puzzle_date}",
-                "total_words": len(all_words),
-                "group_count": len(answers),
-                "words_per_group": len(answers[0]["words"]) if answers else 4,
+                "variant": variant,
+                "total_words": len(words_flat),
+                "group_count": group_count,
+                "words_per_group": words_per_group,
+                "indexes_used": sorted(indexes_used),
             }
         }
+
+        return orig_used, synth_used, record
+
+    def _sample_group(
+        self,
+        pool: List[dict],
+        size: int,
+        used_words: set
+    ) -> Optional[Tuple[int, dict, List[str]]]:
+        """Sample a group from the pool with the required size."""
+        if not pool:
+            return None
+        for _ in range(200):
+            idx = self.rng.randrange(len(pool))
+            grp = pool[idx]
+            if len(grp["words"]) < size:
+                continue
+            sampled = self.rng.sample(grp["words"], size)
+            if any(w in used_words for w in sampled):
+                continue
+            return idx, grp, sampled
+        return None
+
+    @staticmethod
+    def _pop_indices(lst: List[dict], indices: List[int]) -> None:
+        """Remove elements at specified indices from a list."""
+        for idx in sorted(indices, reverse=True):
+            lst.pop(idx)
 
     def _format_canonical_answer(self, answers: List[dict]) -> str:
         """Format the canonical answer string."""
@@ -197,30 +324,6 @@ class ConnectionsManager(DatasetManager):
             group_str = "[" + ", ".join(words_upper) + "]"
             groups.append(group_str)
         return "{" + ", ".join(groups) + "}"
-
-    @staticmethod
-    def _parse_date_ms(date_str: str) -> int:
-        """Parse date string to milliseconds."""
-        dt = datetime.fromisoformat(date_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return int(dt.timestamp() * 1000)
-
-    @staticmethod
-    def _normalize_text(text: str) -> str:
-        """Normalize text (remove curly quotes, etc.)."""
-        if text is None:
-            return ""
-        text = unicodedata.normalize("NFC", text)
-        replacements = {
-            "\u201c": '"', "\u201d": '"',
-            "\u2018": "'", "\u2019": "'",
-            "\u2013": "-", "\u2014": "-",
-            "\u00a0": " ",
-        }
-        for bad, good in replacements.items():
-            text = text.replace(bad, good)
-        return text.strip()
 
     # ========================================================================
     # Train/Test Split
@@ -335,10 +438,10 @@ class ConnectionsManager(DatasetManager):
             )
 
         print(f"Generating CoTs for {train_path}...")
-        print(f"Model: {model_name}, Batch size: {batch_size}")
+        print(f"Model: {model_name}, Batch size: {batch_size}, Max num tokens: {max_new_tokens}")
 
-        # Load model
-        tokenizer, model = self._init_model(model_name)
+        # Load model with VLLM
+        model = self._init_model(model_name)
 
         # Load examples
         examples = []
@@ -360,7 +463,10 @@ class ConnectionsManager(DatasetManager):
         if processed_indices:
             print(f"Resuming: {len(processed_indices)} already processed")
 
-        updated_examples = []
+        # Create index map for fast lookups
+        examples_by_index = {ex["index"]: ex for ex in examples}
+
+        total_processed = len(processed_indices)
         for i in range(0, len(examples), batch_size):
             batch = examples[i:i + batch_size]
 
@@ -374,87 +480,76 @@ class ConnectionsManager(DatasetManager):
             # Generate
             prompts = [ex["prompt"] for ex in batch]
             generated_texts = self._generate_batch(
-                tokenizer, model, prompts,
+                model, prompts,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p
             )
 
-            # Process generations
+            # Process generations and update in-place
             for j, (ex, gen_text) in enumerate(zip(batch, generated_texts)):
-                cot, cot_length = self._clean_cot(gen_text, tokenizer)
+                cot, cot_length = self._clean_cot(gen_text, model)
 
                 # Check correctness (load raw dataset to get answer)
                 is_correct = self._check_correctness(ex["index"], cot)
 
-                ex["cot"] = cot
-                ex["cot_metadata"] = {
+                # Update the example in the dict
+                examples_by_index[ex["index"]]["cot"] = cot
+                examples_by_index[ex["index"]]["cot_metadata"] = {
                     "correct_answer": is_correct,
                     "cot_token_length": cot_length,
                 }
-
-                updated_examples.append(ex)
                 processed_indices.add(ex["index"])
 
-        # Write back
-        if in_place:
-            # Merge with existing examples
-            all_examples = self._merge_examples(examples, updated_examples)
-            self._write_jsonl(train_path, all_examples)
-            print(f"Updated {train_path} with {len(updated_examples)} new generations")
-        elif output_file:
+            # Write immediately after each batch
+            if in_place:
+                # Reconstruct the list in original order
+                all_examples = [examples_by_index[ex["index"]] for ex in examples]
+                self._write_jsonl(train_path, all_examples)
+                batch_count = len(batch)
+                total_processed += batch_count
+                print(f"Saved batch to {train_path} ({batch_count} new, {total_processed} total processed)")
+
+        # Final write if output_file specified
+        if output_file and not in_place:
+            updated_examples = [ex for ex in examples_by_index.values() if ex.get("cot")]
             self._write_jsonl(output_file, updated_examples)
             print(f"Wrote {len(updated_examples)} generations to {output_file}")
 
-        return updated_examples
+        # Return all examples with generations
+        return [ex for ex in examples_by_index.values() if ex.get("cot")]
 
-    def _init_model(self, model_name: str) -> Tuple[Any, Any]:
-        """Initialize model and tokenizer."""
-        print(f"Loading model {model_name}...")
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto",
+    def _init_model(self, model_name: str) -> LLM:
+        """Initialize VLLM model."""
+        print(f"Loading model with VLLM: {model_name}...")
+        model = LLM(
+            model=model_name,
+            tensor_parallel_size=1,  # Adjust based on your GPU setup
+            gpu_memory_utilization=0.9,
         )
-        return tokenizer, model
+        return model
 
     def _generate_batch(
         self,
-        tokenizer,
-        model,
+        model: LLM,
         prompts: List[str],
         max_new_tokens: int,
         temperature: float,
         top_p: float,
     ) -> List[str]:
-        """Generate text for a batch of prompts."""
-        tokenizer.padding_side = "left"
-        inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
+        """Generate text for a batch of prompts using VLLM."""
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_new_tokens,
+        )
 
-        with torch.no_grad():
-            output_ids = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=temperature,
-                top_p=top_p,
-            )
-
-        # Decode only the generated tokens
-        generated_texts = []
-        input_length = inputs["input_ids"].shape[-1]
-        for output in output_ids:
-            generated_ids = output[input_length:]
-            generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
-            generated_texts.append(generated_text)
+        outputs = model.generate(prompts, sampling_params)
+        generated_texts = [output.outputs[0].text for output in outputs]
 
         return generated_texts
 
-    def _clean_cot(self, text: str, tokenizer) -> Tuple[str, int]:
+    def _clean_cot(self, text: str, model: LLM) -> Tuple[str, int]:
         """Clean generated text and compute token length."""
         # Remove end markers
         if "<|endoftext|>" in text:
@@ -466,7 +561,10 @@ class ConnectionsManager(DatasetManager):
             text = text[:answer_match.end()]
 
         text = text.strip()
-        token_ids = tokenizer(text, add_special_tokens=False).input_ids
+
+        # Use VLLM's tokenizer to compute token length
+        tokenizer = model.get_tokenizer()
+        token_ids = tokenizer.encode(text, add_special_tokens=False)
         return text, len(token_ids)
 
     def _check_correctness(self, index: int, cot: str) -> bool:
@@ -815,6 +913,11 @@ def main():
         help="Command to run"
     )
     parser.add_argument("--path", type=Path, help="Dataset path")
+    parser.add_argument("--groups", type=Path, help="Path to groups.jsonl")
+    parser.add_argument("--synthetic-groups", type=Path, help="Path to synthetic_groups.jsonl")
+    parser.add_argument("--count-2x3", type=int, default=500, help="Number of 2x3 puzzles (default: 500)")
+    parser.add_argument("--count-3x2", type=int, default=500, help="Number of 3x2 puzzles (default: 500)")
+    parser.add_argument("--count-3x3", type=int, default=500, help="Number of 3x3 puzzles (default: 500)")
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-1.5B", help="Model name for generation")
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size for generation")
     parser.add_argument("--num-samples", type=int, help="Number of samples for generation")
@@ -823,7 +926,15 @@ def main():
     args = parser.parse_args()
 
     # Initialize manager
-    manager = ConnectionsManager(path=args.path, seed=args.seed)
+    manager = ConnectionsManager(
+        path=args.path,
+        groups_path=args.groups,
+        synthetic_groups_path=args.synthetic_groups,
+        count_2x3=args.count_2x3,
+        count_3x2=args.count_3x2,
+        count_3x3=args.count_3x3,
+        seed=args.seed
+    )
 
     if args.command == "create_dataset":
         manager.create_dataset()
