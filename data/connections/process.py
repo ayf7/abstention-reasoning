@@ -1,14 +1,19 @@
+import argparse
 import json
+import random
 import re
 import torch
-import random
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from data.prompt_loader import load_jsonl_example, generate_connections_prompt, generate_connections_3x3_prompt
+from data.prompt_loader import (
+    generate_connections_prompt,
+    generate_connections_3x3_prompt,
+)
 
 MODEL = "Qwen/Qwen3-8B"
 BATCH_SIZE = 8
-VARIANT = "3x3" # "standard" or "3x3"
+DEFAULT_SAMPLE_SIZE = None  # Use all examples by default
+DEFAULT_SEED = 0
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATASETS_DIR = BASE_DIR / "data"
 
@@ -68,6 +73,56 @@ def validate_answer(predicted_groups_str, true_groups_data):
         print("False (Exception)\n----------------")
         return False
 
+
+def clean_cot(text: str, tokenizer) -> tuple[str, int]:
+    """
+    Trim the generated text to the first Answer block and strip trailing markers.
+    Then retokenize to get an accurate token length.
+    """
+    # Remove anything after an explicit end marker if present.
+    if "<|endoftext|>" in text:
+        text = text.split("<|endoftext|>", 1)[0]
+
+    # Keep only up to the first "Answer:" block if present.
+    answer_match = re.search(r"Answer:\s*\{.*?\}", text, re.DOTALL)
+    if answer_match:
+        text = text[: answer_match.end()]
+
+    text = text.strip()
+    token_ids = tokenizer(text, add_special_tokens=False).input_ids
+    return text, len(token_ids)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate CoT outputs for Connections using the prompt template."
+    )
+    parser.add_argument(
+        "--variant",
+        choices=["standard", "3x3"],
+        default="standard",
+        help="Which prompt variant to use (default: standard).",
+    )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=DEFAULT_SAMPLE_SIZE,
+        help="Optional number of examples to sample (default: all).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help="Random seed for sampling (default: 0).",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=MODEL,
+        help=f"Model name (default: {MODEL}).",
+    )
+    return parser.parse_args()
+
 def transform_to_3x3(example):
     # Deep copy to avoid modifying original if needed, but here we just create new dict
     answers = example["answers"]
@@ -96,14 +151,39 @@ def transform_to_3x3(example):
     new_example["words"] = new_words
     return new_example
 
+
+def load_processed_indices(path: Path) -> set[int]:
+    """
+    Read an existing generations file (if any) and collect indices already
+    processed so we can resume without regenerating them.
+    """
+    processed = set()
+    if not path.exists():
+        return processed
+
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                record = json.loads(line)
+                if "idx" in record:
+                    processed.add(record["idx"])
+            except Exception:
+                continue
+    return processed
+
+
 def main():
-    tokenizer, model = init_model(MODEL)
+    args = parse_args()
+    tokenizer, model = init_model(args.model)
+    variant = args.variant
     
     connections_path = DATASETS_DIR / "connections" / "train.jsonl"
-    if VARIANT == "3x3":
+    if variant == "3x3":
         output_path = DATASETS_DIR / "connections" / "generations_3x3.jsonl"
     else:
         output_path = DATASETS_DIR / "connections" / "generations.jsonl"
+    processed_indices = load_processed_indices(output_path)
+    file_mode = "a" if output_path.exists() else "w"
     
     examples = []
     with connections_path.open("r", encoding="utf-8") as f:
@@ -112,18 +192,40 @@ def main():
             if "index" not in data:
                 data["index"] = i
             examples.append(data)
-            
+
     total_examples = len(examples)
-    print(f"Processing {total_examples} examples with batch size {BATCH_SIZE} (Variant: {VARIANT})...")
+    rng = random.Random(args.seed)
+    if args.num_samples is not None and 0 < args.num_samples < total_examples:
+        examples = rng.sample(examples, args.num_samples)
+    selected_total = len(examples)
+
+    print(
+        f"Processing {selected_total} examples with batch size {BATCH_SIZE} "
+        f"(Variant: {variant}, model={args.model})..."
+    )
     
-    with output_path.open("w", encoding="utf-8") as out_f:
-        for i in range(0, total_examples, BATCH_SIZE):
+    already_done = len(processed_indices)
+    if already_done:
+        print(f"Resuming: {already_done} examples already in {output_path}")
+        remaining = [ex["index"] for ex in examples if ex["index"] not in processed_indices]
+        if remaining:
+            print(f"Next unprocessed index: {remaining[0]}")
+        else:
+            print("All selected examples already processed.")
+
+    with output_path.open(file_mode, encoding="utf-8") as out_f:
+        processed_now = already_done
+        for i in range(0, selected_total, BATCH_SIZE):
             batch_original = examples[i : i + BATCH_SIZE]
+            filtered_examples = [ex for ex in batch_original if ex["index"] not in processed_indices]
+            if not filtered_examples:
+                continue
             batch_examples = []
             prompts = []
+            print(f"Processing indices: {[ex['index'] for ex in filtered_examples]}")
             
-            for ex in batch_original:
-                if VARIANT == "3x3":
+            for ex in filtered_examples:
+                if variant == "3x3":
                     new_ex = transform_to_3x3(ex)
                     batch_examples.append(new_ex)
                     prompts.append(generate_connections_3x3_prompt(new_ex))
@@ -137,7 +239,7 @@ def main():
             with torch.no_grad():
                 output_ids = model.generate(
                     **inputs,
-                    max_new_tokens=8192,
+                    max_new_tokens=2048,
                     do_sample=True,
                     temperature=0.7,
                     top_p=0.9,
@@ -146,38 +248,33 @@ def main():
             generated_texts = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
             
             for j, full_output in enumerate(generated_texts):
-                # Check for EOS token
-                seq_ids = output_ids[j]
-                eos_id = tokenizer.eos_token_id
-                # Find indices where eos_id appears
-                eos_indices = (seq_ids == eos_id).nonzero(as_tuple=True)[0]
-                valid_eos = [idx.item() for idx in eos_indices if idx.item() > 0]
-                
-                if valid_eos:
-                    print(f"EOS found at indices {valid_eos} for example {batch_examples[j]['index']}")
-                
                 ex = batch_examples[j]
                 prompt = prompts[j]
+
+                # Slice off the entire input (including padding) to leave only generated tokens.
+                input_seq_len = inputs["input_ids"].shape[-1]
+                generated_only_ids = output_ids[j][input_seq_len:]
+                cot_raw = tokenizer.decode(generated_only_ids, skip_special_tokens=True)
+                cot, cot_token_length = clean_cot(cot_raw, tokenizer)
                 
-                if full_output.startswith(prompt):
-                    cot = full_output[len(prompt):]
-                else:
-                    cot = full_output
-                
-                predicted_groups_str = extract_answer(cot, variant=VARIANT)
+                predicted_groups_str = extract_answer(cot, variant=variant)
                 is_correct = validate_answer(predicted_groups_str, ex["answers"])
                 
                 record = {
                     "idx": ex["index"],
                     "prompt": prompt,
                     "cot": cot,
+                    "cot_token_length": cot_token_length,
                     "correct_answer": is_correct
                 }
                 
                 out_f.write(json.dumps(record) + "\n")
+                processed_indices.add(ex["index"])
             
             out_f.flush()
-            print(f"Processed {min(i + BATCH_SIZE, total_examples)}/{total_examples}")
+            processed_now += len(filtered_examples)
+            print(f"Processed {processed_now}/{selected_total}")
+
 
 if __name__ == "__main__":
     main()

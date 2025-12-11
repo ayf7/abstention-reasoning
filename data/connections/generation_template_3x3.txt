@@ -1,20 +1,12 @@
+Answer the given question. You should first have a reasoning process in mind and then provide the answer. Show your reasoning in <think> </think> tags.
+
 You are solving a word-grouping puzzle with the following rules:
-- There are 9 words.
-- Your goal is to group them into 3 groups of 3 words each.
-- Each group of 3 words shares a common theme or category.
+- There are {total_words} words.
+- Your goal is to group them into {group_count} groups of {words_per_group} words each.
+- Each group of {words_per_group} words shares a common theme or category.
 - Each word belongs to exactly one group (no overlaps).
 
-Here are the 9 words:
+Here are the {total_words} words:
 {words}
 
-Your task:
-- Group the 9 words into 3 groups of 3 words each.
-- Think step by step and justify your choices.
-
-Output format:
-- After your thinking, provide a single line beginning with `Answer:`.
-- Each group of words must be enclosed in square brackets `[]`, with the 3 words (in all caps) separated by commas.
-- The 3 groups themselves must also be separated by commas, enclosed in braces `{{}}`.
-- Concretely, the format should be:
-  Answer: {{[<word>, <word>, <word>], [<word>, <word>, <word>], [<word>, <word>, <word>]}}
-- Finally, end your response with <|endoftext|>.
+Group the {total_words} words into {group_count} groups of {words_per_group} words each. After you reach the answer, enclose it in braces `{{}}`, with the {group_count} groups separated by commas. Each group must be inside square brackets `[]` with the {words_per_group} words (in all caps) separated by commas. Wrap the braces in <answer> </answer> tags, for example <answer> {example_answer} </answer>. End your response with <|endoftext|>.
