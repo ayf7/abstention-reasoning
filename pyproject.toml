@@ -14,6 +14,8 @@ dependencies = [
   "numpy",
   "accelerate",
   "trl",
+  "wandb",
+  "vllm<=0.8.4",
 ]
 
 [build-system]

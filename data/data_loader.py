@@ -40,6 +40,7 @@ def download_and_save(dataset_name: str, target_subdir: str) -> None:
 
     # Save each split (or sub-dataset) to its own JSONL file.
     for split_name, split_dataset in dataset_dict.items():
+        split_dataset = _add_length_if_present(split_dataset)
         # Add an index column
         split_dataset = split_dataset.map(lambda _, idx: {"index": idx}, with_indices=True)
         
@@ -66,6 +67,7 @@ def download_and_save_configs_combined(
         dataset_dict = load_dataset(dataset_name, config_name)
         combined = concatenate_datasets(list(dataset_dict.values()))
 
+        combined = _add_length_if_present(combined)
         # Add an index column
         combined = combined.map(lambda _, idx: {"index": idx}, with_indices=True)
 
@@ -79,6 +81,17 @@ def download_and_save_configs_combined(
             f"Saved combined config {config_name!r} of {dataset_name!r} "
             f"to {json_path}"
         )
+
+
+def _add_length_if_present(dataset):
+    """
+    If the dataset has a 'names' column (Knights and Knaves), add a
+    derived 'length' column equal to the number of names/entities.
+    """
+    if "names" not in dataset.column_names:
+        return dataset
+
+    return dataset.map(lambda ex: {"length": len(ex["names"])} )
 
 
 def main() -> None:

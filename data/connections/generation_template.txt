@@ -1,21 +1,12 @@
+Answer the given question. You should first have a reasoning process in mind and then provide the answer. Show your reasoning in <think> </think> tags.
+
 You are solving a word-grouping puzzle with the following rules:
-- There are 16 words.
-- Your goal is to group them into 4 groups of 4 words each.
-- Each group of 4 words shares a common theme or category.
+- There are {total_words} words.
+- Your goal is to group them into {group_count} groups of {words_per_group} words each.
+- Each group of {words_per_group} words shares a common theme or category.
 - Each word belongs to exactly one group (no overlaps).
 
-Here are the 16 words:
+Here are the {total_words} words:
 {words}
 
-Your task:
-- Group the 16 words into 4 groups of 4 words each.
-- For each group, give a short description of what the words have in common.
-- Think step by step, explaining how you identify each group before giving the final groups.
-
-Output format:
-- After your reasoning, provide a single line beginning with `Answer:`.
-- Each group of words must be enclosed in square brackets `[]`, with the 4 words (in all caps) separated by commas.
-- The 4 groups themselves must also be separated by commas, enclosed in braces `{{}}`.
-- Concretely, the format should be:
-  Answer: {{[<word>, <word>, <word>, <word>], [<word>, <word>, <word>, <word>], [<word>, <word>, <word>, <word>], [<word>, <word>, <word>, <word>]}}
-- End your response with <|endoftext|>.
+Group the {total_words} words into {group_count} groups of {words_per_group} words each. When you reach the answer, enclose each group inside square brackets `[]` with the {words_per_group} words (in all caps) separated by commas. Finally, wrap the braces in <answer> </answer> tags. Your answer should be in the format <answer> {example_answer} </answer>. End your response with <|endoftext|>.

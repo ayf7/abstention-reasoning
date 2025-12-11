@@ -1,2 +1,7 @@
 *.egg-info
 *.jsonl
+*.pyc
+__pycache__
+
+checkpoints_*
+wandb
