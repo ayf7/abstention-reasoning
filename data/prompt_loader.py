@@ -95,17 +95,26 @@ def generate_connections_prompt(
     )
 
 
-def generate_countdown_prompt(example: Dict[str, Any]) -> str:
+def generate_countdown_prompt(
+    example: Dict[str, Any],
+    *,
+    template_path: str | Path | None = None,
+) -> str:
     """
     Build a CoT-style prompt for a single Countdown numbers example.
     """
-    template = _get_template("countdown")
-    nums = example.get("nums") or []
-    nums_str = ", ".join(str(n) for n in nums)
+    template_key = template_path or "countdown"
+    template = _get_template(template_key)
+
+    # Support both "numbers" and "nums" for backwards compatibility
+    numbers = example.get("numbers") or example.get("nums") or []
+    numbers_str = str(numbers)
+    num_numbers = example.get("num_numbers") or len(numbers)
 
     return template.format(
         target=example.get("target", ""),
-        nums=nums_str,
+        numbers=numbers_str,
+        num_numbers=num_numbers,
     )
 
 

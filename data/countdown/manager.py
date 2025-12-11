@@ -1,11 +1,10 @@
 """
-Standardized manager for NYT Connections dataset.
+Standardized manager for Countdown dataset.
 
-Manages the full pipeline from groups.jsonl + synthetic_groups.jsonl ->
-raw_dataset -> train/test splits -> CoT generation -> SFT training ->
-RL data creation.
+Manages the full pipeline from synthetic generation -> train/test splits ->
+CoT generation -> SFT training -> RL data creation.
 
-Supports multiple puzzle variants: 2x3, 3x2, 3x3.
+Supports multiple variants based on number of operands: 4, 5, 6, etc.
 """
 from __future__ import annotations
 
@@ -13,8 +12,9 @@ import argparse
 import json
 import random
 import re
+import operator
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import pandas as pd
@@ -23,17 +23,41 @@ from trl import SFTTrainer, SFTConfig
 from vllm import LLM, SamplingParams
 
 from data.dataset_manager import DatasetManager
-from data.prompt_loader import generate_connections_prompt
 
 
-class ConnectionsManager(DatasetManager):
+# Operator definitions
+OPS = {
+    '+': operator.add,
+    '-': operator.sub,
+    '*': operator.mul,
+    '/': lambda a, b: a // b if b != 0 and a % b == 0 else None
+}
+OP_SYMBOLS = list(OPS.keys())
+
+
+class ExprNode:
+    """Expression tree node for countdown expressions."""
+
+    def __init__(self, value: Union[int, str], left=None, right=None):
+        self.value = value  # int or operator
+        self.left = left
+        self.right = right
+
+    def is_leaf(self):
+        return self.left is None and self.right is None
+
+    def __str__(self):
+        if self.is_leaf():
+            return str(self.value)
+        return f"({str(self.left)} {self.value} {str(self.right)})"
+
+
+class CountdownManager(DatasetManager):
     """
-    Manages the Connections dataset following the standardized framework.
+    Manages the Countdown dataset following the standardized framework.
 
     Directory structure:
-        data/connections/
-            groups.jsonl             # Original groups from CSV (expected to exist)
-            synthetic_groups.jsonl   # Synthetic groups from OpenAI (expected to exist)
+        data/countdown/
             generation_template.txt  # Prompt template (expected to exist)
             artifacts/
                 raw_dataset.jsonl
@@ -47,33 +71,30 @@ class ConnectionsManager(DatasetManager):
         self,
         path: Path = None,
         prompt_template: Path = None,
-        groups_path: Path = None,
-        synthetic_groups_path: Path = None,
         test_split_ratio: float = 0.2,
         seed: int = 42,
-        count_2x3: int = 500,
-        count_3x2: int = 500,
-        count_3x3: int = 500,
+        num_samples: Dict[int, int] = None,  # {num_operands: count}
+        number_range: Tuple[int, int] = (1, 100),
+        target_range: Tuple[int, int] = (10, 1000),
     ):
         if path is None:
             path = Path(__file__).resolve().parent
         if prompt_template is None:
             prompt_template = path / "generation_template.txt"
-        if groups_path is None:
-            groups_path = path / "groups.jsonl"
-        if synthetic_groups_path is None:
-            synthetic_groups_path = path / "synthetic_groups.jsonl"
 
         super().__init__(path, prompt_template)
 
-        self.groups_path = groups_path
-        self.synthetic_groups_path = synthetic_groups_path
         self.test_split_ratio = test_split_ratio
         self.seed = seed
         self.rng = random.Random(seed)
-        self.count_2x3 = count_2x3
-        self.count_3x2 = count_3x2
-        self.count_3x3 = count_3x3
+
+        # Default: 500 examples each for 4, 5, 6 operands
+        if num_samples is None:
+            num_samples = {4: 500, 5: 500, 6: 500}
+        self.num_samples = num_samples
+
+        self.number_range = number_range
+        self.target_range = target_range
 
     # ========================================================================
     # Dataset Creation
@@ -81,61 +102,33 @@ class ConnectionsManager(DatasetManager):
 
     def create_dataset(self):
         """
-        Creates raw_dataset.jsonl from groups.jsonl and synthetic_groups.jsonl.
+        Creates raw_dataset.jsonl by generating countdown examples from scratch.
 
         Each record in raw_dataset.jsonl:
         {
             "index": <int>,
             "question": {
-                "words": <list of shuffled words>,
-                "answers": [{"answerDescription": <str>, "words": <list>}, ...]
+                "target": <int>,
+                "numbers": <list of ints>,
             },
-            "answer": <str>,  # Canonical answer format
+            "answer": <str>,  # Solution expression
             "metadata": {
-                "variant": <str>,  # e.g., "2x3", "3x2", "3x3"
-                "total_words": <int>,
-                "group_count": <int>,
-                "words_per_group": <int>,
-                "indexes_used": <list of group indices used>
+                "variant": <str>,  # e.g., "4_operands", "5_operands"
+                "num_operands": <int>,
+                "hint_exprs": <list of intermediate expressions>
             }
         }
         """
-        if not self.groups_path.exists():
-            raise FileNotFoundError(f"Groups file not found: {self.groups_path}")
-        if not self.synthetic_groups_path.exists():
-            raise FileNotFoundError(f"Synthetic groups file not found: {self.synthetic_groups_path}")
-
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         output_path = self.artifact_dir / "raw_dataset.jsonl"
 
-        print(f"Creating dataset from {self.groups_path} and {self.synthetic_groups_path}...")
+        print(f"Creating countdown dataset...")
 
-        # Load groups from both sources
-        orig_pool = self._load_groups(self.groups_path, source="orig")
-        synth_pool = self._load_groups(self.synthetic_groups_path, source="synth")
-
-        if not orig_pool:
-            raise ValueError("No original groups loaded.")
-        if not synth_pool:
-            raise ValueError("No synthetic groups loaded.")
-
-        print(f"Loaded {len(orig_pool)} original groups and {len(synth_pool)} synthetic groups")
-
-        # Shuffle pools
-        self.rng.shuffle(orig_pool)
-        self.rng.shuffle(synth_pool)
-
-        # Build puzzles for each variant
         records = []
-
-        print(f"Generating {self.count_2x3} puzzles with 2x3 variant...")
-        records.extend(self._generate_variant(2, 3, self.count_2x3, orig_pool, synth_pool))
-
-        print(f"Generating {self.count_3x2} puzzles with 3x2 variant...")
-        records.extend(self._generate_variant(3, 2, self.count_3x2, orig_pool, synth_pool))
-
-        print(f"Generating {self.count_3x3} puzzles with 3x3 variant...")
-        records.extend(self._generate_variant(3, 3, self.count_3x3, orig_pool, synth_pool))
+        for num_operands, count in self.num_samples.items():
+            print(f"Generating {count} examples with {num_operands} operands...")
+            examples = self._generate_variant(num_operands, count)
+            records.extend(examples)
 
         # Assign sequential indices
         for idx, rec in enumerate(records):
@@ -146,184 +139,180 @@ class ConnectionsManager(DatasetManager):
             for rec in records:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-        print(f"Created {len(records)} puzzles in {output_path}")
+        print(f"Created {len(records)} countdown examples in {output_path}")
         return records
 
-    def _load_groups(self, path: Path, source: str) -> List[dict]:
-        """Load groups from a JSONL file."""
-        groups = []
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                desc = rec.get("description")
-                words = rec.get("words")
-                rec_idx = rec.get("index")
-                if not isinstance(desc, str) or not isinstance(words, list):
-                    continue
-                cleaned_words = [str(w).strip().upper() for w in words if str(w).strip()]
-                if len(cleaned_words) < 2:
-                    continue
-                groups.append({
-                    "description": desc.strip(),
-                    "words": cleaned_words,
-                    "source": source,
-                    "idx": rec_idx if isinstance(rec_idx, int) else None,
-                })
-        return groups
-
-    def _generate_variant(
-        self,
-        group_count: int,
-        words_per_group: int,
-        count: int,
-        orig_pool: List[dict],
-        synth_pool: List[dict]
-    ) -> List[dict]:
-        """Generate puzzles for a specific variant."""
+    def _generate_variant(self, num_operands: int, count: int) -> List[dict]:
+        """Generate countdown examples for a specific number of operands."""
         records = []
         attempts = 0
-        while len(records) < count and attempts < count * 100:
+        max_attempts = count * 100
+
+        while len(records) < count and attempts < max_attempts:
             attempts += 1
-            result = self._build_puzzle(group_count, words_per_group, orig_pool, synth_pool)
-            if result is None:
+
+            # Generate a target
+            target = self.rng.randint(*self.target_range)
+
+            # Build expression tree
+            tree = self._build_random_expr_tree(num_operands, target)
+            if tree is None:
                 continue
-            orig_used, synth_used, puzzle_record = result
-            # Remove used groups
-            self._pop_indices(orig_pool, orig_used)
-            self._pop_indices(synth_pool, synth_used)
-            records.append(puzzle_record)
+
+            # Verify the tree evaluates correctly
+            result = self._evaluate_expr_tree(tree)
+            if result != target:
+                continue
+
+            # Extract numbers and hints
+            numbers = self._extract_leaf_numbers(tree)
+
+            # Ensure all numbers are unique and within range
+            if len(set(numbers)) != num_operands:
+                continue
+            if any(n < self.number_range[0] or n > self.number_range[1] for n in numbers):
+                continue
+            if target in numbers:  # Target shouldn't be one of the numbers
+                continue
+
+            hints = self._extract_hints(tree)
+            solution_expr = str(tree)
+
+            # Create record
+            record = {
+                "index": 0,  # Will be set later
+                "question": {
+                    "target": target,
+                    "numbers": numbers,
+                },
+                "answer": solution_expr,
+                "metadata": {
+                    "variant": f"{num_operands}_operands",
+                    "num_operands": num_operands,
+                    "hint_exprs": hints,
+                }
+            }
+
+            records.append(record)
 
         if len(records) < count:
-            print(f"Warning: generated {len(records)}/{count} for variant {group_count}x{words_per_group}")
+            print(f"Warning: generated {len(records)}/{count} for {num_operands} operands")
 
         return records
 
-    def _build_puzzle(
+    def _build_random_expr_tree(
         self,
-        group_count: int,
-        words_per_group: int,
-        orig_pool: List[dict],
-        synth_pool: List[dict]
-    ) -> Optional[Tuple[List[int], List[int], dict]]:
-        """Build a single puzzle with the specified variant."""
-        if not orig_pool or not synth_pool:
-            return None
+        num_numbers: int,
+        target: int,
+        max_attempts: int = 100
+    ) -> Optional[ExprNode]:
+        """Build a random expression tree that evaluates to target."""
+        if num_numbers == 1:
+            return ExprNode(target)
 
-        used_words = set()
-        answers = []
-        orig_used = []
-        synth_used = []
-        indexes_used = []
+        # Split into left and right subtrees
+        split = self.rng.randint(1, num_numbers - 1)
+        left_nums = split
+        right_nums = num_numbers - split
 
-        # Sample one from each source first
-        first = self._sample_group(orig_pool, words_per_group, used_words)
-        second = self._sample_group(synth_pool, words_per_group, used_words) if first else None
+        # Try different operators
+        ops = OP_SYMBOLS.copy()
+        self.rng.shuffle(ops)
 
-        if not first or not second:
-            return None
-
-        for idx, grp, sampled in (first, second):
-            used_words.update(sampled)
-            answers.append({"answerDescription": grp["description"], "words": sampled})
-            if grp["source"] == "orig":
-                orig_used.append(idx)
-            else:
-                synth_used.append(idx)
-            if isinstance(grp.get("idx"), int):
-                indexes_used.append(grp["idx"])
-
-        # Add additional groups until reaching group_count
-        combined = list(enumerate(orig_pool)) + [(len(orig_pool) + i, g) for i, g in enumerate(synth_pool)]
-        self.rng.shuffle(combined)
-
-        while len(answers) < group_count and combined:
-            global_idx, grp = combined.pop()
-            if len(grp["words"]) < words_per_group:
+        for op in ops:
+            # Find operands that would produce target with this operator
+            left_target, right_target = self._find_operands_for_target(target, op)
+            if left_target is None:
                 continue
-            sampled = self.rng.sample(grp["words"], words_per_group)
-            if any(w in used_words for w in sampled):
+
+            # Recursively build subtrees
+            left_tree = self._build_random_expr_tree(left_nums, left_target)
+            right_tree = self._build_random_expr_tree(right_nums, right_target)
+
+            if left_tree is None or right_tree is None:
                 continue
-            used_words.update(sampled)
-            answers.append({"answerDescription": grp["description"], "words": sampled})
-            if global_idx < len(orig_pool):
-                orig_used.append(global_idx)
-            else:
-                synth_used.append(global_idx - len(orig_pool))
-            if isinstance(grp.get("idx"), int):
-                indexes_used.append(grp["idx"])
 
-        # Require at least one orig and one synth group
-        if not orig_used or not synth_used or len(answers) != group_count:
-            return None
+            return ExprNode(op, left_tree, right_tree)
 
-        # Shuffle answers and words
-        self.rng.shuffle(answers)
-        words_flat = []
-        for ans in answers:
-            words_flat.extend(ans["words"])
-        self.rng.shuffle(words_flat)
-
-        # Build standardized record
-        variant = f"{group_count}x{words_per_group}"
-        canonical_answer = self._format_canonical_answer(answers)
-
-        record = {
-            "index": 0,  # Will be set later
-            "question": {
-                "words": words_flat,
-                "answers": answers,
-            },
-            "answer": canonical_answer,
-            "metadata": {
-                "variant": variant,
-                "total_words": len(words_flat),
-                "group_count": group_count,
-                "words_per_group": words_per_group,
-                "indexes_used": sorted(indexes_used),
-            }
-        }
-
-        return orig_used, synth_used, record
-
-    def _sample_group(
-        self,
-        pool: List[dict],
-        size: int,
-        used_words: set
-    ) -> Optional[Tuple[int, dict, List[str]]]:
-        """Sample a group from the pool with the required size."""
-        if not pool:
-            return None
-        for _ in range(200):
-            idx = self.rng.randrange(len(pool))
-            grp = pool[idx]
-            if len(grp["words"]) < size:
-                continue
-            sampled = self.rng.sample(grp["words"], size)
-            if any(w in used_words for w in sampled):
-                continue
-            return idx, grp, sampled
         return None
 
-    @staticmethod
-    def _pop_indices(lst: List[dict], indices: List[int]) -> None:
-        """Remove elements at specified indices from a list."""
-        for idx in sorted(indices, reverse=True):
-            lst.pop(idx)
+    def _find_operands_for_target(
+        self,
+        target: int,
+        op_symbol: str,
+        max_attempts: int = 1000
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """Find two numbers a and b such that a <op> b == target."""
+        op_func = OPS[op_symbol]
+        lo, hi = self.number_range
 
-    def _format_canonical_answer(self, answers: List[dict]) -> str:
-        """Format the canonical answer string."""
-        groups = []
-        for ans in answers:
-            words_upper = [w.upper() for w in ans["words"]]
-            group_str = "[" + ", ".join(words_upper) + "]"
-            groups.append(group_str)
-        return "{" + ", ".join(groups) + "}"
+        for _ in range(max_attempts):
+            if op_symbol == '+':
+                a = self.rng.randint(lo, hi)
+                b = target - a
+            elif op_symbol == '-':
+                a = self.rng.randint(lo, hi)
+                b = a - target
+            elif op_symbol == '*':
+                if target == 0:
+                    a = 0
+                    b = self.rng.randint(lo, hi)
+                else:
+                    # Find divisors of target
+                    b_candidates = [b for b in range(lo, hi + 1) if b != 0 and target % b == 0]
+                    if not b_candidates:
+                        continue
+                    b = self.rng.choice(b_candidates)
+                    a = target // b
+            elif op_symbol == '/':
+                b_candidates = [b for b in range(lo, hi + 1) if b != 0]
+                if not b_candidates:
+                    continue
+                b = self.rng.choice(b_candidates)
+                a = target * b
+            else:
+                raise ValueError(f"Unknown operator: {op_symbol}")
+
+            # Check if both a and b are within range
+            if lo <= a <= hi and lo <= b <= hi:
+                # Verify to be sure
+                result = op_func(a, b)
+                if result == target:
+                    return a, b
+
+        return None, None
+
+    @staticmethod
+    def _extract_leaf_numbers(node: ExprNode) -> List[int]:
+        """Extract all leaf numbers from the expression tree."""
+        if node.is_leaf():
+            return [node.value]
+        return CountdownManager._extract_leaf_numbers(node.left) + \
+               CountdownManager._extract_leaf_numbers(node.right)
+
+    @staticmethod
+    def _evaluate_expr_tree(node: ExprNode) -> Optional[int]:
+        """Evaluate the expression tree."""
+        if node.is_leaf():
+            return node.value
+        left_val = CountdownManager._evaluate_expr_tree(node.left)
+        right_val = CountdownManager._evaluate_expr_tree(node.right)
+        if left_val is None or right_val is None:
+            return None
+        result = OPS[node.value](left_val, right_val)
+        return result
+
+    @staticmethod
+    def _extract_hints(node: ExprNode) -> List[str]:
+        """Extract all intermediate expression hints (bottom-up)."""
+        if node.is_leaf():
+            return []
+
+        hints = []
+        hints += CountdownManager._extract_hints(node.left)
+        hints += CountdownManager._extract_hints(node.right)
+        hints.append(str(node))
+        return hints
 
     # ========================================================================
     # Train/Test Split
@@ -381,16 +370,14 @@ class ConnectionsManager(DatasetManager):
         """Convert raw record to train/test format with prompt."""
         # Build example for prompt generation
         example = {
-            "words": record["question"]["words"],
-            "answers": record["question"]["answers"],
-            "contest": record["metadata"].get("contest", ""),
-            "group_count": record["metadata"]["group_count"],
-            "words_per_group": record["metadata"]["words_per_group"],
-            "total_words": record["metadata"]["total_words"],
+            "target": record["question"]["target"],
+            "numbers": record["question"]["numbers"],
+            "num_numbers": record["metadata"]["num_operands"],
         }
 
         # Generate prompt
-        prompt = generate_connections_prompt(
+        from data.prompt_loader import generate_countdown_prompt
+        prompt = generate_countdown_prompt(
             example,
             template_path=self.prompt_template
         )
@@ -493,7 +480,7 @@ class ConnectionsManager(DatasetManager):
             for j, (ex, gen_text) in enumerate(zip(batch, generated_texts)):
                 cot, cot_length = self._clean_cot(gen_text, model)
 
-                # Check correctness (load raw dataset to get answer)
+                # Check correctness
                 is_correct = self._check_correctness(ex["index"], cot)
 
                 # Update the example in the dict
@@ -506,12 +493,11 @@ class ConnectionsManager(DatasetManager):
 
             # Write immediately after each batch
             if in_place:
-                # Reconstruct the list in original order
                 all_examples = [examples_by_index[ex["index"]] for ex in examples]
                 self._write_jsonl(train_path, all_examples)
                 batch_count = len(batch)
                 total_processed += batch_count
-                print(f"Saved batch to {train_path} ({batch_count} new, {total_processed} total processed)")
+                print(f"Saved batch ({batch_count} new, {total_processed} total processed)")
 
         # Final write if output_file specified
         if output_file and not in_place:
@@ -519,7 +505,6 @@ class ConnectionsManager(DatasetManager):
             self._write_jsonl(output_file, updated_examples)
             print(f"Wrote {len(updated_examples)} generations to {output_file}")
 
-        # Return all examples with generations
         return [ex for ex in examples_by_index.values() if ex.get("cot")]
 
     def _init_model(
@@ -583,9 +568,10 @@ class ConnectionsManager(DatasetManager):
             for line in f:
                 record = json.loads(line)
                 if record["index"] == index:
-                    ground_truth = record["answer"]
+                    target = record["question"]["target"]
+                    numbers = record["question"]["numbers"]
                     predicted = self._extract_answer(cot)
-                    return self._compare_answers(predicted, ground_truth, record["question"]["answers"])
+                    return self._compare_answers(predicted, target, numbers)
         return False
 
     def _extract_answer(self, text: str) -> Optional[str]:
@@ -596,7 +582,7 @@ class ConnectionsManager(DatasetManager):
             return match.group(1).strip()
 
         # Fallback: look for Answer: pattern
-        match = re.search(r"Answer:\s*(\{.*?\})", text, re.DOTALL)
+        match = re.search(r"Answer:\s*(.+?)(?:\n|$)", text)
         if match:
             return match.group(1).strip()
 
@@ -605,49 +591,57 @@ class ConnectionsManager(DatasetManager):
     def _compare_answers(
         self,
         predicted: Optional[str],
-        ground_truth: str,
-        answers: List[dict]
+        target: int,
+        numbers: List[int]
     ) -> bool:
-        """Compare predicted answer with ground truth."""
+        """Compare predicted expression with target."""
         if not predicted:
             return False
 
-        # Normalize both
-        pred_norm = self._normalize_answer(predicted)
-        gt_norm = self._normalize_answer(ground_truth)
-
-        if pred_norm == gt_norm:
-            return True
-
-        # Try parsing as groups
         try:
-            pred_groups = self._parse_answer_groups(predicted)
-            true_groups = [sorted([w.upper() for w in g["words"]]) for g in answers]
-
-            pred_groups.sort()
-            true_groups.sort()
-
-            return pred_groups == true_groups
+            # Parse and evaluate the expression
+            result = self._evaluate_expression(predicted, numbers)
+            return result == target
         except Exception:
             return False
 
-    @staticmethod
-    def _normalize_answer(answer: str) -> str:
-        """Normalize answer for comparison."""
-        # Remove whitespace, lowercase
-        return re.sub(r"\s+", "", answer.lower())
+    def _evaluate_expression(self, expr: str, available_numbers: List[int]) -> Optional[int]:
+        """
+        Evaluate an expression and check if it uses only available numbers.
 
-    @staticmethod
-    def _parse_answer_groups(answer: str) -> List[List[str]]:
-        """Parse answer into groups of words."""
-        # Extract all groups [word1, word2, ...]
-        groups = []
-        pattern = r"\[(.*?)\]"
-        matches = re.findall(pattern, answer, re.DOTALL)
-        for match in matches:
-            words = [w.strip().upper() for w in match.split(",")]
-            groups.append(sorted(words))
-        return groups
+        Returns the result if valid, None otherwise.
+        """
+        try:
+            # Remove whitespace
+            expr = expr.strip()
+
+            # Extract all numbers from the expression
+            numbers_in_expr = [int(n) for n in re.findall(r'\b\d+\b', expr)]
+
+            # Check that all numbers used are from the available list
+            available_copy = available_numbers.copy()
+            for num in numbers_in_expr:
+                if num in available_copy:
+                    available_copy.remove(num)
+                else:
+                    return None  # Number not available or used twice
+
+            # Evaluate the expression
+            # Create a safe evaluation environment
+            allowed_names = {}
+            allowed_ops = {
+                '__builtins__': {},
+            }
+
+            result = eval(expr, allowed_ops, allowed_names)
+
+            # Check if result is an integer
+            if isinstance(result, (int, float)) and result == int(result):
+                return int(result)
+
+            return None
+        except Exception:
+            return None
 
     def _find_processed_indices(self, examples: List[dict]) -> set:
         """Find indices that already have CoT generations."""
@@ -657,25 +651,6 @@ class ConnectionsManager(DatasetManager):
                 processed.add(ex["index"])
         return processed
 
-    def _merge_examples(
-        self,
-        original: List[dict],
-        updated: List[dict]
-    ) -> List[dict]:
-        """Merge updated examples back into original list."""
-        # Create index map
-        updated_map = {ex["index"]: ex for ex in updated}
-
-        # Merge
-        result = []
-        for ex in original:
-            if ex["index"] in updated_map:
-                result.append(updated_map[ex["index"]])
-            else:
-                result.append(ex)
-
-        return result
-
     # ========================================================================
     # SFT Training
     # ========================================================================
@@ -683,7 +658,7 @@ class ConnectionsManager(DatasetManager):
     def run_sft(
         self,
         model_name: str = "Qwen/Qwen2.5-1.5B",
-        output_dir: str = "checkpoints/connections_sft",
+        output_dir: str = "checkpoints/countdown_sft",
         num_epochs: int = 3,
         batch_size: int = 4,
         learning_rate: float = 2e-5,
@@ -778,8 +753,10 @@ class ConnectionsManager(DatasetManager):
             "prompt": <list of messages>,
             "reward_model": {
                 "ground_truth": {
-                    "solution_text": <str>,
-                    "answers": [<list of acceptable formats>],
+                    "target": <int>,
+                    "numbers": <list>,
+                    "solution_expr": <str>,
+                    "hint_exprs": <list>,
                 }
             },
             "metadata": <dict>,
@@ -830,8 +807,10 @@ class ConnectionsManager(DatasetManager):
             # Build reward model data
             reward_data = {
                 "ground_truth": {
-                    "solution_text": raw_record["answer"],
-                    "answers": raw_record["question"]["answers"],
+                    "target": raw_record["question"]["target"],
+                    "numbers": raw_record["question"]["numbers"],
+                    "solution_expr": raw_record["answer"],
+                    "hint_exprs": raw_record["metadata"]["hint_exprs"],
                 }
             }
 
@@ -851,18 +830,17 @@ class ConnectionsManager(DatasetManager):
         rl_val = rl_records[train_size:]
 
         # Convert to DataFrame and save as parquet
-        # Important: Convert nested structures to proper format for parquet
         import pyarrow as pa
         import pyarrow.parquet as pq
 
         def prepare_records_for_parquet(records):
-            """Convert records to format suitable for parquet with nested structures."""
+            """Convert records to format suitable for parquet."""
             prepared = []
             for rec in records:
                 prepared.append({
-                    'prompt': rec['prompt'],  # Will be stored as list[struct]
-                    'reward_model': json.dumps(rec['reward_model']),  # Serialize to JSON string
-                    'metadata': json.dumps(rec['metadata']),  # Serialize to JSON string
+                    'prompt': rec['prompt'],
+                    'reward_model': json.dumps(rec['reward_model']),
+                    'metadata': json.dumps(rec['metadata']),
                     'index': rec['index']
                 })
             return prepared
@@ -878,7 +856,7 @@ class ConnectionsManager(DatasetManager):
         rl_train_df = pd.DataFrame(rl_train_prepared)
         rl_val_df = pd.DataFrame(rl_val_prepared)
 
-        # Define schema to ensure prompt is stored correctly
+        # Define schema
         schema = pa.schema([
             ('prompt', pa.list_(pa.struct([
                 ('role', pa.string()),
@@ -904,9 +882,9 @@ class ConnectionsManager(DatasetManager):
 
 
 def main():
-    """CLI for running the ConnectionsManager pipeline."""
+    """CLI for running the CountdownManager pipeline."""
     parser = argparse.ArgumentParser(
-        description="Manage Connections dataset pipeline"
+        description="Manage Countdown dataset pipeline"
     )
     parser.add_argument(
         "command",
@@ -921,28 +899,32 @@ def main():
         help="Command to run"
     )
     parser.add_argument("--path", type=Path, help="Dataset path")
-    parser.add_argument("--groups", type=Path, help="Path to groups.jsonl")
-    parser.add_argument("--synthetic-groups", type=Path, help="Path to synthetic_groups.jsonl")
-    parser.add_argument("--count-2x3", type=int, default=500, help="Number of 2x3 puzzles (default: 500)")
-    parser.add_argument("--count-3x2", type=int, default=500, help="Number of 3x2 puzzles (default: 500)")
-    parser.add_argument("--count-3x3", type=int, default=500, help="Number of 3x3 puzzles (default: 500)")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-1.5B", help="Model name for generation")
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for generation")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-1.5B", help="Model name")
+    parser.add_argument("--batch-size", type=int, default=8, help="Batch size")
     parser.add_argument("--num-samples", type=int, help="Number of samples for generation")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--tensor-parallel-size", type=int, default=1, help="Number of GPUs for tensor parallelism")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
 
+    # Dataset generation parameters
+    parser.add_argument("--num-4", type=int, default=500, help="Number of 4-operand examples")
+    parser.add_argument("--num-5", type=int, default=500, help="Number of 5-operand examples")
+    parser.add_argument("--num-6", type=int, default=500, help="Number of 6-operand examples")
+
     args = parser.parse_args()
 
     # Initialize manager
-    manager = ConnectionsManager(
+    num_samples = {}
+    if args.num_4 > 0:
+        num_samples[4] = args.num_4
+    if args.num_5 > 0:
+        num_samples[5] = args.num_5
+    if args.num_6 > 0:
+        num_samples[6] = args.num_6
+
+    manager = CountdownManager(
         path=args.path,
-        groups_path=args.groups,
-        synthetic_groups_path=args.synthetic_groups,
-        count_2x3=args.count_2x3,
-        count_3x2=args.count_3x2,
-        count_3x3=args.count_3x3,
+        num_samples=num_samples if num_samples else None,
         seed=args.seed
     )
 
@@ -972,9 +954,9 @@ def main():
         manager.create_dataset()
         manager.create_split()
         print("\nNote: Generation and SFT require models. Run them separately:")
-        print("  python -m data.connections.manager create_generations")
-        print("  python -m data.connections.manager run_sft")
-        print("  python -m data.connections.manager create_rl_data")
+        print("  python -m data.countdown.manager create_generations")
+        print("  python -m data.countdown.manager run_sft")
+        print("  python -m data.countdown.manager create_rl_data")
 
 
 if __name__ == "__main__":
