@@ -16,10 +16,11 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import torch
+# Don't import torch or torch-dependent libraries here to avoid CUDA initialization issues with VLLM multiprocessing
+# import torch
 import pandas as pd
 from datasets import load_dataset
-from trl import SFTTrainer, SFTConfig
+# from trl import SFTTrainer, SFTConfig  # TRL imports torch - lazy import in run_sft instead
 from vllm import LLM, SamplingParams
 
 from data.dataset_manager import DatasetManager
@@ -719,10 +720,44 @@ class ConnectionsManager(DatasetManager):
             raise ValueError("No correct examples found. Run create_generations() first.")
 
         # Preprocess for SFT
+        debug_printed = [False]  # Use list to allow modification in nested function
+
         def preprocess(example):
+            # Split the prompt to separate assistant prefix
+            orig_prompt = example["prompt"]
+            orig_cot = example["cot"]
+
+            prompt = orig_prompt
+            completion = orig_cot
+
+            # Debug print for first example
+            if not debug_printed[0]:
+                print("\n" + "="*80)
+                print("DEBUG: First example before/after preprocessing")
+                print("="*80)
+                print(f"ORIGINAL PROMPT (last 200 chars):\n{repr(orig_prompt[-200:])}\n")
+                print(f"ORIGINAL COT (first 100 chars):\n{repr(orig_cot[:100])}\n")
+
+            # The prompt ends with "Assistant: <think> Let me solve this step by step."
+            # We want to keep everything up to "Assistant: " in prompt
+            # and prepend the assistant prefix to the completion with a space for proper grammar
+            if "\n\nAssistant: " in prompt:
+                parts = prompt.rsplit("\n\nAssistant: ", 1)
+                prompt = parts[0] + "\n\nAssistant: "
+                assistant_prefix = parts[1]  # "<think> Let me solve this step by step."
+                completion = assistant_prefix + completion
+
+            # Continue debug print
+            if not debug_printed[0]:
+                print(f"NEW PROMPT (last 100 chars):\n{repr(prompt[-100:])}\n")
+                print(f"NEW COMPLETION (first 150 chars):\n{repr(completion[:150])}\n")
+                print(f"CONCATENATED (relevant portion):\n{repr((prompt[-50:] + completion[:100]))}\n")
+                print("="*80 + "\n")
+                debug_printed[0] = True
+
             return {
-                "prompt": example["prompt"],
-                "completion": example["cot"]
+                "prompt": prompt,
+                "completion": completion
             }
 
         processed = filtered.map(
@@ -730,10 +765,24 @@ class ConnectionsManager(DatasetManager):
             remove_columns=["cot", "cot_metadata"]
         )
 
+        # Print one example for debugging
+        if len(processed) > 0:
+            print("\n" + "="*80)
+            print("Sample training example (first example):")
+            print("="*80)
+            example = processed[0]
+            print(f"PROMPT:\n{example['prompt']}")
+            print(f"\nCOMPLETION:\n{example['completion'][:500]}..." if len(example['completion']) > 500 else f"\nCOMPLETION:\n{example['completion']}")
+            print("="*80 + "\n")
+
         # Split for validation
         split_dataset = processed.train_test_split(test_size=0.1, seed=self.seed)
 
         # Setup training
+        # Lazy import torch and TRL to avoid CUDA initialization issues with VLLM
+        import torch
+        from trl import SFTTrainer, SFTConfig
+
         training_args = SFTConfig(
             output_dir=output_dir,
             num_train_epochs=num_epochs,
@@ -823,9 +872,26 @@ class ConnectionsManager(DatasetManager):
             raw_record = raw_data[idx]
 
             # Convert prompt to chat messages format
-            messages = [
-                {"role": "user", "content": ex["prompt"]}
-            ]
+            # The prompt is formatted as: "System: ...\n\nUser: ...\n\nAssistant: ..."
+            prompt_text = ex["prompt"]
+
+            # Parse the formatted prompt
+            try:
+                parts = prompt_text.split("\n\n")
+                system_part = parts[0].replace("System: ", "")
+                user_part = parts[1].replace("User: ", "")
+                assistant_part = parts[2].replace("Assistant: ", "")
+
+                messages = [
+                    {"role": "system", "content": system_part},
+                    {"role": "user", "content": user_part},
+                    {"role": "assistant", "content": assistant_part}
+                ]
+            except:
+                # Fallback for old format
+                messages = [
+                    {"role": "user", "content": prompt_text}
+                ]
 
             # Build reward model data
             reward_data = {
@@ -932,6 +998,12 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--tensor-parallel-size", type=int, default=1, help="Number of GPUs for tensor parallelism")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
+    parser.add_argument("--output-dir", type=str, default="checkpoints/connections_sft", help="Output directory for SFT checkpoints")
+
+    # Training arguments
+    parser.add_argument("--num-epochs", type=int, default=3, help="Number of training epochs")
+    parser.add_argument("--sft-batch-size", type=int, default=4, help="Batch size for SFT training")
+    parser.add_argument("--learning-rate", type=float, default=2e-5, help="Learning rate for SFT")
 
     args = parser.parse_args()
 
@@ -962,7 +1034,13 @@ def main():
         )
 
     elif args.command == "run_sft":
-        manager.run_sft(model_name=args.model)
+        manager.run_sft(
+            model_name=args.model,
+            output_dir=args.output_dir,
+            num_epochs=args.num_epochs,
+            batch_size=args.sft_batch_size,
+            learning_rate=args.learning_rate,
+        )
 
     elif args.command == "create_rl_data":
         manager.create_rl_data()

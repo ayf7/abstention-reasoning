@@ -16,10 +16,11 @@ import operator
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import torch
+# Don't import torch or torch-dependent libraries here to avoid CUDA initialization before VLLM multiprocessing
+# import torch
 import pandas as pd
 from datasets import load_dataset
-from trl import SFTTrainer, SFTConfig
+# from trl import SFTTrainer, SFTConfig  # TRL imports torch - lazy import in run_sft instead
 from vllm import LLM, SamplingParams
 
 from data.dataset_manager import DatasetManager
@@ -651,6 +652,201 @@ class CountdownManager(DatasetManager):
                 processed.add(ex["index"])
         return processed
 
+    def retry_failed_generations(
+        self,
+        model_name: str = "Qwen/Qwen2.5-3B",
+        batch_size: int = 8,
+        max_new_tokens: int = 2048,
+        temperature: float = 0.8,
+        top_p: float = 0.9,
+        num_retries: int = 1,
+        max_len: int | None = None,
+        tensor_parallel_size: int = 1,
+        gpu_memory_utilization: float = 0.9,
+    ):
+        """
+        Retry CoT generation for failed examples in train.jsonl.
+
+        Identifies examples where cot_metadata.correct_answer == False
+        or where the CoT is correct but exceeds max_len tokens.
+        Regenerates them with potentially higher temperature for variation.
+
+        Args:
+            model_name: Model to use for generation
+            batch_size: Batch size for generation
+            max_new_tokens: Maximum tokens to generate
+            temperature: Temperature for sampling (higher = more variation)
+            top_p: Top-p for nucleus sampling
+            num_retries: Number of passes through failed examples
+            max_len: Maximum CoT token length; correct CoTs over this are retried (optional)
+            tensor_parallel_size: Number of GPUs for tensor parallelism
+            gpu_memory_utilization: GPU memory utilization ratio
+        """
+        train_path = self.artifact_dir / "train.jsonl"
+        if not train_path.exists():
+            raise FileNotFoundError(
+                f"{train_path} not found. Run create_split() first."
+            )
+
+        print(f"Retrying failed CoT generations for {train_path}...")
+        print(f"Model: {model_name}, Batch size: {batch_size}, Max tokens: {max_new_tokens}")
+        print(f"Temperature: {temperature}, Num retries: {num_retries}")
+        if max_len is not None:
+            print(f"Max CoT length: {max_len} tokens (correct CoTs over this will be retried)")
+        print(f"Tensor parallel size: {tensor_parallel_size} GPU(s)")
+
+        # Load model with VLLM
+        model = self._init_model(model_name, tensor_parallel_size, gpu_memory_utilization)
+
+        # Load all examples
+        with train_path.open("r", encoding="utf-8") as f:
+            all_examples = [json.loads(line) for line in f if line.strip()]
+
+        # Create index map for fast lookups
+        examples_by_index = {ex["index"]: ex for ex in all_examples}
+
+        # Run multiple retry passes
+        for retry_num in range(num_retries):
+            print(f"\n{'='*60}")
+            print(f"Retry pass {retry_num + 1}/{num_retries}")
+            print(f"{'='*60}")
+
+            # Find failed examples (incorrect, missing CoT, or over max_len)
+            failed_examples = []
+            for ex in all_examples:
+                cot_meta = ex.get("cot_metadata", {})
+                is_failed = (
+                    not ex.get("cot") or  # No CoT at all
+                    not cot_meta or  # No metadata
+                    cot_meta.get("correct_answer") is False  # Incorrect answer
+                )
+
+                # Also retry correct examples that are over max_len
+                if not is_failed and max_len is not None:
+                    cot_length = cot_meta.get("cot_token_length")
+                    if cot_length is not None and cot_length > max_len:
+                        is_failed = True
+
+                if is_failed:
+                    failed_examples.append(ex)
+
+            if not failed_examples:
+                if max_len is not None:
+                    print(f"No failed examples found. All {len(all_examples)} examples are correct and under max_len!")
+                else:
+                    print(f"No failed examples found. All {len(all_examples)} examples are correct!")
+                break
+
+            print(f"Found {len(failed_examples)} examples to retry")
+
+            # Count before retry
+            correct_before = sum(
+                1 for ex in all_examples
+                if ex.get("cot_metadata", {}).get("correct_answer") is True
+            )
+
+            if max_len is not None:
+                correct_and_under_len = sum(
+                    1 for ex in all_examples
+                    if ex.get("cot_metadata", {}).get("correct_answer") is True
+                    and ex.get("cot_metadata", {}).get("cot_token_length", 0) <= max_len
+                )
+                print(f"Before retry: {correct_before}/{len(all_examples)} correct, "
+                      f"{correct_and_under_len}/{len(all_examples)} correct & under {max_len} tokens")
+            else:
+                print(f"Correct examples before retry: {correct_before}/{len(all_examples)}")
+
+            # Generate in batches
+            total_improved = 0
+            for i in range(0, len(failed_examples), batch_size):
+                batch = failed_examples[i:i + batch_size]
+
+                print(f"\nProcessing batch {i//batch_size + 1}/{(len(failed_examples)-1)//batch_size + 1}")
+                print(f"  Indices: {[ex['index'] for ex in batch]}")
+
+                # Generate
+                prompts = [ex["prompt"] for ex in batch]
+                generated_texts = self._generate_batch(
+                    model, prompts,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p
+                )
+
+                # Process generations and update
+                batch_improved = 0
+                for ex, gen_text in zip(batch, generated_texts):
+                    cot, cot_length = self._clean_cot(gen_text, model)
+
+                    # Check correctness
+                    is_correct = self._check_correctness(ex["index"], cot)
+
+                    # Track improvement
+                    was_correct = ex.get("cot_metadata", {}).get("correct_answer") is True
+                    if is_correct and not was_correct:
+                        batch_improved += 1
+                        total_improved += 1
+
+                    # Update the example in the dict
+                    examples_by_index[ex["index"]]["cot"] = cot
+                    examples_by_index[ex["index"]]["cot_metadata"] = {
+                        "correct_answer": is_correct,
+                        "cot_token_length": cot_length,
+                    }
+
+                # Write immediately after each batch
+                updated_examples = [examples_by_index[ex["index"]] for ex in all_examples]
+                self._write_jsonl(train_path, updated_examples)
+                print(f"  Saved batch ({batch_improved} improved in this batch)")
+
+            # Count after retry
+            correct_after = sum(
+                1 for ex in all_examples
+                if examples_by_index[ex["index"]].get("cot_metadata", {}).get("correct_answer") is True
+            )
+
+            print(f"\nRetry pass {retry_num + 1} complete:")
+            print(f"  Improved: {total_improved} examples")
+
+            if max_len is not None:
+                correct_and_under_len_after = sum(
+                    1 for ex in all_examples
+                    if examples_by_index[ex["index"]].get("cot_metadata", {}).get("correct_answer") is True
+                    and examples_by_index[ex["index"]].get("cot_metadata", {}).get("cot_token_length", 0) <= max_len
+                )
+                print(f"  Correct after: {correct_after}/{len(all_examples)} ({correct_after/len(all_examples):.2%})")
+                print(f"  Correct & under {max_len} tokens: {correct_and_under_len_after}/{len(all_examples)} ({correct_and_under_len_after/len(all_examples):.2%})")
+            else:
+                print(f"  Correct after: {correct_after}/{len(all_examples)}")
+                print(f"  Accuracy: {correct_after/len(all_examples):.2%}")
+
+            # Update all_examples for next iteration
+            all_examples = [examples_by_index[ex["index"]] for ex in all_examples]
+
+        # Final summary
+        final_correct = sum(
+            1 for ex in all_examples
+            if examples_by_index[ex["index"]].get("cot_metadata", {}).get("correct_answer") is True
+        )
+
+        print(f"\n{'='*60}")
+        print(f"Retry complete after {num_retries} pass(es)")
+
+        if max_len is not None:
+            final_correct_and_under = sum(
+                1 for ex in all_examples
+                if examples_by_index[ex["index"]].get("cot_metadata", {}).get("correct_answer") is True
+                and examples_by_index[ex["index"]].get("cot_metadata", {}).get("cot_token_length", 0) <= max_len
+            )
+            print(f"Final correct: {final_correct}/{len(all_examples)} ({final_correct/len(all_examples):.2%})")
+            print(f"Final correct & under {max_len} tokens: {final_correct_and_under}/{len(all_examples)} ({final_correct_and_under/len(all_examples):.2%})")
+        else:
+            print(f"Final accuracy: {final_correct}/{len(all_examples)} ({final_correct/len(all_examples):.2%})")
+
+        print(f"{'='*60}")
+
+        return [examples_by_index[ex["index"]] for ex in all_examples]
+
     # ========================================================================
     # SFT Training
     # ========================================================================
@@ -695,9 +891,23 @@ class CountdownManager(DatasetManager):
 
         # Preprocess for SFT
         def preprocess(example):
+            # Split the prompt to separate assistant prefix
+            prompt = example["prompt"]
+            completion = example["cot"]
+
+            # The prompt ends with "Assistant: <think> Let me solve this step by step."
+            # We want to keep everything up to "Assistant: " in prompt
+            # and prepend the assistant prefix to the completion (space already in data)
+            if "\n\nAssistant: " in prompt:
+                parts = prompt.rsplit("\n\nAssistant: ", 1)
+                prompt = parts[0] + "\n\nAssistant: "
+                assistant_prefix = parts[1]  # "<think> Let me solve this step by step. " (with trailing space)
+                # Don't add extra space - it's already in the assistant_prefix from the data
+                completion = assistant_prefix + completion
+
             return {
-                "prompt": example["prompt"],
-                "completion": example["cot"]
+                "prompt": prompt,
+                "completion": completion
             }
 
         processed = filtered.map(
@@ -705,10 +915,24 @@ class CountdownManager(DatasetManager):
             remove_columns=["cot", "cot_metadata"]
         )
 
+        # Print one example for debugging
+        if len(processed) > 0:
+            print("\n" + "="*80)
+            print("Sample training example (first example):")
+            print("="*80)
+            example = processed[0]
+            print(f"PROMPT:\n{example['prompt']}")
+            print(f"\nCOMPLETION:\n{example['completion'][:500]}..." if len(example['completion']) > 500 else f"\nCOMPLETION:\n{example['completion']}")
+            print("="*80 + "\n")
+
         # Split for validation
         split_dataset = processed.train_test_split(test_size=0.1, seed=self.seed)
 
         # Setup training
+        # Lazy import torch and TRL to avoid CUDA initialization issues with VLLM
+        import torch
+        from trl import SFTTrainer, SFTConfig
+
         training_args = SFTConfig(
             output_dir=output_dir,
             num_train_epochs=num_epochs,
@@ -800,9 +1024,26 @@ class CountdownManager(DatasetManager):
             raw_record = raw_data[idx]
 
             # Convert prompt to chat messages format
-            messages = [
-                {"role": "user", "content": ex["prompt"]}
-            ]
+            # The prompt is formatted as: "System: ...\n\nUser: ...\n\nAssistant: ..."
+            prompt_text = ex["prompt"]
+
+            # Parse the formatted prompt
+            try:
+                parts = prompt_text.split("\n\n")
+                system_part = parts[0].replace("System: ", "")
+                user_part = parts[1].replace("User: ", "")
+                assistant_part = parts[2].replace("Assistant: ", "")
+
+                messages = [
+                    {"role": "system", "content": system_part},
+                    {"role": "user", "content": user_part},
+                    {"role": "assistant", "content": assistant_part}
+                ]
+            except:
+                # Fallback for old format
+                messages = [
+                    {"role": "user", "content": prompt_text}
+                ]
 
             # Build reward model data
             reward_data = {
@@ -892,6 +1133,7 @@ def main():
             "create_dataset",
             "create_split",
             "create_generations",
+            "retry_failed_generations",
             "run_sft",
             "create_rl_data",
             "run_all"
@@ -905,6 +1147,15 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--tensor-parallel-size", type=int, default=1, help="Number of GPUs for tensor parallelism")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
+    parser.add_argument("--temperature", type=float, default=0.8, help="Temperature for generation (default: 0.8)")
+    parser.add_argument("--num-retries", type=int, default=1, help="Number of retry passes for failed generations (default: 1)")
+    parser.add_argument("--max-len", type=int, help="Maximum CoT token length; correct CoTs over this are retried (optional)")
+    parser.add_argument("--output-dir", type=str, default="checkpoints/countdown_sft", help="Output directory for SFT checkpoints")
+
+    # Training arguments
+    parser.add_argument("--num-epochs", type=int, default=3, help="Number of training epochs")
+    parser.add_argument("--sft-batch-size", type=int, default=4, help="Batch size for SFT training")
+    parser.add_argument("--learning-rate", type=float, default=2e-5, help="Learning rate for SFT")
 
     # Dataset generation parameters
     parser.add_argument("--num-4", type=int, default=500, help="Number of 4-operand examples")
@@ -943,8 +1194,25 @@ def main():
             gpu_memory_utilization=args.gpu_memory_utilization,
         )
 
+    elif args.command == "retry_failed_generations":
+        manager.retry_failed_generations(
+            model_name=args.model,
+            batch_size=args.batch_size,
+            temperature=args.temperature,
+            num_retries=args.num_retries,
+            max_len=args.max_len,
+            tensor_parallel_size=args.tensor_parallel_size,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+        )
+
     elif args.command == "run_sft":
-        manager.run_sft(model_name=args.model)
+        manager.run_sft(
+            model_name=args.model,
+            output_dir=args.output_dir,
+            num_epochs=args.num_epochs,
+            batch_size=args.sft_batch_size,
+            learning_rate=args.learning_rate,
+        )
 
     elif args.command == "create_rl_data":
         manager.create_rl_data()
