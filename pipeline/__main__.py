@@ -6,8 +6,9 @@ Usage:
 
 Commands:
     list_tasks                  List available tasks
+    list_methods                List available methods for a task
     create_primitives           Generate raw puzzle data
-    create_prompts              Create prompts from primitives (split logic defined by task)
+    create_prompts              Create prompts from primitives
     generate                    Run model on prompts to create dataset
     train_sft                   Train SFT model on generated dataset
     train_rl                    Train RL model using verl (GRPO)
@@ -16,62 +17,30 @@ Commands:
     evaluate                    Evaluate model and compute metrics
 
 Examples:
-    # List available tasks
+    # List available tasks and methods
     python -m pipeline list_tasks
+    python -m pipeline list_methods --task countdown
 
-    # Generate primitives
-    python -m pipeline create_primitives --task countdown --output artifacts/countdown/primitives.json
+    # Full workflow with --method (auto-derived paths)
+    python -m pipeline create_primitives --task countdown --num-puzzles 5000
+    python -m pipeline create_prompts --task countdown --method simple_abstention
+    python -m pipeline generate --task countdown --method simple_abstention --model Qwen/Qwen3-14B
+    python -m pipeline train_sft --task countdown --method simple_abstention --base-model Qwen/Qwen2.5-3B
+    python -m pipeline train_rl --task countdown --method simple_abstention
+    python -m pipeline evaluate --task countdown --method simple_abstention --model sft
+    python -m pipeline evaluate --task countdown --method simple_abstention --model rl
 
-    # Create prompts for all splits at once
-    python -m pipeline create_prompts --task countdown \\
-        --primitives artifacts/countdown/primitives.json \\
-        --output artifacts/countdown/prompts
-
-    # Or create prompts for a single split
-    python -m pipeline create_prompts --task countdown \\
-        --primitives artifacts/countdown/primitives.json \\
-        --output artifacts/countdown/prompts/eval.json \\
-        --split eval
-
-    # Generate dataset
-    python -m pipeline generate --task countdown \\
-        --prompts artifacts/countdown/prompts/sft.json \\
-        --output artifacts/countdown/datasets/sft_qwen3-14b.json \\
-        --model Qwen/Qwen3-14B
-
-    # Train SFT model
-    python -m pipeline train_sft --task countdown \\
-        --dataset artifacts/countdown/datasets/sft_qwen3-14b.json \\
-        --output artifacts/countdown/models/sft \\
-        --base-model Qwen/Qwen2.5-1.5B
-
-    # Train RL model
-    python -m pipeline train_rl --task countdown \\
-        --prompts artifacts/countdown/prompts/rl.parquet \\
-        --sft-model artifacts/countdown/models/sft \\
-        --output artifacts/countdown/models/rl
-
-    # Train classifier
-    python -m pipeline train_classifier --task countdown \\
-        --dataset artifacts/countdown/datasets/classifier_sft.json \\
-        --output artifacts/countdown/models/classifier \\
-        --base-model Qwen/Qwen2.5-1.5B
-
-    # Convert FSDP checkpoint to HuggingFace format
-    python -m pipeline convert_checkpoint \\
-        --checkpoint artifacts/countdown/models/rl/2026-01-11_.../global_step_100/actor
-
-    # Evaluate
-    python -m pipeline evaluate --task countdown \\
-        --prompts artifacts/countdown/prompts/eval.json \\
-        --output artifacts/countdown/results/eval_sft.json \\
-        --model artifacts/countdown/models/sft
+    # Artifacts are organized by method:
+    # artifacts/countdown/primitives.json           (shared)
+    # artifacts/countdown/simple_abstention/        (method-specific)
+    #   prompts/, datasets/, models/, results/
 """
 
 import argparse
 from pathlib import Path
 
 from pipeline.tasks import list_tasks, get_task
+from pipeline.core.method import Method
 from pipeline import commands
 
 
@@ -83,11 +52,24 @@ def cmd_list_tasks(args):
         print(f"  - {task}")
 
 
+def cmd_list_methods(args):
+    """List available methods for a task."""
+    methods = Method.list_methods(args.task)
+    if methods:
+        print(f"Available methods for '{args.task}':")
+        for method in methods:
+            print(f"  - {method}")
+    else:
+        print(f"No methods found for task '{args.task}'")
+        print(f"Create method configs in: pipeline/configs/methods/{args.task}/")
+
+
 def cmd_create_primitives(args):
     """Create primitives."""
+    output_path = Path(args.output) if args.output else None
     commands.create_primitives(
         task_name=args.task,
-        output_path=Path(args.output),
+        output_path=output_path,
         num_puzzles=args.num_puzzles,
         seed=args.seed,
     )
@@ -95,15 +77,15 @@ def cmd_create_primitives(args):
 
 def cmd_create_prompts(args):
     """Create prompts."""
-    # Template path is optional - defaults to task's template for this split
-    template_path = Path(args.template) if args.template else None
+    output_dir = Path(args.output) if args.output else None
+    primitives_path = Path(args.primitives) if args.primitives else None
 
     commands.create_prompts(
         task_name=args.task,
-        primitives_path=Path(args.primitives),
-        output_dir=Path(args.output),
+        method_name=args.method,
+        primitives_path=primitives_path,
+        output_dir=output_dir,
         split_name=args.split,
-        template_path=template_path,
         seed=args.seed,
         include_assistant_prefix=not args.no_assistant_prefix,
     )
@@ -111,43 +93,67 @@ def cmd_create_prompts(args):
 
 def cmd_generate(args):
     """Generate dataset."""
+    prompts_path = Path(args.prompts) if args.prompts else None
+    output_path = Path(args.output) if args.output else None
+
     commands.generate(
         task_name=args.task,
-        prompts_path=Path(args.prompts),
-        output_path=Path(args.output),
         model_name=args.model,
+        method_name=args.method,
+        prompts_path=prompts_path,
+        output_path=output_path,
+        split=args.split,
         batch_size=args.batch_size,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_p=args.top_p,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        verbose=args.verbose,
+        retry_incorrect=args.retry_incorrect,
     )
 
 
 def cmd_evaluate(args):
     """Evaluate model."""
+    prompts_path = Path(args.prompts) if args.prompts else None
+    output_path = Path(args.output) if args.output else None
+
     commands.evaluate(
         task_name=args.task,
-        prompts_path=Path(args.prompts),
-        output_path=Path(args.output),
         model_name=args.model,
+        method_name=args.method,
+        prompts_path=prompts_path,
+        output_path=output_path,
         batch_size=args.batch_size,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_p=args.top_p,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        verbose=args.verbose,
+    )
+
+
+def cmd_analyze(args):
+    """Analyze dataset accuracy by variant."""
+    commands.analyze(
+        dataset_path=Path(args.dataset),
+        task_name=getattr(args, "task", None),
     )
 
 
 def cmd_train_sft(args):
     """Train SFT model."""
+    dataset_path = Path(args.dataset) if args.dataset else None
+    output_path = Path(args.output) if args.output else None
+
     commands.train_sft(
         task_name=args.task,
-        dataset_path=Path(args.dataset),
-        output_path=Path(args.output),
         base_model=args.base_model,
+        method_name=args.method,
+        dataset_path=dataset_path,
+        output_path=output_path,
         epochs=args.epochs,
         batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -159,19 +165,26 @@ def cmd_train_sft(args):
         logging_steps=args.logging_steps,
         bf16=not args.no_bf16,
         report_to=args.report_to,
+        include_abstained=not args.no_abstained,
     )
 
 
 def cmd_train_rl(args):
     """Train RL model using verl."""
+    train_prompts_path = Path(args.train_prompts) if args.train_prompts else None
+    val_prompts_path = Path(args.val_prompts) if args.val_prompts else None
+    sft_model_path = Path(args.sft_model) if args.sft_model else None
+    output_path = Path(args.output) if args.output else None
     reward_function_path = Path(args.reward_function) if args.reward_function else None
     resume_path = Path(args.resume) if args.resume else None
+
     commands.train_rl(
         task_name=args.task,
-        train_prompts_path=Path(args.train_prompts),
-        val_prompts_path=Path(args.val_prompts),
-        sft_model_path=Path(args.sft_model),
-        output_path=Path(args.output),
+        method_name=args.method,
+        train_prompts_path=train_prompts_path,
+        val_prompts_path=val_prompts_path,
+        sft_model_path=sft_model_path,
+        output_path=output_path,
         reward_function_path=reward_function_path,
         train_batch_size=args.train_batch_size,
         val_batch_size=args.val_batch_size,
@@ -180,22 +193,28 @@ def cmd_train_rl(args):
         kl_coef=args.kl_coef,
         n_samples=args.n_samples,
         save_freq=args.save_freq,
+        max_prompt_length=args.max_prompt_length,
+        max_response_length=args.max_response_length,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         project_name=args.project_name,
         experiment_name=args.experiment_name,
-        wandb=args.wandb,
+        wandb=not args.no_wandb,
         resume_path=resume_path,
     )
 
 
 def cmd_train_classifier(args):
     """Train binary classifier."""
+    dataset_path = Path(args.dataset) if args.dataset else None
+    output_path = Path(args.output) if args.output else None
+
     commands.train_classifier(
         task_name=args.task,
-        dataset_path=Path(args.dataset),
-        output_path=Path(args.output),
         base_model=args.base_model,
+        method_name=args.method,
+        dataset_path=dataset_path,
+        output_path=output_path,
         mode=args.mode,
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -226,59 +245,77 @@ def main():
     p = subparsers.add_parser("list_tasks", help="List available tasks")
     p.set_defaults(func=cmd_list_tasks)
 
+    # list_methods
+    p = subparsers.add_parser("list_methods", help="List available methods for a task")
+    p.add_argument("--task", required=True, help="Task name")
+    p.set_defaults(func=cmd_list_methods)
+
     # create_primitives
     p = subparsers.add_parser("create_primitives", help="Generate raw puzzle data")
     p.add_argument("--task", required=True, help="Task name (e.g., countdown)")
-    p.add_argument("--output", required=True, help="Output path for primitives.json")
-    p.add_argument("--num-puzzles", type=int, default=3100, help="Number of puzzles")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/primitives.json)")
+    p.add_argument("--num-puzzles", type=int, default=None, help="Number of puzzles (omit to use all available)")
     p.add_argument("--seed", type=int, default=42, help="Random seed")
     p.set_defaults(func=cmd_create_primitives)
 
     # create_prompts
     p = subparsers.add_parser("create_prompts", help="Create prompts from primitives")
     p.add_argument("--task", required=True, help="Task name")
-    p.add_argument("--primitives", required=True, help="Path to primitives.json")
-    p.add_argument("--output", required=True, help="Output directory (for --split all) or file path")
-    p.add_argument("--split", default="all", help="Split name (sft, rl, classifier, eval, or 'all')")
-    p.add_argument("--template", help="Path to template file (default: task's template for split)")
+    p.add_argument("--method", help="Method name for auto-derived paths and templates")
+    p.add_argument("--primitives", help="Path to primitives.json (default: artifacts/{task}/primitives.json)")
+    p.add_argument("--output", help="Output directory (default: artifacts/{task}/{method}/prompts/)")
+    p.add_argument("--split", default="all", help="Split name (sft, rl_train, rl_val, classifier, eval, or 'all')")
     p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
     p.set_defaults(func=cmd_create_prompts)
 
     # generate
-    p = subparsers.add_parser("generate", help="Run model on prompts")
+    p = subparsers.add_parser("generate", help="Run model on prompts to create dataset")
     p.add_argument("--task", required=True, help="Task name")
-    p.add_argument("--prompts", required=True, help="Path to prompts file")
-    p.add_argument("--output", required=True, help="Output path for dataset")
     p.add_argument("--model", required=True, help="Model name or path")
+    p.add_argument("--method", help="Method name for auto-derived paths")
+    p.add_argument("--prompts", help="Path to prompts file (default: artifacts/{task}/{method}/prompts/{split}.json)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/datasets/{split}_{model}.json)")
+    p.add_argument("--split", default="sft", help="Which split to generate from (default: sft)")
     p.add_argument("--batch-size", type=int, default=16, help="Batch size")
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
     p.add_argument("--temperature", type=float, default=0.7, help="Temperature")
     p.add_argument("--top-p", type=float, default=0.9, help="Top-p")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
+    p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
+    p.add_argument("--retry-incorrect", action="store_true", help="Re-run incorrect examples from existing output")
     p.set_defaults(func=cmd_generate)
 
     # evaluate
     p = subparsers.add_parser("evaluate", help="Evaluate model")
     p.add_argument("--task", required=True, help="Task name")
-    p.add_argument("--prompts", required=True, help="Path to eval prompts")
-    p.add_argument("--output", required=True, help="Output path for results")
-    p.add_argument("--model", required=True, help="Model name or path")
+    p.add_argument("--model", required=True, help="Model name/path, or 'sft'/'rl' to use method's model")
+    p.add_argument("--method", help="Method name for auto-derived paths")
+    p.add_argument("--prompts", help="Path to eval prompts (default: artifacts/{task}/{method}/prompts/eval.json)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/results/eval_{model}.json)")
     p.add_argument("--batch-size", type=int, default=16, help="Batch size")
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
     p.add_argument("--temperature", type=float, default=0.0, help="Temperature (0 for greedy)")
     p.add_argument("--top-p", type=float, default=1.0, help="Top-p")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
+    p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
     p.set_defaults(func=cmd_evaluate)
+
+    # analyze
+    p = subparsers.add_parser("analyze", help="Analyze dataset accuracy by variant (prints grid)")
+    p.add_argument("--dataset", required=True, help="Path to dataset or eval results")
+    p.add_argument("--task", help="Task name (for task-specific metrics on raw datasets)")
+    p.set_defaults(func=cmd_analyze)
 
     # train_sft
     p = subparsers.add_parser("train_sft", help="Train SFT model on generated dataset")
     p.add_argument("--task", required=True, help="Task name")
-    p.add_argument("--dataset", required=True, help="Path to generated dataset")
-    p.add_argument("--output", required=True, help="Output path for trained model")
     p.add_argument("--base-model", required=True, help="Base model to fine-tune")
+    p.add_argument("--method", help="Method name for auto-derived paths")
+    p.add_argument("--dataset", help="Path to generated dataset (default: auto-detect from method)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/models/sft)")
     p.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
     p.add_argument("--batch-size", type=int, default=4, help="Per-device batch size")
     p.add_argument("--gradient-accumulation-steps", type=int, default=4, help="Gradient accumulation steps")
@@ -289,16 +326,18 @@ def main():
     p.add_argument("--save-steps", type=int, default=100, help="Save checkpoint every N steps")
     p.add_argument("--logging-steps", type=int, default=10, help="Log every N steps")
     p.add_argument("--no-bf16", action="store_true", help="Disable bfloat16 training")
-    p.add_argument("--report-to", default="none", help="Reporting integration (none, wandb)")
+    p.add_argument("--report-to", default="wandb", help="Reporting integration (wandb, none)")
+    p.add_argument("--no-abstained", action="store_true", help="Exclude abstained examples (by default they're included)")
     p.set_defaults(func=cmd_train_sft)
 
     # train_rl
     p = subparsers.add_parser("train_rl", help="Train RL model using verl (GRPO)")
     p.add_argument("--task", required=True, help="Task name")
-    p.add_argument("--train-prompts", required=True, help="Path to RL train prompts parquet file")
-    p.add_argument("--val-prompts", required=True, help="Path to RL validation prompts parquet file")
-    p.add_argument("--sft-model", required=True, help="Path to SFT model")
-    p.add_argument("--output", required=True, help="Output path for RL model")
+    p.add_argument("--method", help="Method name for auto-derived paths, template, and reward config")
+    p.add_argument("--train-prompts", help="Path to RL train prompts (default: artifacts/{task}/{method}/prompts/rl_train.parquet)")
+    p.add_argument("--val-prompts", help="Path to RL validation prompts (default: artifacts/{task}/{method}/prompts/rl_val.parquet)")
+    p.add_argument("--sft-model", help="Path to SFT model (default: artifacts/{task}/{method}/models/sft)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/models/rl)")
     p.add_argument("--reward-function", help="Path to reward function (default: task's reward function)")
     p.add_argument("--train-batch-size", type=int, default=256, help="Training batch size")
     p.add_argument("--val-batch-size", type=int, default=256, help="Validation batch size")
@@ -306,21 +345,24 @@ def main():
     p.add_argument("--total-steps", type=int, default=100, help="Total training steps")
     p.add_argument("--kl-coef", type=float, default=0.001, help="KL divergence coefficient")
     p.add_argument("--n-samples", type=int, default=4, help="Number of samples per prompt")
-    p.add_argument("--save-freq", type=int, default=10, help="Checkpoint save frequency")
+    p.add_argument("--save-freq", type=int, default=25, help="Checkpoint save frequency")
+    p.add_argument("--max-prompt-length", type=int, default=1024, help="Maximum prompt length in tokens")
+    p.add_argument("--max-response-length", type=int, default=2048, help="Maximum response length in tokens")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.4, help="GPU memory utilization")
     p.add_argument("--project-name", default="countdown-rl", help="Wandb project name")
     p.add_argument("--experiment-name", help="Custom experiment name (default: auto-generated)")
-    p.add_argument("--wandb", action="store_true", help="Enable wandb logging")
+    p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     p.add_argument("--resume", help="Path to resume from existing run")
     p.set_defaults(func=cmd_train_rl)
 
     # train_classifier
     p = subparsers.add_parser("train_classifier", help="Train binary classifier for correctness prediction")
     p.add_argument("--task", required=True, help="Task name")
-    p.add_argument("--dataset", required=True, help="Path to generated dataset")
-    p.add_argument("--output", required=True, help="Output path for classifier")
     p.add_argument("--base-model", required=True, help="Base model for classification")
+    p.add_argument("--method", help="Method name for auto-derived paths")
+    p.add_argument("--dataset", help="Path to generated dataset (default: auto-detect from method)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/models/classifier)")
     p.add_argument("--mode", default="binary", choices=["binary", "three_class"], help="Classification mode")
     p.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
     p.add_argument("--batch-size", type=int, default=8, help="Per-device batch size")

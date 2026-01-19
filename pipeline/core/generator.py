@@ -14,6 +14,7 @@ class GenerationConfig:
     top_p: float = 0.9
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.9
+    verbose: bool = False
 
 
 class Generator:
@@ -75,8 +76,8 @@ class Generator:
             text += assistant_prefix
             formatted_prompts.append(text)
 
-        # Print sample prompt for debugging
-        if formatted_prompts:
+        # Print sample prompt for debugging (only if verbose)
+        if self.config.verbose and formatted_prompts:
             print("\n=== SAMPLE FORMATTED PROMPT ===")
             print(formatted_prompts[0])
             print("=== END SAMPLE ===\n")

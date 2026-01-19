@@ -23,9 +23,13 @@ class BaseTask:
 
     # === Required methods (must override) ===
 
-    def create_primitives(self, num_puzzles: int, seed: int) -> list[dict]:
+    def create_primitives(self, num_puzzles: int | None, seed: int) -> list[dict]:
         """
-        Generate raw puzzle data.
+        Generate or load raw puzzle data.
+
+        Args:
+            num_puzzles: Number of puzzles (None = all available for imported datasets)
+            seed: Random seed
 
         Returns:
             List of dicts, each with at least 'index' and 'variant' fields.
@@ -53,21 +57,27 @@ class BaseTask:
     # === Optional methods (can override) ===
 
     def get_split_indices(
-        self, total: int, split: str, seed: int = 42
+        self,
+        total: int,
+        split: str,
+        seed: int = 42,
+        primitives: list[dict] | None = None,
     ) -> list[int]:
         """
         Return indices for a given split.
 
         Override this to define custom split logic. Default splits:
         - sft: 30% (indices 0-30%)
-        - rl: 40% (indices 30-70%)
+        - rl_train: 35% (indices 30-65%)
+        - rl_val: 5% (indices 65-70%)
         - classifier: 20% (indices 70-90%)
         - eval: 10% (indices 90-100%)
 
         Args:
             total: Total number of primitives
-            split: Split name (sft, rl, classifier, eval)
+            split: Split name (sft, rl_train, rl_val, classifier, eval)
             seed: Random seed for shuffling
+            primitives: Optional list of primitives (for stratified sampling)
 
         Returns:
             List of indices belonging to this split
@@ -140,6 +150,38 @@ class BaseTask:
             "correct": correct,
             "counts_by_variant": dict(by_variant),
         }
+
+    def format_metrics(self, metrics: dict, model_name: str | None = None) -> str:
+        """
+        Format metrics for display. Override for task-specific formatting.
+
+        Args:
+            metrics: Dict from compute_metrics()
+            model_name: Optional model name to include in output
+
+        Returns:
+            Formatted string for printing
+        """
+        lines = ["", "=== Metrics ==="]
+        if model_name:
+            lines.append(f"Model: {model_name}")
+        lines.append(f"Total: {metrics.get('total', 0)}")
+        lines.append(f"Correct: {metrics.get('correct', 0)}")
+        lines.append(f"Accuracy: {metrics.get('accuracy', 0):.1%}")
+
+        # Print by variant if available
+        by_variant = metrics.get("counts_by_variant") or metrics.get("by_variant", {})
+        if by_variant:
+            lines.append("")
+            lines.append("By variant:")
+            for variant in sorted(by_variant.keys(), key=str):
+                c = by_variant[variant]
+                total = c.get("total", 0)
+                correct = c.get("correct", 0)
+                acc = correct / total if total > 0 else 0
+                lines.append(f"  {variant}: {correct}/{total} ({acc:.0%})")
+
+        return "\n".join(lines)
 
     # === Utility methods ===
 

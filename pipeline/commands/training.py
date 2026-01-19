@@ -5,14 +5,16 @@ Training commands - SFT, RL, classifier training, and checkpoint conversion.
 from pathlib import Path
 
 from pipeline.core.io import load_json
+from pipeline.core.method import Method
 from pipeline.tasks import get_task
 
 
 def train_sft(
     task_name: str,
-    dataset_path: Path,
-    output_path: Path,
     base_model: str,
+    method_name: str | None = None,
+    dataset_path: Path | None = None,
+    output_path: Path | None = None,
     epochs: int = 3,
     batch_size: int = 4,
     gradient_accumulation_steps: int = 4,
@@ -23,19 +25,21 @@ def train_sft(
     save_steps: int = 100,
     logging_steps: int = 10,
     bf16: bool = True,
-    report_to: str = "none",
+    report_to: str = "wandb",
+    include_abstained: bool = True,
 ) -> Path:
     """
     Train an SFT model on generated dataset.
 
-    Filters to correct examples, formats as prompt/completion pairs,
-    and trains using TRL's SFTTrainer.
+    Filters to correct (and optionally abstained) examples, formats as
+    prompt/completion pairs, and trains using TRL's SFTTrainer.
 
     Args:
         task_name: Name of task
-        dataset_path: Path to generated dataset (from generate command)
-        output_path: Where to save trained model
         base_model: Base model to fine-tune
+        method_name: Method name for auto-derived paths
+        dataset_path: Path to generated dataset (default: artifacts/{task}/{method}/datasets/sft_{model}.json)
+        output_path: Where to save trained model (default: artifacts/{task}/{method}/models/sft)
         epochs: Number of training epochs
         batch_size: Per-device batch size
         gradient_accumulation_steps: Gradient accumulation steps
@@ -47,6 +51,7 @@ def train_sft(
         logging_steps: Log every N steps
         bf16: Use bfloat16 training
         report_to: Reporting integration ("none", "wandb", etc.)
+        include_abstained: Include abstained examples in training (default: True)
 
     Returns:
         Path to trained model
@@ -55,14 +60,58 @@ def train_sft(
     from trl import SFTTrainer, SFTConfig
     from transformers import AutoTokenizer
 
+    # Load method config if specified
+    method = None
+    if method_name is not None:
+        method = Method.load(method_name, task_name)
+
+    # Default dataset path - look for any sft_*.json in datasets dir
+    if dataset_path is None:
+        if method is None:
+            raise ValueError(
+                "Either --method or --dataset must be specified. "
+                "Use --method to auto-derive paths, or --dataset for explicit paths."
+            )
+        datasets_dir = method.datasets_dir(task_name)
+        sft_files = list(datasets_dir.glob("sft_*.json"))
+        if not sft_files:
+            raise FileNotFoundError(
+                f"No SFT datasets found in {datasets_dir}. "
+                f"Run 'python -m pipeline generate --task {task_name} --method {method_name}' first."
+            )
+        dataset_path = sft_files[0]  # Use most recent or only one
+        if len(sft_files) > 1:
+            print(f"Warning: Multiple SFT datasets found, using {dataset_path}")
+
+    # Default output path
+    if output_path is None:
+        if method is None:
+            raise ValueError(
+                "Either --method or --output must be specified. "
+                "Use --method to auto-derive paths, or --output for explicit paths."
+            )
+        output_path = method.sft_model_path(task_name)
+
     # Load and filter dataset
     print(f"Loading dataset from {dataset_path}")
     data = load_json(dataset_path)
-    correct_examples = [ex for ex in data if ex.get("correct", False)]
-    print(f"Loaded {len(data)} examples, {len(correct_examples)} correct ({100*len(correct_examples)/len(data):.1f}%)")
 
-    if not correct_examples:
-        raise ValueError("No correct examples found in dataset!")
+    # Helper to check if example is abstained
+    def is_abstained(ex):
+        return ex.get("abstained", False) or ex.get("metadata", {}).get("abstained", False)
+
+    # Filter to correct examples (and optionally abstained)
+    if include_abstained:
+        filtered_examples = [ex for ex in data if ex.get("correct", False) or is_abstained(ex)]
+        num_correct = sum(1 for ex in filtered_examples if ex.get("correct", False))
+        num_abstained = sum(1 for ex in filtered_examples if is_abstained(ex))
+        print(f"Loaded {len(data)} examples, keeping {len(filtered_examples)} ({num_correct} correct, {num_abstained} abstained)")
+    else:
+        filtered_examples = [ex for ex in data if ex.get("correct", False)]
+        print(f"Loaded {len(data)} examples, {len(filtered_examples)} correct ({100*len(filtered_examples)/len(data):.1f}%)")
+
+    if not filtered_examples:
+        raise ValueError("No valid examples found in dataset!")
 
     # Load tokenizer
     print(f"Loading tokenizer for {base_model}")
@@ -71,7 +120,7 @@ def train_sft(
     # Format as prompt/completion pairs
     print("Formatting for SFT...")
     formatted = []
-    for ex in correct_examples:
+    for ex in filtered_examples:
         # Apply chat template to prompt messages (excluding assistant prefix)
         messages = ex["prompt"]
         if messages and messages[-1]["role"] == "assistant":
@@ -140,10 +189,11 @@ def train_sft(
 
 def train_rl(
     task_name: str,
-    train_prompts_path: Path,
-    val_prompts_path: Path,
-    sft_model_path: Path,
-    output_path: Path,
+    method_name: str | None = None,
+    train_prompts_path: Path | None = None,
+    val_prompts_path: Path | None = None,
+    sft_model_path: Path | None = None,
+    output_path: Path | None = None,
     reward_function_path: Path | None = None,
     train_batch_size: int = 256,
     val_batch_size: int = 256,
@@ -151,12 +201,14 @@ def train_rl(
     total_steps: int = 100,
     kl_coef: float = 0.001,
     n_samples: int = 4,
-    save_freq: int = 10,
+    save_freq: int = 25,
+    max_prompt_length: int = 1024,
+    max_response_length: int = 2048,
     tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.4,
     project_name: str = "countdown-rl",
     experiment_name: str | None = None,
-    wandb: bool = False,
+    wandb: bool = True,
     resume_path: Path | None = None,
 ) -> Path:
     """
@@ -164,6 +216,7 @@ def train_rl(
 
     Args:
         task_name: Name of task
+        method_name: Method name for auto-derived paths and reward config
         train_prompts_path: Path to RL train prompts parquet file
         val_prompts_path: Path to RL validation prompts parquet file
         sft_model_path: Path to SFT model to start from
@@ -176,6 +229,8 @@ def train_rl(
         kl_coef: KL divergence coefficient
         n_samples: Number of samples per prompt
         save_freq: Checkpoint save frequency
+        max_prompt_length: Maximum prompt length in tokens
+        max_response_length: Maximum response length in tokens
         tensor_parallel_size: Tensor parallel size
         gpu_memory_utilization: GPU memory utilization for vLLM
         project_name: Wandb project name
@@ -189,8 +244,45 @@ def train_rl(
     import subprocess
     import os
 
+    from pipeline.tasks import get_task
+
     # Get repo root (assumes we're running from repo root)
     repo_root = Path.cwd()
+
+    # Load method config if specified
+    method = None
+    if method_name is not None:
+        method = Method.load(method_name, task_name)
+
+    # Default paths from method
+    if method is not None:
+        if train_prompts_path is None:
+            train_prompts_path = method.prompts_path(task_name, "rl_train")
+        if val_prompts_path is None:
+            val_prompts_path = method.prompts_path(task_name, "rl_val")
+        if sft_model_path is None:
+            sft_model_path = method.sft_model_path(task_name)
+        if output_path is None:
+            output_path = method.rl_model_path(task_name)
+
+    # Validate required paths
+    if train_prompts_path is None:
+        raise ValueError("--train-prompts is required (or use --method)")
+    if val_prompts_path is None:
+        raise ValueError("--val-prompts is required (or use --method)")
+    if sft_model_path is None:
+        raise ValueError("--sft-model is required (or use --method)")
+    if output_path is None:
+        raise ValueError("--output is required (or use --method)")
+
+    # Get reward function name from method config
+    reward_function_name = "compute_score"
+    reward_kwargs = {}
+    template_content = None
+    if method is not None:
+        reward_function_name = method.reward_function
+        reward_kwargs = method.reward_kwargs
+        template_content = method.load_template(task_name, "rl")
 
     # Handle resume path
     if resume_path is not None:
@@ -200,36 +292,49 @@ def train_rl(
         print(f"Resuming from: {resume_path}")
 
     # Default reward function path
+    # Try full task name first, then fall back to base name (e.g., countdown_abstention -> countdown)
     if reward_function_path is None:
         reward_function_path = repo_root / f"verl/recipe/{task_name}/reward_function.py"
         if not reward_function_path.exists():
-            raise FileNotFoundError(
-                f"Reward function not found at {reward_function_path}. "
-                f"Please provide --reward-function-path."
-            )
+            # Try base task name (for variants like countdown_abstention)
+            base_task_name = task_name.split("_")[0]
+            reward_function_path = repo_root / f"verl/recipe/{base_task_name}/reward_function.py"
+            if not reward_function_path.exists():
+                raise FileNotFoundError(
+                    f"Reward function not found at verl/recipe/{task_name}/ or verl/recipe/{base_task_name}/. "
+                    f"Please provide --reward-function."
+                )
 
     # Create output directory
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Generate experiment name if not provided
     if experiment_name is None:
-        experiment_name = f"{task_name}_rl_{learning_rate}_{train_batch_size}"
+        method_suffix = f"_{method_name}" if method_name else ""
+        experiment_name = f"{task_name}{method_suffix}_rl_{learning_rate}_{train_batch_size}"
+
+    # Get task's system message for runtime template application
+    task = get_task(task_name)
+    system_message = getattr(task, "system_message", None)
 
     # Logger config
     logger_config = "['wandb','console']" if wandb else "['console']"
 
     print(f"=== RL Training Configuration ===")
     print(f"Task: {task_name}")
+    print(f"Method: {method_name or 'default'}")
     print(f"SFT Model: {sft_model_path}")
     print(f"Train Prompts: {train_prompts_path}")
     print(f"Val Prompts: {val_prompts_path}")
-    print(f"Reward Function: {reward_function_path}")
+    print(f"Reward Function: {reward_function_path}:{reward_function_name}")
     print(f"Output: {output_path}")
     print(f"Experiment: {experiment_name}")
     print(f"Batch Size: {train_batch_size}")
     print(f"Learning Rate: {learning_rate}")
     print(f"Total Steps: {total_steps}")
     print(f"Wandb: {wandb}")
+    if template_content:
+        print(f"Template: {method.template_variant}/rl.txt")
     print(f"=================================")
 
     # Build verl command
@@ -241,10 +346,10 @@ def train_rl(
         f"data.val_files={val_prompts_path}",
         f"data.train_batch_size={train_batch_size}",
         f"data.val_batch_size={val_batch_size}",
-        "data.max_prompt_length=256",
-        "data.max_response_length=2048",
+        f"data.max_prompt_length={max_prompt_length}",
+        f"data.max_response_length={max_response_length}",
         f"custom_reward_function.path={reward_function_path}",
-        "custom_reward_function.name=compute_score",
+        f"custom_reward_function.name={reward_function_name}",
         f"actor_rollout_ref.model.path={sft_model_path}",
         "actor_rollout_ref.model.use_remove_padding=True",
         "actor_rollout_ref.actor.use_dynamic_bsz=True",
@@ -270,7 +375,24 @@ def train_rl(
         f"trainer.project_name={project_name}",
         f"trainer.experiment_name={experiment_name}",
         f"trainer.total_training_steps={total_steps}",
+        f"trainer.rollout_data_dir={output_path}",
     ]
+
+    # Add runtime template config if method is specified
+    if template_content is not None:
+        # Escape the template for shell/hydra (replace newlines, quotes)
+        # Use + prefix to add new config keys (they don't exist in base config)
+        escaped_template = template_content.replace("\n", "\\n").replace('"', '\\"')
+        cmd.append(f'+data.runtime_template="{escaped_template}"')
+        if system_message:
+            escaped_system = system_message.replace("\n", "\\n").replace('"', '\\"')
+            cmd.append(f'+data.runtime_system_message="{escaped_system}"')
+
+    # Add reward kwargs if specified in method config
+    # Use + prefix to add new config keys
+    if reward_kwargs:
+        for key, value in reward_kwargs.items():
+            cmd.append(f"+custom_reward_function.reward_kwargs.{key}={value}")
 
     # Set environment variables
     env = os.environ.copy()
@@ -317,9 +439,10 @@ def train_rl(
 
 def train_classifier(
     task_name: str,
-    dataset_path: Path,
-    output_path: Path,
     base_model: str,
+    method_name: str | None = None,
+    dataset_path: Path | None = None,
+    output_path: Path | None = None,
     mode: str = "binary",
     epochs: int = 3,
     batch_size: int = 8,
@@ -334,9 +457,10 @@ def train_classifier(
 
     Args:
         task_name: Name of task
+        base_model: Base model for classification
+        method_name: Method name for auto-derived paths
         dataset_path: Path to generated dataset (from generate command)
         output_path: Where to save trained classifier
-        base_model: Base model for classification
         mode: Classification mode ("binary" or "three_class")
         epochs: Number of training epochs
         batch_size: Per-device batch size
@@ -358,6 +482,36 @@ def train_classifier(
     # Validate mode
     if mode != "binary":
         raise NotImplementedError(f"Mode '{mode}' not yet implemented. Only 'binary' is supported.")
+
+    # Load method config if specified
+    method = None
+    if method_name is not None:
+        method = Method.load(method_name, task_name)
+
+    # Default dataset path
+    if dataset_path is None:
+        if method is None:
+            raise ValueError(
+                "Either --method or --dataset must be specified. "
+                "Use --method to auto-derive paths, or --dataset for explicit paths."
+            )
+        datasets_dir = method.datasets_dir(task_name)
+        classifier_files = list(datasets_dir.glob("classifier_*.json"))
+        if not classifier_files:
+            raise FileNotFoundError(
+                f"No classifier datasets found in {datasets_dir}. "
+                f"Run 'python -m pipeline generate --task {task_name} --method {method_name} --split classifier' first."
+            )
+        dataset_path = classifier_files[0]
+
+    # Default output path
+    if output_path is None:
+        if method is None:
+            raise ValueError(
+                "Either --method or --output must be specified. "
+                "Use --method to auto-derive paths, or --output for explicit paths."
+            )
+        output_path = method.classifier_model_path(task_name)
 
     # Load dataset
     print(f"Loading dataset from {dataset_path}")

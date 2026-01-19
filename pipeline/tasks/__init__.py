@@ -12,10 +12,9 @@ TASKS: dict[str, type["BaseTask"]] = {}
 def _register_tasks():
     """Import tasks to populate registry."""
     from .countdown.task import CountdownTask
+    from .zebra_logic.task import ZebraLogicTask
     TASKS["countdown"] = CountdownTask
-    # Add more tasks here:
-    # from .connections.task import ConnectionsTask
-    # TASKS["connections"] = ConnectionsTask
+    TASKS["zebra_logic"] = ZebraLogicTask
 
 
 def get_task(name: str) -> "BaseTask":
