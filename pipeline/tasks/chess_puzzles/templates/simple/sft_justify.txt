@@ -1,0 +1,15 @@
+You are given a chess puzzle. The winning move for {other_mover} is: {winning_move}
+
+FEN: {fen}
+
+Board position:
+{board_layout}
+
+From this position, {last_mover} plays: {losing_move}, in other words {elaborated_move}
+
+Your task is to explain WHY {winning_move} is the winning move. Analyze the position carefully and show your reasoning in <think> </think> tags, explaining:
+- What the position looks like after {other_mover} plays {winning_move}
+- Why this move leads to a winning advantage (checkmate, material gain, etc.)
+- Why other moves would not work as well
+
+Then confirm the answer in <answer> </answer> tags with the move in UCI notation, for example <answer>{winning_move}</answer>.

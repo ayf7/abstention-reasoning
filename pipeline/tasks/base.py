@@ -21,6 +21,9 @@ class BaseTask:
 
     name: str = "base"
 
+    # Default assistant prefix for prompts (override in subclasses for task-specific prefixes)
+    assistant_prefix: str = "<think> Let me solve this step by step."
+
     # === Required methods (must override) ===
 
     def create_primitives(self, num_puzzles: int | None, seed: int) -> list[dict]:

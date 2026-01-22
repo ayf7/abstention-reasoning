@@ -13,8 +13,10 @@ def _register_tasks():
     """Import tasks to populate registry."""
     from .countdown.task import CountdownTask
     from .zebra_logic.task import ZebraLogicTask
+    from .chess_puzzles.task import ChessPuzzlesTask
     TASKS["countdown"] = CountdownTask
     TASKS["zebra_logic"] = ZebraLogicTask
+    TASKS["chess_puzzles"] = ChessPuzzlesTask
 
 
 def get_task(name: str) -> "BaseTask":

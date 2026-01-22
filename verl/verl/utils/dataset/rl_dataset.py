@@ -116,6 +116,12 @@ class RLHFDataset(Dataset):
         self.need_tools_kwargs = config.get("need_tools_kwargs", False)
         self.filter_prompts = config.get("filter_prompts", True)
         self.serialize_dataset = False
+
+        # Runtime template application (for primitives-only parquet)
+        self.runtime_template = config.get("runtime_template", None)
+        self.runtime_system_message = config.get("runtime_system_message", None)
+        self.runtime_assistant_prefix = config.get("runtime_assistant_prefix", "<think> Let me solve this step by step.")
+
         self._download()
         self._read_files_and_tokenize()
 
@@ -188,7 +194,11 @@ class RLHFDataset(Dataset):
         return len(self.dataframe)
 
     def _build_messages(self, example: dict):
-        messages: list = example.pop(self.prompt_key)
+        # Check if this is primitives-only format (runtime template application)
+        if "primitive" in example and self.runtime_template is not None:
+            messages = self._apply_runtime_template(example)
+        else:
+            messages: list = example.pop(self.prompt_key)
 
         if self.image_key in example or self.video_key in example:
             for message in messages:
@@ -205,6 +215,37 @@ class RLHFDataset(Dataset):
                         content_list.append({"type": "text", "text": segment})
 
                 message["content"] = content_list
+
+        return messages
+
+    def _apply_runtime_template(self, example: dict) -> list:
+        """
+        Apply template to primitive at runtime.
+
+        Args:
+            example: Dict containing 'primitive' with task-specific fields
+
+        Returns:
+            List of chat messages
+        """
+        primitive = example.pop("primitive")
+
+        # Apply template substitution
+        content = self.runtime_template
+        for key, value in primitive.items():
+            content = content.replace(f"{{{key}}}", str(value))
+            content = content.replace(f"{{{{{key}}}}}", str(value))  # Also handle {{key}}
+
+        # Build messages
+        messages = []
+
+        if self.runtime_system_message:
+            messages.append({"role": "system", "content": self.runtime_system_message})
+
+        messages.append({"role": "user", "content": content})
+
+        if self.runtime_assistant_prefix:
+            messages.append({"role": "assistant", "content": self.runtime_assistant_prefix})
 
         return messages
 

@@ -1,0 +1,6 @@
+name: simple
+template_variant: simple
+reward_function: compute_score
+reward_kwargs:
+  format_score: 0.1
+assistant_prefix: "<think> Let me analyze this chess position and think step by step."

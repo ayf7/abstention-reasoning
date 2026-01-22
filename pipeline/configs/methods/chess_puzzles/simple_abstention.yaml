@@ -1,0 +1,7 @@
+name: simple_abstention
+template_variant: simple_abstention
+reward_function: compute_score_abstain
+reward_kwargs:
+  abstention_score: 0.5
+  format_score: 0.1
+assistant_prefix: "<think> Let me analyze this chess position and think step by step."

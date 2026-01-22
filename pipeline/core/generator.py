@@ -12,6 +12,7 @@ class GenerationConfig:
     max_new_tokens: int = 2048
     temperature: float = 0.7
     top_p: float = 0.9
+    num_samples: int = 1
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.9
     verbose: bool = False
@@ -37,7 +38,7 @@ class Generator:
             )
         return self._model
 
-    def generate(self, prompts: list[list[dict]]) -> list[dict]:
+    def generate(self, prompts: list[list[dict]]) -> list[list[dict]]:
         """
         Generate completions for a list of prompts.
 
@@ -45,7 +46,8 @@ class Generator:
             prompts: List of chat message lists
 
         Returns:
-            List of dicts with 'text' and 'finish_reason'
+            List of lists of dicts with 'text' and 'finish_reason'
+            (each prompt can have multiple samples if num_samples > 1)
         """
         from vllm import SamplingParams
 
@@ -53,6 +55,7 @@ class Generator:
             temperature=self.config.temperature,
             top_p=self.config.top_p,
             max_tokens=self.config.max_new_tokens,
+            n=self.config.num_samples,
         )
 
         # Apply chat template
@@ -87,11 +90,15 @@ class Generator:
 
         results = []
         for output in outputs:
-            results.append({
-                "text": output.outputs[0].text,
-                "finish_reason": output.outputs[0].finish_reason,
-                "token_count": len(output.outputs[0].token_ids),
-            })
+            # Each output can have multiple completions (if n > 1)
+            samples = []
+            for completion in output.outputs:
+                samples.append({
+                    "text": completion.text,
+                    "finish_reason": completion.finish_reason,
+                    "token_count": len(completion.token_ids),
+                })
+            results.append(samples)
 
         return results
 

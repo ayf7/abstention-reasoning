@@ -25,8 +25,15 @@ def extract_solution(solution_str):
     return final_answer
 
 def abstain_equation(equation_str):
-    if equation_str.strip().lower() == "i abstain":
-        return True
+    """Check if the equation indicates abstention."""
+    if equation_str is None:
+        return False
+    return equation_str.strip().lower() == "i abstain"
+
+
+def has_abstain_tag(solution_str):
+    """Check if the solution contains an <abstain> tag."""
+    return "<abstain>" in solution_str
 
 
 def validate_equation(equation_str, available_numbers):
@@ -34,6 +41,9 @@ def validate_equation(equation_str, available_numbers):
     try:
         # Extract all numbers from the equation
         numbers_in_eq = [int(n) for n in re.findall(r'\d+', equation_str)]
+
+        # Cast to Python ints (numpy int64 from parquet can cause Counter mismatch)
+        available_numbers = [int(n) for n in available_numbers]
 
         # Compare exact counts
         return Counter(numbers_in_eq) == Counter(available_numbers)
@@ -86,22 +96,38 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
 
     num_hints = get_num_hints(solution_str)
 
-    if equation is None: # or len(solution_str.split()) < 100:
+    # Check for abstention first (before equation extraction check)
+    if reward_abstain and has_abstain_tag(solution_str):
+        if do_print:
+            print(f"Abstaining (via <abstain> tag) - awarding {abstention_score}")
+        return {
+            "score": abstention_score,
+            "score_wo_hint_penalty": abstention_score,
+            "num_hints": num_hints,
+            "abstained": True,
+        }
+
+    if equation is None:
         if do_print:
             print(f"No equation found or length too short")
-        return {"score": 0, "score_wo_hint_penalty": 0, "num_hints": num_hints}
-    
-    """if reward_abstain:
-        if abstain_equation(equation):
-            if do_print:
-               print(f"Abstaining")
-            return format_score + abstention_score""" 
-    
+        return {"score": 0, "score_wo_hint_penalty": 0, "num_hints": num_hints, "abstained": False}
+
+    # Check for abstention via answer content (legacy support)
+    if reward_abstain and abstain_equation(equation):
+        if do_print:
+            print(f"Abstaining (via answer) - awarding {abstention_score}")
+        return {
+            "score": abstention_score,
+            "score_wo_hint_penalty": abstention_score,
+            "num_hints": num_hints,
+            "abstained": True,
+        }
+
     # Validate equation uses correct numbers
     if not validate_equation(equation, numbers):
         if do_print:
             print(f"Invalid equation")
-        return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints}
+        return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False}
         
     # Evaluate equation
     try:
@@ -109,33 +135,41 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
         if result is None:
             if do_print:
                 print(f"Could not evaluate equation")
-            return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints}
+            return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False}
             
         if abs(result - target) < 1e-5:  # Account for floating point precision
             if do_print:
                 print(f"Correct equation: {equation} = {result}")
             if penalize_hint:
-                w_penalty = score * (1 - hint_penalty * num_hints)
-            return {"score": w_penalty, "score_wo_hint_penalty": score, "num_hints": num_hints}
+                final_score = score * (1 - hint_penalty * num_hints)
+            else:
+                final_score = score
+            return {"score": final_score, "score_wo_hint_penalty": score, "num_hints": num_hints, "abstained": False}
         else:
             if do_print:
                 print(f"Wrong result: equation = {result}, target = {target}")
-            score = format_score  
+            score = format_score
             """if num_hints > 0:
                 score = format_score + hint_penalty"""
-            return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints}
+            return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False}
     except:
         if do_print:
             print(f"Error evaluating equation")
-        return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints}
+        return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False}
     
 
 
-def compute_score_abstain(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., **kwargs):
-    """The scoring function for countdown that rewards the model for abstention naively
-    """
+def compute_score_abstain(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., abstention_score=0.5, **kwargs):
+    """The scoring function for countdown that rewards abstention.
 
-    return compute_score(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., reward_abstain=True, abstention_score=0.1, **kwargs)
+    Args:
+        abstention_score: Reward for abstaining (default 0.5, between wrong and correct).
+    """
+    return compute_score(
+        data_source, solution_str, ground_truth, extra_info,
+        method=method, format_score=format_score, score=score,
+        reward_abstain=True, abstention_score=abstention_score, **kwargs
+    )
 
 def compute_score_hint(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., **kwargs):
     """The scoring function for countdown that rewards the model for abstention naively

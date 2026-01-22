@@ -99,6 +99,13 @@ def create_prompts(
     else:
         template_variant = getattr(task, "default_template_variant", None)
 
+    # Get assistant_prefix from method (if provided) or task default
+    assistant_prefix = None
+    if method is not None and method.assistant_prefix is not None:
+        assistant_prefix = method.assistant_prefix
+    else:
+        assistant_prefix = getattr(task, "assistant_prefix", None)
+
     # Handle "all" splits
     if split_name == "all":
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -117,6 +124,7 @@ def create_prompts(
                 template_variant=template_variant,
                 seed=seed,
                 include_assistant_prefix=include_assistant_prefix,
+                assistant_prefix=assistant_prefix,
             )
         return results
 
@@ -132,6 +140,7 @@ def create_prompts(
         template_variant=template_variant,
         seed=seed,
         include_assistant_prefix=include_assistant_prefix,
+        assistant_prefix=assistant_prefix,
     )
 
 
@@ -144,8 +153,13 @@ def _create_prompts_single(
     template_variant: str | None,
     seed: int,
     include_assistant_prefix: bool,
+    assistant_prefix: str | None = None,
 ) -> Path:
     """Create prompts for a single split."""
+    # Override task's assistant_prefix if method provided one
+    if assistant_prefix is not None:
+        task.assistant_prefix = assistant_prefix
+
     # Load primitives
     primitives = load_json(primitives_path)
 
@@ -165,20 +179,32 @@ def _create_prompts_single(
         print(f"Creating {split_name} data for {len(primitives)} primitives (template applied at runtime)...")
         records = []
         for primitive in primitives:
+            # Enrich primitive with derived fields if task supports it
+            # (verl's runtime template does simple substitution, so we pre-compute fields)
+            if hasattr(task, 'enrich_primitive_for_rl'):
+                enriched_primitive = task.enrich_primitive_for_rl(primitive)
+            else:
+                enriched_primitive = primitive
+
             ground_truth = task.get_ground_truth(primitive)
             record = {
                 "index": primitive["index"],
-                "primitive": primitive,  # Store raw primitive for runtime template application
+                "primitive": enriched_primitive,  # Store enriched primitive for runtime template
                 "ground_truth": ground_truth,
                 "variant": primitive.get("variant", "unknown"),
                 "split": split_name,
                 "data_source": task_name,
+                "assistant_prefix": assistant_prefix,  # For verl runtime consistency
                 "reward_model": {
                     "style": "rule",
                     "ground_truth": ground_truth,
                 },
             }
             records.append(record)
+
+        # Print reminder for verl config
+        if assistant_prefix:
+            print(f"  Note: Set verl config data.runtime_assistant_prefix=\"{assistant_prefix}\"")
     else:
         # Resolve template path
         if template_variant:

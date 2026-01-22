@@ -9,7 +9,7 @@ Usage:
 """
 
 from .data import create_primitives, create_prompts
-from .inference import generate, evaluate, analyze
+from .inference import generate, evaluate, evaluate_classifier, analyze
 from .training import train_sft, train_rl, train_classifier, convert_checkpoint
 
 __all__ = [
@@ -19,6 +19,7 @@ __all__ = [
     # Inference commands
     "generate",
     "evaluate",
+    "evaluate_classifier",
     "analyze",
     # Training commands
     "train_sft",

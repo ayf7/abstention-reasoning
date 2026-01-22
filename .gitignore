@@ -4,3 +4,10 @@ __pycache__
 
 checkpoints_*
 wandb
+checkpoints*
+results*
+outputs*
+logs*
+
+artifacts/
+temp_connections/

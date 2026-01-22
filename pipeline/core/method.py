@@ -22,6 +22,7 @@ class Method:
     - template_variant: Which template variant to use (e.g., "simple", "simple_abstention")
     - reward_function: Name of reward function for RL training
     - reward_kwargs: Additional arguments for reward function
+    - assistant_prefix: Prefix for assistant responses (used in SFT and RL)
 
     Methods also provide auto-derived artifact paths based on task and method name.
     """
@@ -30,6 +31,7 @@ class Method:
     template_variant: str
     reward_function: str = "compute_score"
     reward_kwargs: dict[str, Any] = field(default_factory=dict)
+    assistant_prefix: str | None = None  # If None, use task's default
 
     @classmethod
     def load(cls, name_or_path: str, task_name: str) -> "Method":
@@ -71,6 +73,7 @@ class Method:
             template_variant=data["template_variant"],
             reward_function=data.get("reward_function", "compute_score"),
             reward_kwargs=data.get("reward_kwargs", {}),
+            assistant_prefix=data.get("assistant_prefix"),
         )
 
     @staticmethod
@@ -132,8 +135,38 @@ class Method:
         return self.models_dir(task_name) / "sft"
 
     def rl_model_path(self, task_name: str) -> Path:
-        """Get the RL model path."""
-        return self.models_dir(task_name) / "rl"
+        """
+        Get the RL model path.
+
+        First checks for models/rl directory. If not found, searches for
+        the latest checkpoint matching *_rl_step* pattern (highest step number).
+        """
+        import re
+
+        models_dir = self.models_dir(task_name)
+        default_path = models_dir / "rl"
+
+        # If default rl/ directory exists, use it
+        if default_path.exists():
+            return default_path
+
+        # Otherwise, find latest *_rl_step* checkpoint
+        if models_dir.exists():
+            rl_checkpoints = []
+            for d in models_dir.iterdir():
+                if d.is_dir() and "_rl_step" in d.name:
+                    match = re.search(r"_rl_step(\d+)", d.name)
+                    if match:
+                        step_num = int(match.group(1))
+                        rl_checkpoints.append((step_num, d))
+
+            if rl_checkpoints:
+                # Return the one with highest step number
+                latest = max(rl_checkpoints, key=lambda x: x[0])
+                return latest[1]
+
+        # Fallback to default path (will error if not found)
+        return default_path
 
     def classifier_model_path(self, task_name: str) -> Path:
         """Get the classifier model path."""

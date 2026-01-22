@@ -1,0 +1,172 @@
+"""Reward function for Chess Puzzles RL training."""
+
+import re
+import random
+
+
+def extract_answer(solution_str):
+    """Extract answer from <answer>...</answer> tags."""
+    pattern = r'<answer>(.*?)</answer>'
+    matches = list(re.finditer(pattern, solution_str, re.DOTALL))
+    if matches:
+        return matches[-1].group(1).strip()
+    return None
+
+
+def check_correctness(predicted, ground_truth):
+    """
+    Check if predicted move matches the winning move.
+
+    Validates:
+    1. Move is in valid UCI format (e.g., "e2e4", "e7e8q")
+    2. Move matches the expected winning move
+    """
+    if predicted is None:
+        return False, {"error": "no_answer_tag"}
+
+    # Clean and normalize the answer (remove spaces, lowercase)
+    predicted_move = predicted.strip().lower().replace(" ", "")
+    expected_move = ground_truth["winning_move"].strip().lower()
+
+    # Check if predicted move is in valid UCI format
+    uci_pattern = r'^[a-h][1-8][a-h][1-8][qrbn]?$'
+    if not re.match(uci_pattern, predicted_move):
+        return False, {"error": "invalid_uci_format", "predicted_move": predicted}
+
+    # Check if move matches expected winning move
+    is_correct = (predicted_move == expected_move)
+
+    if is_correct:
+        return True, {"predicted_move": predicted_move}
+    else:
+        return False, {"error": "wrong_move", "predicted_move": predicted_move}
+
+
+def compute_score(
+    data_source,
+    solution_str,
+    ground_truth,
+    extra_info,
+    format_score=0.0,
+    score=1.0,
+    **kwargs,
+):
+    """
+    Reward function for Chess Puzzles.
+
+    Args:
+        data_source: Task name
+        solution_str: Model's full generation
+        ground_truth: Dict with winning_move, fen, etc.
+        extra_info: Additional info (unused)
+        format_score: Score for valid UCI format but wrong move (default 0.0)
+        score: Score for correct answer
+
+    Returns:
+        Dict with score and metadata (consistent keys for all outcomes)
+    """
+    do_print = random.randint(1, 64) == 1
+
+    predicted = extract_answer(solution_str)
+
+    if do_print:
+        print(f"--------------------------------")
+        print(f"Expected move: {ground_truth.get('winning_move')}")
+        print(f"Extracted: {predicted}")
+        print(f"Solution: {solution_str[:500]}...")
+
+    # Base result with consistent keys
+    result = {
+        "score": 0,
+        "correct": False,
+        "error": None,
+        "predicted_move": None,
+        "abstained": False,
+    }
+
+    if predicted is None:
+        if do_print:
+            print(f"No answer found")
+        result["error"] = "no_answer_tag"
+        return result
+
+    is_correct, meta = check_correctness(predicted, ground_truth)
+
+    result["correct"] = is_correct
+    result["predicted_move"] = meta.get("predicted_move")
+    result["error"] = meta.get("error")
+
+    if is_correct:
+        result["score"] = score
+        if do_print:
+            print(f"Correct!")
+    elif meta.get("error") == "wrong_move":
+        # Valid UCI format but wrong move - give format_score
+        result["score"] = format_score
+        if do_print:
+            print(f"Wrong move (valid format). Score: {format_score}")
+    else:
+        # Invalid format
+        result["score"] = 0
+        if do_print:
+            print(f"Invalid format: {meta.get('error')}")
+
+    return result
+
+
+def compute_score_abstain(
+    data_source,
+    solution_str,
+    ground_truth,
+    extra_info,
+    format_score=0.0,
+    score=1.0,
+    abstention_score=0.5,
+    **kwargs,
+):
+    """
+    Reward function for Chess Puzzles with abstention support.
+
+    Args:
+        abstention_score: Reward for abstaining (default 0.5)
+    """
+    do_print = random.randint(1, 64) == 1
+
+    # Debug: print kwargs on first few calls
+    if do_print:
+        print(f"[reward_kwargs] format_score={format_score}, abstention_score={abstention_score}, score={score}")
+
+    # Extract the answer first
+    predicted = extract_answer(solution_str)
+
+    # Check for abstention via <abstain> tag ONLY (not <answer>abstain</answer>)
+    # Requirements:
+    # 1. Must have </think> (completed thinking)
+    # 2. <abstain> must appear AFTER </think>
+    # 3. No <answer> tag (if they gave an answer, they're not abstaining)
+    # This avoids matching prompt instruction text like "output <abstain>"
+    think_end = solution_str.rfind("</think>")
+    if think_end != -1 and predicted is None:
+        answer_section = solution_str[think_end:]
+        # Check for <abstain> but NOT the instruction pattern "output <abstain>"
+        if "<abstain>" in answer_section and "output <abstain>" not in answer_section:
+            if do_print:
+                print(f"Abstaining (via <abstain> tag) - awarding {abstention_score}")
+            return {
+                "score": abstention_score,
+                "correct": False,
+                "error": None,
+                "predicted_move": None,
+                "abstained": True,
+            }
+
+    # Otherwise, use standard scoring
+    return compute_score(
+        data_source,
+        solution_str,
+        ground_truth,
+        extra_info,
+        format_score=format_score,
+        score=score,
+        **kwargs,
+    )

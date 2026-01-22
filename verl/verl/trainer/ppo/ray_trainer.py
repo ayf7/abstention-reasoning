@@ -689,7 +689,11 @@ class RayPPOTrainer:
             sample_inputs.extend(input_texts)
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
-            non_tensor_batch_keys_to_pop = ["raw_prompt_ids", "hint_exprs", "target", "numbers"]
+            non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
+            # Conditionally add countdown-specific fields if they exist
+            for key in ["hint_exprs", "target", "numbers"]:
+                if key in test_batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append(key)
             if "multi_modal_data" in test_batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("multi_modal_data")
             if "raw_prompt" in test_batch.non_tensor_batch:
@@ -1106,8 +1110,15 @@ class RayPPOTrainer:
 
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
 
-                non_tensor_batch_keys_to_pop = ["raw_prompt_ids", "hint_exprs", "target", "numbers"]
+                non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
 
+                # Conditionally add fields if they exist
+                if "hint_exprs" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("hint_exprs")
+                if "target" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("target")
+                if "numbers" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("numbers")
                 if "multi_modal_data" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("multi_modal_data")
                 if "raw_prompt" in batch.non_tensor_batch:

@@ -15,6 +15,7 @@ Commands:
     train_classifier            Train binary classifier for correctness prediction
     convert_checkpoint          Convert FSDP/Megatron checkpoint to HuggingFace format
     evaluate                    Evaluate model and compute metrics
+    evaluate_classifier         Evaluate binary classifier (confusion matrix, precision/recall/F1)
 
 Examples:
     # List available tasks and methods
@@ -107,6 +108,7 @@ def cmd_generate(args):
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_p=args.top_p,
+        num_samples=args.num_samples,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         verbose=args.verbose,
@@ -143,6 +145,23 @@ def cmd_analyze(args):
     )
 
 
+def cmd_evaluate_classifier(args):
+    """Evaluate binary classifier."""
+    classifier_path = Path(args.classifier) if args.classifier else None
+    dataset_path = Path(args.dataset) if args.dataset else None
+    output_path = Path(args.output) if args.output else None
+
+    commands.evaluate_classifier(
+        task_name=args.task,
+        classifier_path=classifier_path,
+        method_name=args.method,
+        dataset_path=dataset_path,
+        output_path=output_path,
+        batch_size=args.batch_size,
+        max_length=args.max_length,
+    )
+
+
 def cmd_train_sft(args):
     """Train SFT model."""
     dataset_path = Path(args.dataset) if args.dataset else None
@@ -165,7 +184,10 @@ def cmd_train_sft(args):
         logging_steps=args.logging_steps,
         bf16=not args.no_bf16,
         report_to=args.report_to,
+        project_name=args.project_name,
+        experiment_name=args.experiment_name,
         include_abstained=not args.no_abstained,
+        include_wrong_valid_format=args.include_wrong_valid_format,
     )
 
 
@@ -193,6 +215,7 @@ def cmd_train_rl(args):
         kl_coef=args.kl_coef,
         n_samples=args.n_samples,
         save_freq=args.save_freq,
+        test_freq=args.test_freq,
         max_prompt_length=args.max_prompt_length,
         max_response_length=args.max_response_length,
         tensor_parallel_size=args.tensor_parallel_size,
@@ -221,6 +244,12 @@ def cmd_train_classifier(args):
         learning_rate=args.learning_rate,
         max_length=args.max_length,
         eval_split=args.eval_split,
+        eval_steps=args.eval_steps,
+        logging_steps=args.logging_steps,
+        balance=args.balance,
+        report_to=args.report_to,
+        project_name=args.project_name,
+        experiment_name=args.experiment_name,
     )
 
 
@@ -281,6 +310,7 @@ def main():
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
     p.add_argument("--temperature", type=float, default=0.7, help="Temperature")
     p.add_argument("--top-p", type=float, default=0.9, help="Top-p")
+    p.add_argument("--num-samples", type=int, default=1, help="Number of samples per prompt (best selected by shortest correct CoT)")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
@@ -309,6 +339,17 @@ def main():
     p.add_argument("--task", help="Task name (for task-specific metrics on raw datasets)")
     p.set_defaults(func=cmd_analyze)
 
+    # evaluate_classifier
+    p = subparsers.add_parser("evaluate_classifier", help="Evaluate binary classifier on a dataset")
+    p.add_argument("--task", required=True, help="Task name")
+    p.add_argument("--classifier", help="Path to classifier model (default: artifacts/{task}/{method}/models/classifier)")
+    p.add_argument("--method", help="Method name for auto-derived paths")
+    p.add_argument("--dataset", help="Path to dataset with 'prompt', 'generation', 'correct' fields")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/results/classifier_eval.json)")
+    p.add_argument("--batch-size", type=int, default=8, help="Batch size for inference")
+    p.add_argument("--max-length", type=int, default=2048, help="Maximum sequence length")
+    p.set_defaults(func=cmd_evaluate_classifier)
+
     # train_sft
     p = subparsers.add_parser("train_sft", help="Train SFT model on generated dataset")
     p.add_argument("--task", required=True, help="Task name")
@@ -327,7 +368,10 @@ def main():
     p.add_argument("--logging-steps", type=int, default=10, help="Log every N steps")
     p.add_argument("--no-bf16", action="store_true", help="Disable bfloat16 training")
     p.add_argument("--report-to", default="wandb", help="Reporting integration (wandb, none)")
+    p.add_argument("--project-name", default="sft", help="Wandb project name")
+    p.add_argument("--experiment-name", help="Custom experiment name (default: {task}-{method}-sft-{model})")
     p.add_argument("--no-abstained", action="store_true", help="Exclude abstained examples (by default they're included)")
+    p.add_argument("--include-wrong-valid-format", action="store_true", help="Include wrong answers with valid format (task-specific, e.g., valid UCI but wrong move for chess)")
     p.set_defaults(func=cmd_train_sft)
 
     # train_rl
@@ -346,6 +390,7 @@ def main():
     p.add_argument("--kl-coef", type=float, default=0.001, help="KL divergence coefficient")
     p.add_argument("--n-samples", type=int, default=4, help="Number of samples per prompt")
     p.add_argument("--save-freq", type=int, default=25, help="Checkpoint save frequency")
+    p.add_argument("--test-freq", type=int, default=None, help="Validation/logging frequency (default: same as save-freq)")
     p.add_argument("--max-prompt-length", type=int, default=1024, help="Maximum prompt length in tokens")
     p.add_argument("--max-response-length", type=int, default=2048, help="Maximum response length in tokens")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
@@ -357,18 +402,24 @@ def main():
     p.set_defaults(func=cmd_train_rl)
 
     # train_classifier
-    p = subparsers.add_parser("train_classifier", help="Train binary classifier for correctness prediction")
+    p = subparsers.add_parser("train_classifier", help="Train binary classifier for puzzle solvability prediction")
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--base-model", required=True, help="Base model for classification")
     p.add_argument("--method", help="Method name for auto-derived paths")
     p.add_argument("--dataset", help="Path to generated dataset (default: auto-detect from method)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/models/classifier)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/models/classifier_{dataset})")
     p.add_argument("--mode", default="binary", choices=["binary", "three_class"], help="Classification mode")
     p.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
     p.add_argument("--batch-size", type=int, default=8, help="Per-device batch size")
     p.add_argument("--learning-rate", type=float, default=2e-5, help="Learning rate")
     p.add_argument("--max-length", type=int, default=2048, help="Maximum sequence length")
     p.add_argument("--eval-split", type=float, default=0.1, help="Fraction of data for evaluation")
+    p.add_argument("--eval-steps", type=int, default=None, help="Evaluate every N steps (default: once per epoch)")
+    p.add_argument("--logging-steps", type=int, default=10, help="Log every N steps")
+    p.add_argument("--balance", default="none", choices=["none", "downsample", "upsample"], help="Class balancing strategy")
+    p.add_argument("--report-to", default="wandb", help="Reporting integration (wandb, none)")
+    p.add_argument("--project-name", default="binary_classifier", help="Wandb project name")
+    p.add_argument("--experiment-name", help="Custom experiment name (default: {task}_{dataset_source}_{model})")
     p.set_defaults(func=cmd_train_classifier)
 
     # convert_checkpoint

@@ -26,7 +26,10 @@ def train_sft(
     logging_steps: int = 10,
     bf16: bool = True,
     report_to: str = "wandb",
+    project_name: str = "sft",
+    experiment_name: str | None = None,
     include_abstained: bool = True,
+    include_wrong_valid_format: bool = False,
 ) -> Path:
     """
     Train an SFT model on generated dataset.
@@ -51,7 +54,10 @@ def train_sft(
         logging_steps: Log every N steps
         bf16: Use bfloat16 training
         report_to: Reporting integration ("none", "wandb", etc.)
+        project_name: Wandb project name
+        experiment_name: Custom experiment name (default: {task}-{method}-sft-{model})
         include_abstained: Include abstained examples in training (default: True)
+        include_wrong_valid_format: Include wrong answers with valid format (task-specific, default: False)
 
     Returns:
         Path to trained model
@@ -59,6 +65,7 @@ def train_sft(
     from datasets import Dataset
     from trl import SFTTrainer, SFTConfig
     from transformers import AutoTokenizer
+    from pipeline.core.utils import model_short_name
 
     # Load method config if specified
     method = None
@@ -92,16 +99,51 @@ def train_sft(
             )
         output_path = method.sft_model_path(task_name)
 
+    # Generate experiment name if not provided
+    # Format: {task}-{method}-sft-{base_model_short}
+    # e.g., "chess_puzzles-simple_abstention-sft-qwen2.5-3b"
+    if experiment_name is None:
+        method_str = method_name if method_name else "default"
+        base_model_short = model_short_name(base_model)
+        experiment_name = f"{task_name}-{method_str}-sft-{base_model_short}"
+
+    print(f"=== SFT Training Configuration ===")
+    print(f"Task: {task_name}")
+    print(f"Method: {method_name or 'default'}")
+    print(f"Base Model: {base_model}")
+    print(f"Dataset: {dataset_path}")
+    print(f"Output: {output_path}")
+    print(f"Project: {project_name}")
+    print(f"Experiment: {experiment_name}")
+    print(f"Report to: {report_to}")
+    print(f"==================================")
+
     # Load and filter dataset
     print(f"Loading dataset from {dataset_path}")
     data = load_json(dataset_path)
+
+    # Get task for potential custom filtering
+    task = get_task(task_name)
 
     # Helper to check if example is abstained
     def is_abstained(ex):
         return ex.get("abstained", False) or ex.get("metadata", {}).get("abstained", False)
 
-    # Filter to correct examples (and optionally abstained)
-    if include_abstained:
+    # Use task-specific filter if available, otherwise default logic
+    if hasattr(task, 'filter_for_sft'):
+        filtered_examples = task.filter_for_sft(
+            data,
+            include_abstained=include_abstained,
+            include_wrong_valid_format=include_wrong_valid_format,
+        )
+        # Count categories for logging
+        num_correct = sum(1 for ex in filtered_examples if ex.get("correct", False))
+        num_abstained = sum(1 for ex in filtered_examples if is_abstained(ex))
+        num_wrong_valid = len(filtered_examples) - num_correct - num_abstained
+        print(f"Loaded {len(data)} examples, keeping {len(filtered_examples)} "
+              f"({num_correct} correct, {num_abstained} abstained, {num_wrong_valid} wrong-valid-format)")
+    elif include_abstained:
+        # Default filtering (no include_wrong_valid_format support)
         filtered_examples = [ex for ex in data if ex.get("correct", False) or is_abstained(ex)]
         num_correct = sum(1 for ex in filtered_examples if ex.get("correct", False))
         num_abstained = sum(1 for ex in filtered_examples if is_abstained(ex))
@@ -166,7 +208,13 @@ def train_sft(
         save_total_limit=3,
         bf16=bf16,
         report_to=report_to,
+        run_name=experiment_name,
     )
+
+    # Initialize wandb if enabled
+    if report_to == "wandb":
+        import wandb
+        wandb.init(project=project_name, name=experiment_name, reinit=True)
 
     # Train
     print(f"Starting training: {base_model} -> {output_path}")
@@ -202,6 +250,7 @@ def train_rl(
     kl_coef: float = 0.001,
     n_samples: int = 4,
     save_freq: int = 25,
+    test_freq: int | None = None,
     max_prompt_length: int = 1024,
     max_response_length: int = 2048,
     tensor_parallel_size: int = 1,
@@ -229,6 +278,7 @@ def train_rl(
         kl_coef: KL divergence coefficient
         n_samples: Number of samples per prompt
         save_freq: Checkpoint save frequency
+        test_freq: Validation/logging frequency (default: same as save_freq)
         max_prompt_length: Maximum prompt length in tokens
         max_response_length: Maximum response length in tokens
         tensor_parallel_size: Tensor parallel size
@@ -313,9 +363,10 @@ def train_rl(
         method_suffix = f"_{method_name}" if method_name else ""
         experiment_name = f"{task_name}{method_suffix}_rl_{learning_rate}_{train_batch_size}"
 
-    # Get task's system message for runtime template application
+    # Get task's system message and assistant prefix for runtime template application
     task = get_task(task_name)
     system_message = getattr(task, "system_message", None)
+    assistant_prefix = getattr(task, "assistant_prefix", None)
 
     # Logger config
     logger_config = "['wandb','console']" if wandb else "['console']"
@@ -327,6 +378,7 @@ def train_rl(
     print(f"Train Prompts: {train_prompts_path}")
     print(f"Val Prompts: {val_prompts_path}")
     print(f"Reward Function: {reward_function_path}:{reward_function_name}")
+    print(f"Reward Kwargs: {reward_kwargs}")
     print(f"Output: {output_path}")
     print(f"Experiment: {experiment_name}")
     print(f"Batch Size: {train_batch_size}")
@@ -369,7 +421,7 @@ def train_rl(
         "trainer.n_gpus_per_node=1",
         "trainer.nnodes=1",
         f"trainer.save_freq={save_freq}",
-        f"trainer.test_freq={save_freq}",
+        f"trainer.test_freq={test_freq if test_freq is not None else save_freq}",
         "trainer.resume_mode=auto",
         "trainer.max_actor_ckpt_to_keep=2",
         f"trainer.project_name={project_name}",
@@ -387,6 +439,9 @@ def train_rl(
         if system_message:
             escaped_system = system_message.replace("\n", "\\n").replace('"', '\\"')
             cmd.append(f'+data.runtime_system_message="{escaped_system}"')
+        if assistant_prefix:
+            escaped_prefix = assistant_prefix.replace("\n", "\\n").replace('"', '\\"')
+            cmd.append(f'+data.runtime_assistant_prefix="{escaped_prefix}"')
 
     # Add reward kwargs if specified in method config
     # Use + prefix to add new config keys
@@ -449,11 +504,18 @@ def train_classifier(
     learning_rate: float = 2e-5,
     max_length: int = 2048,
     eval_split: float = 0.1,
+    eval_steps: int | None = None,
+    logging_steps: int = 10,
+    balance: str = "none",
+    report_to: str = "wandb",
+    project_name: str = "binary_classifier",
+    experiment_name: str | None = None,
 ) -> Path:
     """
-    Train a binary classifier to predict if model generations are correct.
+    Train a binary classifier to predict puzzle solvability from prompt only.
 
-    The classifier takes (prompt + generation) as input and predicts correctness.
+    The classifier takes the prompt (puzzle) as input and predicts whether
+    the model will solve it correctly.
 
     Args:
         task_name: Name of task
@@ -467,10 +529,17 @@ def train_classifier(
         learning_rate: Learning rate
         max_length: Maximum sequence length
         eval_split: Fraction of data for evaluation
+        eval_steps: Evaluate every N steps (default: once per epoch)
+        logging_steps: Log every N steps
+        balance: Class balancing strategy ("none", "downsample", "upsample")
+        report_to: Reporting integration ("wandb", "none", etc.)
+        project_name: Wandb project name
+        experiment_name: Custom experiment name (default: auto-generated from task/dataset/model)
 
     Returns:
         Path to trained classifier
     """
+    from pipeline.core.utils import model_short_name
     from datasets import Dataset
     from transformers import (
         AutoModelForSequenceClassification,
@@ -504,14 +573,38 @@ def train_classifier(
             )
         dataset_path = classifier_files[0]
 
-    # Default output path
+    # Default output path - derive from dataset name (e.g., classifier_sft.json -> models/classifier_sft/)
     if output_path is None:
         if method is None:
             raise ValueError(
                 "Either --method or --output must be specified. "
                 "Use --method to auto-derive paths, or --output for explicit paths."
             )
-        output_path = method.classifier_model_path(task_name)
+        # Use dataset stem as model directory name (e.g., "classifier_sft" -> "classifier_sft/")
+        output_path = method.models_dir(task_name) / dataset_path.stem
+
+    # Generate experiment name if not provided
+    # Format: {task}_{dataset_source}_{base_model_short}
+    # e.g., "countdown_sft_1.5b" or "countdown_rl_3b"
+    if experiment_name is None:
+        # Extract source from dataset filename (e.g., "classifier_sft.json" -> "sft")
+        dataset_stem = dataset_path.stem  # e.g., "classifier_sft"
+        if "_" in dataset_stem:
+            dataset_source = dataset_stem.split("_", 1)[1]  # e.g., "sft"
+        else:
+            dataset_source = "unknown"
+        base_model_short = model_short_name(base_model)
+        experiment_name = f"{task_name}_{dataset_source}_{base_model_short}"
+
+    print(f"=== Classifier Training Configuration ===")
+    print(f"Task: {task_name}")
+    print(f"Base Model: {base_model}")
+    print(f"Dataset: {dataset_path}")
+    print(f"Output: {output_path}")
+    print(f"Project: {project_name}")
+    print(f"Experiment: {experiment_name}")
+    print(f"Report to: {report_to}")
+    print(f"==========================================")
 
     # Load dataset
     print(f"Loading dataset from {dataset_path}")
@@ -519,6 +612,8 @@ def train_classifier(
     print(f"Loaded {len(data)} examples")
 
     # Prepare classification data
+    # NOTE: We train on prompt ONLY (not prompt + generation) to predict
+    # puzzle difficulty/solvability, not to detect generation completeness.
     print("Preparing classification data...")
     formatted = []
     for ex in data:
@@ -531,8 +626,8 @@ def train_classifier(
         else:
             prompt_text = ex["prompt"]
 
-        # Input is prompt + generation
-        text = prompt_text + ex["generation"]
+        # Input is prompt only (predicts solvability, not generation quality)
+        text = prompt_text
 
         # Label is correctness
         label = 1 if ex.get("correct", False) else 0
@@ -541,8 +636,41 @@ def train_classifier(
 
     # Count label distribution
     from collections import Counter
+    import random
     label_dist = Counter(ex["label"] for ex in formatted)
-    print(f"Label distribution: {dict(label_dist)}")
+    print(f"Label distribution (before balancing): {dict(label_dist)}")
+
+    # Apply class balancing if requested
+    if balance != "none":
+        positive = [ex for ex in formatted if ex["label"] == 1]
+        negative = [ex for ex in formatted if ex["label"] == 0]
+
+        if balance == "downsample":
+            # Downsample majority class to match minority
+            min_count = min(len(positive), len(negative))
+            random.seed(42)
+            if len(positive) > min_count:
+                positive = random.sample(positive, min_count)
+            if len(negative) > min_count:
+                negative = random.sample(negative, min_count)
+            formatted = positive + negative
+            random.shuffle(formatted)
+            print(f"Downsampled to {len(formatted)} examples ({min_count} per class)")
+
+        elif balance == "upsample":
+            # Upsample minority class to match majority
+            max_count = max(len(positive), len(negative))
+            random.seed(42)
+            if len(positive) < max_count:
+                positive = positive * (max_count // len(positive)) + random.sample(positive, max_count % len(positive))
+            if len(negative) < max_count:
+                negative = negative * (max_count // len(negative)) + random.sample(negative, max_count % len(negative))
+            formatted = positive + negative
+            random.shuffle(formatted)
+            print(f"Upsampled to {len(formatted)} examples ({max_count} per class)")
+
+        label_dist = Counter(ex["label"] for ex in formatted)
+        print(f"Label distribution (after balancing): {dict(label_dist)}")
 
     dataset = Dataset.from_list(formatted)
 
@@ -579,6 +707,16 @@ def train_classifier(
     # Training arguments
     output_path.mkdir(parents=True, exist_ok=True)
 
+    # Determine eval strategy
+    if eval_steps is not None:
+        eval_strategy = "steps"
+        save_strategy = "steps"
+        save_steps = eval_steps
+    else:
+        eval_strategy = "epoch"
+        save_strategy = "epoch"
+        save_steps = None
+
     training_args = TrainingArguments(
         output_dir=str(output_path),
         num_train_epochs=epochs,
@@ -586,16 +724,24 @@ def train_classifier(
         per_device_eval_batch_size=batch_size,
         learning_rate=learning_rate,
         warmup_ratio=0.1,
-        eval_strategy="epoch",
-        save_strategy="epoch",
+        eval_strategy=eval_strategy,
+        eval_steps=eval_steps,
+        save_strategy=save_strategy,
+        save_steps=save_steps,
         save_total_limit=2,
         load_best_model_at_end=True,
         metric_for_best_model="eval_accuracy",
         greater_is_better=True,
-        logging_steps=10,
-        report_to="none",
+        logging_steps=logging_steps,
+        report_to=report_to,
+        run_name=experiment_name,
         bf16=True,
     )
+
+    # Log wandb config if enabled
+    if report_to == "wandb":
+        import wandb
+        wandb.init(project=project_name, name=experiment_name, reinit=True)
 
     # Compute metrics
     def compute_metrics(eval_pred):

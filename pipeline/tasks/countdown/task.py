@@ -61,7 +61,7 @@ class CountdownTask(BaseTask):
         if include_assistant_prefix:
             messages.append({
                 "role": "assistant",
-                "content": "<think> Let me solve this step by step.",
+                "content": self.assistant_prefix,
             })
 
         return messages

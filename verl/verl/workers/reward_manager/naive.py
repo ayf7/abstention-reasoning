@@ -25,7 +25,7 @@ from verl.workers.reward_manager import register
 class NaiveRewardManager:
     """The reward manager."""
 
-    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source") -> None:
+    def __init__(self, tokenizer, num_examine=0, compute_score=None, reward_fn_key="data_source") -> None:
         """
         Initialize the NaiveRewardManager instance.
 
@@ -90,8 +90,16 @@ class NaiveRewardManager:
                 extra_info=extra_info,
             )
 
-            group_min_hints_w_correct_key =  '_'.join([f'{e}' for e in ground_truth["numbers"] + [f'{ground_truth["target"]}']])
-            if score["score"] == 1 and score["num_hints"] == 0:
+            # Build a unique key for this puzzle (task-agnostic)
+            if "puzzle_id" in ground_truth:
+                group_min_hints_w_correct_key = ground_truth["puzzle_id"]
+            elif "numbers" in ground_truth and "target" in ground_truth:
+                group_min_hints_w_correct_key = '_'.join([f'{e}' for e in ground_truth["numbers"] + [f'{ground_truth["target"]}']])
+            else:
+                # Fallback: use hash of ground_truth string representation
+                group_min_hints_w_correct_key = str(hash(str(sorted(ground_truth.items()))))
+
+            if isinstance(score, dict) and score.get("score") == 1 and score.get("num_hints", 0) == 0:
                 group_min_hints_w_correct.setdefault(group_min_hints_w_correct_key, []).append(True)
             else:
                 group_min_hints_w_correct.setdefault(group_min_hints_w_correct_key, []).append(False)
