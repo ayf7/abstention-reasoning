@@ -13,6 +13,7 @@ def train_sft(
     task_name: str,
     base_model: str,
     method_name: str | None = None,
+    run_id: str | None = None,
     dataset_path: Path | None = None,
     output_path: Path | None = None,
     epochs: int = 3,
@@ -26,10 +27,11 @@ def train_sft(
     logging_steps: int = 10,
     bf16: bool = True,
     report_to: str = "wandb",
-    project_name: str = "sft",
+    project_name: str | None = None,
     experiment_name: str | None = None,
     include_abstained: bool = True,
     include_wrong_valid_format: bool = False,
+    cleanup_checkpoints: bool = True,
 ) -> Path:
     """
     Train an SFT model on generated dataset.
@@ -41,8 +43,9 @@ def train_sft(
         task_name: Name of task
         base_model: Base model to fine-tune
         method_name: Method name for auto-derived paths
+        run_id: Run identifier for organizing outputs (default: "default")
         dataset_path: Path to generated dataset (default: artifacts/{task}/{method}/datasets/sft_{model}.json)
-        output_path: Where to save trained model (default: artifacts/{task}/{method}/models/sft)
+        output_path: Where to save trained model (default: artifacts/{task}/{method}/models/sft/{run_id}/model)
         epochs: Number of training epochs
         batch_size: Per-device batch size
         gradient_accumulation_steps: Gradient accumulation steps
@@ -54,10 +57,11 @@ def train_sft(
         logging_steps: Log every N steps
         bf16: Use bfloat16 training
         report_to: Reporting integration ("none", "wandb", etc.)
-        project_name: Wandb project name
-        experiment_name: Custom experiment name (default: {task}-{method}-sft-{model})
+        project_name: Wandb project name (default: {task}-sft)
+        experiment_name: Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})
         include_abstained: Include abstained examples in training (default: True)
         include_wrong_valid_format: Include wrong answers with valid format (task-specific, default: False)
+        cleanup_checkpoints: Delete intermediate checkpoints after training (default: True)
 
     Returns:
         Path to trained model
@@ -97,19 +101,27 @@ def train_sft(
                 "Either --method or --output must be specified. "
                 "Use --method to auto-derive paths, or --output for explicit paths."
             )
-        output_path = method.sft_model_path(task_name)
+        output_path = method.sft_model_path(task_name, run_id)
+
+    # Generate project name if not provided: {task}-sft
+    if project_name is None:
+        project_name = f"{task_name}-sft"
 
     # Generate experiment name if not provided
-    # Format: {task}-{method}-sft-{base_model_short}
-    # e.g., "chess_puzzles-simple_abstention-sft-qwen2.5-3b"
+    # Format: {method}-{run_id}-{YYYYMMDD}
+    # e.g., "simple_abstention-default-20240115"
     if experiment_name is None:
+        from datetime import datetime
+        date_str = datetime.now().strftime("%Y%m%d")
         method_str = method_name if method_name else "default"
-        base_model_short = model_short_name(base_model)
-        experiment_name = f"{task_name}-{method_str}-sft-{base_model_short}"
+        run_id_str = run_id if run_id else "default"
+        experiment_name = f"{method_str}-{run_id_str}-{date_str}"
 
+    run_id_display = run_id or "default"
     print(f"=== SFT Training Configuration ===")
     print(f"Task: {task_name}")
     print(f"Method: {method_name or 'default'}")
+    print(f"Run ID: {run_id_display}")
     print(f"Base Model: {base_model}")
     print(f"Dataset: {dataset_path}")
     print(f"Output: {output_path}")
@@ -232,12 +244,24 @@ def train_sft(
     tokenizer.save_pretrained(str(output_path))
     print(f"Saved model to {output_path}")
 
+    # Cleanup intermediate checkpoints if requested
+    if cleanup_checkpoints:
+        import shutil
+        checkpoint_dirs = list(output_path.glob("checkpoint-*"))
+        if checkpoint_dirs:
+            print(f"Cleaning up {len(checkpoint_dirs)} intermediate checkpoints...")
+            for ckpt_dir in checkpoint_dirs:
+                shutil.rmtree(ckpt_dir)
+            print("Checkpoint cleanup complete.")
+
     return output_path
 
 
 def train_rl(
     task_name: str,
     method_name: str | None = None,
+    run_id: str | None = None,
+    base_model: str | None = None,
     train_prompts_path: Path | None = None,
     val_prompts_path: Path | None = None,
     sft_model_path: Path | None = None,
@@ -255,10 +279,11 @@ def train_rl(
     max_response_length: int = 2048,
     tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.4,
-    project_name: str = "countdown-rl",
+    project_name: str | None = None,
     experiment_name: str | None = None,
     wandb: bool = True,
     resume_path: Path | None = None,
+    cleanup_checkpoints: bool = True,
 ) -> Path:
     """
     Train RL model using verl (GRPO algorithm).
@@ -266,9 +291,11 @@ def train_rl(
     Args:
         task_name: Name of task
         method_name: Method name for auto-derived paths and reward config
+        run_id: Run identifier for organizing outputs (default: "default")
+        base_model: Base model for cold-start RL (mutually exclusive with sft_model_path)
         train_prompts_path: Path to RL train prompts parquet file
         val_prompts_path: Path to RL validation prompts parquet file
-        sft_model_path: Path to SFT model to start from
+        sft_model_path: Path to SFT model to start from (mutually exclusive with base_model)
         output_path: Where to save RL model
         reward_function_path: Path to reward function (default: task's reward function)
         train_batch_size: Training batch size
@@ -283,10 +310,11 @@ def train_rl(
         max_response_length: Maximum response length in tokens
         tensor_parallel_size: Tensor parallel size
         gpu_memory_utilization: GPU memory utilization for vLLM
-        project_name: Wandb project name
-        experiment_name: Custom experiment name (default: auto-generated)
+        project_name: Wandb project name (default: {task}-rl)
+        experiment_name: Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})
         wandb: Enable wandb logging
         resume_path: Path to resume from existing run (overrides output_path)
+        cleanup_checkpoints: Delete checkpoints after training (default: True)
 
     Returns:
         Path to trained model
@@ -304,41 +332,81 @@ def train_rl(
     if method_name is not None:
         method = Method.load(method_name, task_name)
 
+    # Validate mutual exclusion
+    if base_model is not None and sft_model_path is not None:
+        raise ValueError("Cannot specify both --base-model and --sft-model")
+
     # Default paths from method
     if method is not None:
         if train_prompts_path is None:
             train_prompts_path = method.prompts_path(task_name, "rl_train")
         if val_prompts_path is None:
             val_prompts_path = method.prompts_path(task_name, "rl_val")
-        if sft_model_path is None:
-            sft_model_path = method.sft_model_path(task_name)
-        if output_path is None:
-            output_path = method.rl_model_path(task_name)
+
+    # Determine the actor model (base_model or sft_model_path)
+    if base_model is not None:
+        actor_model = base_model
+    elif sft_model_path is not None:
+        actor_model = str(sft_model_path)
+    elif method is not None:
+        actor_model = str(method.sft_model_path(task_name))
+    else:
+        raise ValueError("Either --base-model or --sft-model is required (or use --method)")
+
+    # Derive run directory structure from method
+    run_dir = None
+    checkpoints_dir = None
+    rollouts_dir = None
+    if method is not None and output_path is None:
+        run_dir = method.rl_run_dir(task_name, run_id)
+        checkpoints_dir = method.rl_checkpoints_dir(task_name, run_id)
+        rollouts_dir = method.rl_rollouts_dir(task_name, run_id)
+        output_path = method.rl_model_path(task_name, run_id)
+    elif output_path is not None:
+        # Custom output path - derive subdirectories from it
+        run_dir = output_path.parent if output_path.name == "model" else output_path
+        checkpoints_dir = run_dir / "checkpoints"
+        rollouts_dir = run_dir / "rollouts"
+        output_path = run_dir / "model"
 
     # Validate required paths
     if train_prompts_path is None:
         raise ValueError("--train-prompts is required (or use --method)")
     if val_prompts_path is None:
         raise ValueError("--val-prompts is required (or use --method)")
-    if sft_model_path is None:
-        raise ValueError("--sft-model is required (or use --method)")
-    if output_path is None:
+    if output_path is None or checkpoints_dir is None or rollouts_dir is None:
         raise ValueError("--output is required (or use --method)")
 
-    # Get reward function name from method config
+    # Convert all paths to absolute paths for Ray workers (they run in different working directories)
+    train_prompts_path = Path(train_prompts_path).resolve()
+    val_prompts_path = Path(val_prompts_path).resolve()
+    checkpoints_dir = Path(checkpoints_dir).resolve()
+    rollouts_dir = Path(rollouts_dir).resolve()
+    output_path = Path(output_path).resolve()
+    if not actor_model.startswith("/") and "/" in actor_model:
+        # Relative path (not a HuggingFace model ID like "Qwen/Qwen2.5-1.5B")
+        actor_model = str(Path(actor_model).resolve())
+
+    # Get reward function name and other config from method
     reward_function_name = "compute_score"
     reward_kwargs = {}
     template_content = None
+    allow_hint = False
     if method is not None:
         reward_function_name = method.reward_function
         reward_kwargs = method.reward_kwargs
+        allow_hint = method.allow_hint
         template_content = method.load_template(task_name, "rl")
 
     # Handle resume path
     if resume_path is not None:
-        output_path = resume_path
+        # Resume uses the checkpoint directory structure
+        checkpoints_dir = resume_path
+        run_dir = resume_path.parent
+        rollouts_dir = run_dir / "rollouts"
+        output_path = run_dir / "model"
         if experiment_name is None:
-            experiment_name = resume_path.name
+            experiment_name = run_dir.name
         print(f"Resuming from: {resume_path}")
 
     # Default reward function path
@@ -355,13 +423,23 @@ def train_rl(
                     f"Please provide --reward-function."
                 )
 
-    # Create output directory
+    # Create output directories
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    rollouts_dir.mkdir(parents=True, exist_ok=True)
     output_path.mkdir(parents=True, exist_ok=True)
 
+    # Generate project name if not provided: {task}-rl
+    if project_name is None:
+        project_name = f"{task_name}-rl"
+
     # Generate experiment name if not provided
+    # Format: {method}-{run_id}-{YYYYMMDD}
     if experiment_name is None:
-        method_suffix = f"_{method_name}" if method_name else ""
-        experiment_name = f"{task_name}{method_suffix}_rl_{learning_rate}_{train_batch_size}"
+        from datetime import datetime
+        date_str = datetime.now().strftime("%Y%m%d")
+        method_str = method_name if method_name else "default"
+        run_id_str = run_id if run_id else "default"
+        experiment_name = f"{method_str}-{run_id_str}-{date_str}"
 
     # Get task's system message and assistant prefix for runtime template application
     task = get_task(task_name)
@@ -374,12 +452,18 @@ def train_rl(
     print(f"=== RL Training Configuration ===")
     print(f"Task: {task_name}")
     print(f"Method: {method_name or 'default'}")
-    print(f"SFT Model: {sft_model_path}")
+    print(f"Run ID: {run_id or 'default'}")
+    print(f"Actor Model: {actor_model}")
     print(f"Train Prompts: {train_prompts_path}")
     print(f"Val Prompts: {val_prompts_path}")
     print(f"Reward Function: {reward_function_path}:{reward_function_name}")
     print(f"Reward Kwargs: {reward_kwargs}")
-    print(f"Output: {output_path}")
+    print(f"Allow Hint: {allow_hint}")
+    print(f"Run Directory: {run_dir}")
+    print(f"Checkpoints: {checkpoints_dir}")
+    print(f"Rollouts: {rollouts_dir}")
+    print(f"Output Model: {output_path}")
+    print(f"Project: {project_name}")
     print(f"Experiment: {experiment_name}")
     print(f"Batch Size: {train_batch_size}")
     print(f"Learning Rate: {learning_rate}")
@@ -392,7 +476,7 @@ def train_rl(
     # Build verl command
     cmd = [
         "python3", "-m", "verl.trainer.main_ppo",
-        f"hydra.run.dir={output_path}",
+        f"hydra.run.dir={checkpoints_dir}",
         "algorithm.adv_estimator=grpo",
         f"data.train_files={train_prompts_path}",
         f"data.val_files={val_prompts_path}",
@@ -402,7 +486,7 @@ def train_rl(
         f"data.max_response_length={max_response_length}",
         f"custom_reward_function.path={reward_function_path}",
         f"custom_reward_function.name={reward_function_name}",
-        f"actor_rollout_ref.model.path={sft_model_path}",
+        f"actor_rollout_ref.model.path={actor_model}",
         "actor_rollout_ref.model.use_remove_padding=True",
         "actor_rollout_ref.actor.use_dynamic_bsz=True",
         f"actor_rollout_ref.actor.optim.lr={learning_rate}",
@@ -417,7 +501,7 @@ def train_rl(
         f"algorithm.kl_ctrl.kl_coef={kl_coef}",
         f"trainer.logger={logger_config}",
         "trainer.default_hdfs_dir=null",
-        f"trainer.default_local_dir={output_path}",
+        f"trainer.default_local_dir={checkpoints_dir}",
         "trainer.n_gpus_per_node=1",
         "trainer.nnodes=1",
         f"trainer.save_freq={save_freq}",
@@ -427,7 +511,7 @@ def train_rl(
         f"trainer.project_name={project_name}",
         f"trainer.experiment_name={experiment_name}",
         f"trainer.total_training_steps={total_steps}",
-        f"trainer.rollout_data_dir={output_path}",
+        f"trainer.rollout_data_dir={rollouts_dir}",
     ]
 
     # Add runtime template config if method is specified
@@ -442,6 +526,10 @@ def train_rl(
         if assistant_prefix:
             escaped_prefix = assistant_prefix.replace("\n", "\\n").replace('"', '\\"')
             cmd.append(f'+data.runtime_assistant_prefix="{escaped_prefix}"')
+
+    # Add allow_hint flag for multi-turn hint generation
+    if allow_hint:
+        cmd.append("allow_hint=True")
 
     # Add reward kwargs if specified in method config
     # Use + prefix to add new config keys
@@ -463,15 +551,16 @@ def train_rl(
     if result.returncode != 0:
         raise RuntimeError(f"RL training failed with return code {result.returncode}")
 
-    print(f"RL training complete. Checkpoints saved to {output_path}")
+    print(f"RL training complete. Checkpoints saved to {checkpoints_dir}")
 
     # Find and convert the final checkpoint
     import re
     checkpoint_dirs = [
-        d for d in output_path.iterdir()
+        d for d in checkpoints_dir.iterdir()
         if d.is_dir() and re.match(r"global_step_\d+", d.name)
     ]
 
+    hf_model_path = output_path
     if checkpoint_dirs:
         # Sort by step number and get the latest
         def get_step(d):
@@ -483,13 +572,21 @@ def train_rl(
 
         if actor_path.exists():
             print(f"\nConverting final checkpoint: {latest_checkpoint.name}")
-            hf_model_path = convert_checkpoint(actor_path)
+            hf_model_path = convert_checkpoint(actor_path, output_path=output_path)
             print(f"HuggingFace model saved to: {hf_model_path}")
-            return hf_model_path
         else:
             print(f"Warning: actor directory not found in {latest_checkpoint}")
 
-    return output_path
+    # Cleanup checkpoints if requested (rollouts are preserved for analysis)
+    if cleanup_checkpoints:
+        import shutil
+        print("Cleaning up checkpoints...")
+        if checkpoints_dir.exists():
+            shutil.rmtree(checkpoints_dir)
+            print(f"  Removed: {checkpoints_dir}")
+        print("Cleanup complete.")
+
+    return hf_model_path
 
 
 def train_classifier(

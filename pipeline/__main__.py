@@ -101,6 +101,7 @@ def cmd_generate(args):
         task_name=args.task,
         model_name=args.model,
         method_name=args.method,
+        run_id=getattr(args, "run_id", None),
         prompts_path=prompts_path,
         output_path=output_path,
         split=args.split,
@@ -113,6 +114,9 @@ def cmd_generate(args):
         gpu_memory_utilization=args.gpu_memory_utilization,
         verbose=args.verbose,
         retry_incorrect=args.retry_incorrect,
+        multi_turn=args.multi_turn,  # None = use method config
+        max_turns=args.max_turns,  # None = use method config
+        use_async=getattr(args, "use_async", False),
     )
 
 
@@ -125,6 +129,7 @@ def cmd_evaluate(args):
         task_name=args.task,
         model_name=args.model,
         method_name=args.method,
+        run_id=args.run_id,
         prompts_path=prompts_path,
         output_path=output_path,
         batch_size=args.batch_size,
@@ -134,6 +139,9 @@ def cmd_evaluate(args):
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         verbose=args.verbose,
+        multi_turn=args.multi_turn,  # None = use method config
+        max_turns=args.max_turns,  # None = use method config
+        use_async=getattr(args, "use_async", False),
     )
 
 
@@ -171,6 +179,7 @@ def cmd_train_sft(args):
         task_name=args.task,
         base_model=args.base_model,
         method_name=args.method,
+        run_id=getattr(args, "run_id", None),
         dataset_path=dataset_path,
         output_path=output_path,
         epochs=args.epochs,
@@ -188,6 +197,7 @@ def cmd_train_sft(args):
         experiment_name=args.experiment_name,
         include_abstained=not args.no_abstained,
         include_wrong_valid_format=args.include_wrong_valid_format,
+        cleanup_checkpoints=not args.keep_checkpoints,
     )
 
 
@@ -203,6 +213,8 @@ def cmd_train_rl(args):
     commands.train_rl(
         task_name=args.task,
         method_name=args.method,
+        run_id=args.run_id,
+        base_model=args.base_model,
         train_prompts_path=train_prompts_path,
         val_prompts_path=val_prompts_path,
         sft_model_path=sft_model_path,
@@ -224,6 +236,7 @@ def cmd_train_rl(args):
         experiment_name=args.experiment_name,
         wandb=not args.no_wandb,
         resume_path=resume_path,
+        cleanup_checkpoints=not args.keep_checkpoints,
     )
 
 
@@ -303,6 +316,7 @@ def main():
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--model", required=True, help="Model name or path")
     p.add_argument("--method", help="Method name for auto-derived paths")
+    p.add_argument("--run-id", help="Run identifier for model resolution (used with --model sft/rl)")
     p.add_argument("--prompts", help="Path to prompts file (default: artifacts/{task}/{method}/prompts/{split}.json)")
     p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/datasets/{split}_{model}.json)")
     p.add_argument("--split", default="sft", help="Which split to generate from (default: sft)")
@@ -315,6 +329,9 @@ def main():
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
     p.add_argument("--retry-incorrect", action="store_true", help="Re-run incorrect examples from existing output")
+    p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
+    p.add_argument("--max-turns", type=int, default=None, help="Maximum turns for multi-turn generation (default: from method config or 5)")
+    p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput, processes all prompts concurrently)")
     p.set_defaults(func=cmd_generate)
 
     # evaluate
@@ -322,6 +339,7 @@ def main():
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--model", required=True, help="Model name/path, or 'sft'/'rl' to use method's model")
     p.add_argument("--method", help="Method name for auto-derived paths")
+    p.add_argument("--run-id", help="Run identifier for model resolution (used with --model sft/rl)")
     p.add_argument("--prompts", help="Path to eval prompts (default: artifacts/{task}/{method}/prompts/eval.json)")
     p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/results/eval_{model}.json)")
     p.add_argument("--batch-size", type=int, default=16, help="Batch size")
@@ -331,6 +349,9 @@ def main():
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
+    p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
+    p.add_argument("--max-turns", type=int, default=None, help="Maximum turns for multi-turn generation (default: from method config or 5)")
+    p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput)")
     p.set_defaults(func=cmd_evaluate)
 
     # analyze
@@ -355,8 +376,9 @@ def main():
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--base-model", required=True, help="Base model to fine-tune")
     p.add_argument("--method", help="Method name for auto-derived paths")
+    p.add_argument("--run-id", help="Run identifier for organizing outputs (default: 'default')")
     p.add_argument("--dataset", help="Path to generated dataset (default: auto-detect from method)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/models/sft)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/models/sft/{run_id}/model)")
     p.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
     p.add_argument("--batch-size", type=int, default=4, help="Per-device batch size")
     p.add_argument("--gradient-accumulation-steps", type=int, default=4, help="Gradient accumulation steps")
@@ -368,20 +390,23 @@ def main():
     p.add_argument("--logging-steps", type=int, default=10, help="Log every N steps")
     p.add_argument("--no-bf16", action="store_true", help="Disable bfloat16 training")
     p.add_argument("--report-to", default="wandb", help="Reporting integration (wandb, none)")
-    p.add_argument("--project-name", default="sft", help="Wandb project name")
-    p.add_argument("--experiment-name", help="Custom experiment name (default: {task}-{method}-sft-{model})")
+    p.add_argument("--project-name", help="Wandb project name (default: {task}-sft)")
+    p.add_argument("--experiment-name", help="Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})")
     p.add_argument("--no-abstained", action="store_true", help="Exclude abstained examples (by default they're included)")
     p.add_argument("--include-wrong-valid-format", action="store_true", help="Include wrong answers with valid format (task-specific, e.g., valid UCI but wrong move for chess)")
+    p.add_argument("--keep-checkpoints", action="store_true", help="Keep intermediate checkpoints after training (by default they are deleted)")
     p.set_defaults(func=cmd_train_sft)
 
     # train_rl
     p = subparsers.add_parser("train_rl", help="Train RL model using verl (GRPO)")
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--method", help="Method name for auto-derived paths, template, and reward config")
+    p.add_argument("--run-id", help="Run identifier for organizing outputs (default: 'default')")
+    p.add_argument("--base-model", help="Base model for cold-start RL (mutually exclusive with --sft-model)")
     p.add_argument("--train-prompts", help="Path to RL train prompts (default: artifacts/{task}/{method}/prompts/rl_train.parquet)")
     p.add_argument("--val-prompts", help="Path to RL validation prompts (default: artifacts/{task}/{method}/prompts/rl_val.parquet)")
-    p.add_argument("--sft-model", help="Path to SFT model (default: artifacts/{task}/{method}/models/sft)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/models/rl)")
+    p.add_argument("--sft-model", help="Path to SFT model (mutually exclusive with --base-model)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/models/rl/{run_id}/model)")
     p.add_argument("--reward-function", help="Path to reward function (default: task's reward function)")
     p.add_argument("--train-batch-size", type=int, default=256, help="Training batch size")
     p.add_argument("--val-batch-size", type=int, default=256, help="Validation batch size")
@@ -395,10 +420,11 @@ def main():
     p.add_argument("--max-response-length", type=int, default=2048, help="Maximum response length in tokens")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.4, help="GPU memory utilization")
-    p.add_argument("--project-name", default="countdown-rl", help="Wandb project name")
-    p.add_argument("--experiment-name", help="Custom experiment name (default: auto-generated)")
+    p.add_argument("--project-name", help="Wandb project name (default: {task}-rl)")
+    p.add_argument("--experiment-name", help="Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})")
     p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     p.add_argument("--resume", help="Path to resume from existing run")
+    p.add_argument("--keep-checkpoints", action="store_true", help="Keep checkpoints and rollouts after training (by default they are deleted)")
     p.set_defaults(func=cmd_train_rl)
 
     # train_classifier
