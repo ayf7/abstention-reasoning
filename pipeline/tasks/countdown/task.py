@@ -76,16 +76,21 @@ class CountdownTask(BaseTask):
 
         Validates:
         1. Check for abstention (<abstain> tag)
-        2. Answer can be parsed from <answer> tags
-        3. Expression only uses available numbers
-        4. Each number used at most once
-        5. Expression evaluates to target
+        2. Count hint requests (<request> tags)
+        3. Answer can be parsed from <answer> tags
+        4. Expression only uses available numbers
+        5. Each number used at most once
+        6. Expression evaluates to target
         """
+        # Count hint requests
+        num_hints = generation.count("<request>")
+
         # Check for <abstain> tag first
         if "<abstain>" in generation:
             return False, {
                 "predicted_answer": None,
                 "abstained": True,
+                "num_hints": num_hints,
             }
 
         answer = self.extract_answer(generation)
@@ -95,6 +100,7 @@ class CountdownTask(BaseTask):
                 "predicted_answer": None,
                 "error": "no_answer_tag",
                 "abstained": False,
+                "num_hints": num_hints,
             }
 
         try:
@@ -110,6 +116,7 @@ class CountdownTask(BaseTask):
                         "error": "invalid_number",
                         "invalid_number": num,
                         "abstained": False,
+                        "num_hints": num_hints,
                     }
                 available.remove(num)
 
@@ -124,6 +131,7 @@ class CountdownTask(BaseTask):
                 "result": result,
                 "target": primitive["target"],
                 "abstained": False,
+                "num_hints": num_hints,
             }
 
         except Exception as e:
@@ -131,6 +139,7 @@ class CountdownTask(BaseTask):
                 "predicted_answer": answer,
                 "error": str(e),
                 "abstained": False,
+                "num_hints": num_hints,
             }
 
     def compute_reward(

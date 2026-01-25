@@ -140,6 +140,7 @@ class _PuzzleGenerator:
                 "target": target,
                 "numbers": numbers,
                 "answer": str(tree),
+                "hint_exprs": self._extract_hints(tree),  # Note: plural to match verl rollout
                 "variant": f"{num_operands}_operands",
             }
             records.append(record)
@@ -236,3 +237,23 @@ class _PuzzleGenerator:
         if left_val is None or right_val is None:
             return None
         return OPS[node.value](left_val, right_val)
+
+    @staticmethod
+    def _extract_hints(node: ExprNode) -> list[str]:
+        """
+        Extract intermediate expression hints from an ExprNode, bottom-up order.
+
+        Returns hints from leaves upward, so simpler sub-expressions come first.
+        This ordering allows hints to progressively guide the solver.
+
+        Example: For "((35 / 1) + (30 + 2))" with target 67:
+            Returns: ['(35 / 1)', '(30 + 2)', '((35 / 1) + (30 + 2))']
+        """
+        if node.is_leaf():
+            return []
+
+        hints = []
+        hints += _PuzzleGenerator._extract_hints(node.left)
+        hints += _PuzzleGenerator._extract_hints(node.right)
+        hints.append(str(node))  # Current expression at this node
+        return hints

@@ -1,0 +1,5 @@
+Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once.
+
+If you are stuck, you can request a hint by outputting <request></request>. The system will provide an intermediate expression in <response></response> tags to help guide your solution.
+
+Show your work in <think> </think> tags. And return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>.

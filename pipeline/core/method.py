@@ -22,6 +22,7 @@ class Method:
     - template_variant: Which template variant to use (e.g., "simple", "simple_abstention")
     - reward_function: Name of reward function for RL training
     - reward_kwargs: Additional arguments for reward function
+    - allow_hint: Enable multi-turn hint generation in RL (default: False)
     - assistant_prefix: Prefix for assistant responses (used in SFT and RL)
 
     Methods also provide auto-derived artifact paths based on task and method name.
@@ -31,7 +32,15 @@ class Method:
     template_variant: str
     reward_function: str = "compute_score"
     reward_kwargs: dict[str, Any] = field(default_factory=dict)
+    multi_turn: bool = False  # Enable multi-turn hint generation
+    max_turns: int = 5  # Maximum turns for multi-turn generation
     assistant_prefix: str | None = None  # If None, use task's default
+
+    # Backwards compatibility alias
+    @property
+    def allow_hint(self) -> bool:
+        """Alias for multi_turn (backwards compatibility)."""
+        return self.multi_turn
 
     @classmethod
     def load(cls, name_or_path: str, task_name: str) -> "Method":
@@ -68,11 +77,16 @@ class Method:
         with open(config_path) as f:
             data = yaml.safe_load(f)
 
+        # Support both 'multi_turn' and legacy 'allow_hint' field names
+        multi_turn = data.get("multi_turn", data.get("allow_hint", False))
+
         return cls(
             name=data.get("name", name_or_path),
             template_variant=data["template_variant"],
             reward_function=data.get("reward_function", "compute_score"),
             reward_kwargs=data.get("reward_kwargs", {}),
+            multi_turn=multi_turn,
+            max_turns=data.get("max_turns", 5),
             assistant_prefix=data.get("assistant_prefix"),
         )
 
@@ -130,43 +144,67 @@ class Method:
         """Get the models directory."""
         return self.artifacts_dir(task_name) / "models"
 
-    def sft_model_path(self, task_name: str) -> Path:
-        """Get the SFT model path."""
-        return self.models_dir(task_name) / "sft"
+    def sft_run_dir(self, task_name: str, run_id: str | None = None) -> Path:
+        """
+        Get the SFT run directory.
 
-    def rl_model_path(self, task_name: str) -> Path:
+        Args:
+            task_name: Name of task
+            run_id: Run identifier (default: "default")
+
+        Returns:
+            Path to models/sft/{run_id}/
+        """
+        run_id = run_id or "default"
+        return self.models_dir(task_name) / "sft" / run_id
+
+    def sft_model_path(self, task_name: str, run_id: str | None = None) -> Path:
+        """
+        Get the SFT model path.
+
+        Args:
+            task_name: Name of task
+            run_id: Run identifier (default: "default")
+
+        Returns:
+            Path to models/sft/{run_id}/model/
+        """
+        return self.sft_run_dir(task_name, run_id) / "model"
+
+    def rl_run_dir(self, task_name: str, run_id: str | None = None) -> Path:
+        """
+        Get the RL run directory.
+
+        Args:
+            task_name: Name of task
+            run_id: Run identifier (default: "default")
+
+        Returns:
+            Path to models/rl/{run_id}/
+        """
+        run_id = run_id or "default"
+        return self.models_dir(task_name) / "rl" / run_id
+
+    def rl_checkpoints_dir(self, task_name: str, run_id: str | None = None) -> Path:
+        """Get the RL checkpoints directory: models/rl/{run_id}/checkpoints/"""
+        return self.rl_run_dir(task_name, run_id) / "checkpoints"
+
+    def rl_rollouts_dir(self, task_name: str, run_id: str | None = None) -> Path:
+        """Get the RL rollouts directory: models/rl/{run_id}/rollouts/"""
+        return self.rl_run_dir(task_name, run_id) / "rollouts"
+
+    def rl_model_path(self, task_name: str, run_id: str | None = None) -> Path:
         """
         Get the RL model path.
 
-        First checks for models/rl directory. If not found, searches for
-        the latest checkpoint matching *_rl_step* pattern (highest step number).
+        Args:
+            task_name: Name of task
+            run_id: Run identifier (default: "default")
+
+        Returns:
+            Path to models/rl/{run_id}/model/
         """
-        import re
-
-        models_dir = self.models_dir(task_name)
-        default_path = models_dir / "rl"
-
-        # If default rl/ directory exists, use it
-        if default_path.exists():
-            return default_path
-
-        # Otherwise, find latest *_rl_step* checkpoint
-        if models_dir.exists():
-            rl_checkpoints = []
-            for d in models_dir.iterdir():
-                if d.is_dir() and "_rl_step" in d.name:
-                    match = re.search(r"_rl_step(\d+)", d.name)
-                    if match:
-                        step_num = int(match.group(1))
-                        rl_checkpoints.append((step_num, d))
-
-            if rl_checkpoints:
-                # Return the one with highest step number
-                latest = max(rl_checkpoints, key=lambda x: x[0])
-                return latest[1]
-
-        # Fallback to default path (will error if not found)
-        return default_path
+        return self.rl_run_dir(task_name, run_id) / "model"
 
     def classifier_model_path(self, task_name: str) -> Path:
         """Get the classifier model path."""
