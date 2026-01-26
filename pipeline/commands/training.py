@@ -171,38 +171,91 @@ def train_sft(
     print(f"Loading tokenizer for {base_model}")
     tokenizer = AutoTokenizer.from_pretrained(base_model)
 
-    # Format as prompt/completion pairs
+    # Check if we need response masking
+    mask_response_tokens = method.mask_response_tokens if method else False
+
+    # Ensure pad token is set
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    # Format data for SFT
     print("Formatting for SFT...")
     formatted = []
-    for ex in filtered_examples:
-        # Apply chat template to prompt messages (excluding assistant prefix)
-        messages = ex["prompt"]
-        if messages and messages[-1]["role"] == "assistant":
-            conversation = messages[:-1]
-            assistant_prefix = messages[-1]["content"]
-        else:
-            conversation = messages
-            assistant_prefix = ""
 
-        prompt = tokenizer.apply_chat_template(
-            conversation,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+    if mask_response_tokens:
+        # Pre-tokenize with response masking for clean boundaries
+        from pipeline.core.utils import tokenize_with_response_mask
 
-        # Completion is assistant prefix + generation
-        completion = assistant_prefix + ex["generation"]
+        print("  Using segmented tokenization for response masking")
+        print("  Masking \\n<response>...</response>\\n spans")
 
-        formatted.append({
-            "prompt": prompt,
-            "completion": completion,
-        })
+        for ex in filtered_examples:
+            # Apply chat template to prompt messages (excluding assistant prefix)
+            messages = ex["prompt"]
+            if messages and messages[-1]["role"] == "assistant":
+                conversation = messages[:-1]
+                assistant_prefix = messages[-1]["content"]
+            else:
+                conversation = messages
+                assistant_prefix = ""
+
+            prompt = tokenizer.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
+            # Completion is assistant prefix + generation
+            completion = assistant_prefix + ex["generation"]
+
+            # Tokenize prompt (all masked, completion_mask=0)
+            prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
+
+            # Tokenize completion with response masking
+            completion_tokens, response_mask = tokenize_with_response_mask(
+                completion, tokenizer
+            )
+
+            # Combine: prompt (mask=0) + completion (mask from response_mask)
+            input_ids = prompt_tokens + completion_tokens
+            completion_mask = [0] * len(prompt_tokens) + response_mask
+
+            formatted.append({
+                "input_ids": input_ids,
+                "completion_mask": completion_mask,
+            })
+    else:
+        # Standard prompt/completion format (SFTTrainer handles tokenization)
+        for ex in filtered_examples:
+            messages = ex["prompt"]
+            if messages and messages[-1]["role"] == "assistant":
+                conversation = messages[:-1]
+                assistant_prefix = messages[-1]["content"]
+            else:
+                conversation = messages
+                assistant_prefix = ""
+
+            prompt = tokenizer.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
+            completion = assistant_prefix + ex["generation"]
+
+            formatted.append({
+                "prompt": prompt,
+                "completion": completion,
+            })
 
     dataset = Dataset.from_list(formatted)
 
     # Train/eval split
     split = dataset.train_test_split(test_size=eval_split, seed=42)
     print(f"Train: {len(split['train'])}, Eval: {len(split['test'])}")
+
+    # Data collator - standard collator handles completion_mask
+    data_collator = None
 
     # Training config
     training_args = SFTConfig(
@@ -235,6 +288,7 @@ def train_sft(
         args=training_args,
         train_dataset=split["train"],
         eval_dataset=split["test"],
+        data_collator=data_collator,
     )
 
     trainer.train()

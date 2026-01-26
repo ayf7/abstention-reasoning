@@ -37,6 +37,13 @@ Examples:
     #   prompts/, datasets/, models/, results/
 """
 
+# IMPORTANT: Set VLLM's multiprocessing method before any imports.
+# This prevents "Cannot re-initialize CUDA in forked subprocess" errors
+# when using VLLM's AsyncLLMEngine which spawns worker processes.
+# VLLM reads this env var rather than Python's multiprocessing.set_start_method().
+import os
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
 import argparse
 from pathlib import Path
 

@@ -53,9 +53,10 @@ def compute_hint_metrics(details: list[dict]) -> dict:
 
 
 def format_hint_metrics(hint_metrics: dict, details: list[dict]) -> str:
-    """Format hint metrics as tables for display."""
-    from collections import defaultdict
+    """Format hint metrics as tables for display.
 
+    Tables have operands (variants) as rows and hint counts as columns.
+    """
     counts = hint_metrics["counts_by_hints_and_variant"]
     correct = hint_metrics["correct_by_hints_and_variant"]
     max_hints = hint_metrics["max_hints"]
@@ -63,110 +64,122 @@ def format_hint_metrics(hint_metrics: dict, details: list[dict]) -> str:
     # Get variants from details
     variants = sorted(set(d.get("variant", "unknown") for d in details))
 
+    # Helper to get count value (handles both int and str keys)
+    def get_count(h, v):
+        return counts.get(str(h), {}).get(v, counts.get(h, {}).get(v, 0))
+
+    def get_correct(h, v):
+        return correct.get(str(h), {}).get(v, correct.get(h, {}).get(v, 0))
+
     lines = [
         "",
-        "=" * 70,
+        "=" * 90,
         "HINT USAGE ANALYSIS",
-        "=" * 70,
+        "=" * 90,
         "",
-        "COUNTS BY HINTS AND OPERANDS",
-        "-" * 70,
+        "COUNTS BY OPERANDS AND HINTS",
+        "-" * 90,
     ]
 
-    # Header
-    header = f"{'Hints':<8}"
-    for v in variants:
-        header += f"{v:>14}"
-    header += f"{'Total':>12}"
-    lines.append(header)
-    lines.append("-" * 70)
-
-    # Rows
+    # Header: Operands | 0 | 1 | 2 | ... | Total | Hints
+    header = f"{'Operands':<12}"
     for h in range(max_hints + 1):
-        row = f"{h:<8}"
+        header += f"{h:>10}"
+    header += f"{'Total':>10}{'Hints':>10}"
+    lines.append(header)
+    lines.append("-" * 90)
+
+    # Rows: one per variant
+    grand_total = 0
+    grand_hints = 0
+    col_totals = [0] * (max_hints + 1)
+
+    for v in variants:
+        row = f"{v:<12}"
         row_total = 0
-        for v in variants:
-            c = counts.get(str(h), {}).get(v, counts.get(h, {}).get(v, 0))
+        row_hints = 0
+        for h in range(max_hints + 1):
+            c = get_count(h, v)
             row_total += c
-            row += f"{c:>14}"
-        row += f"{row_total:>12}"
+            row_hints += h * c
+            col_totals[h] += c
+            row += f"{c:>10}"
+        grand_total += row_total
+        grand_hints += row_hints
+        row += f"{row_total:>10}{row_hints:>10}"
         lines.append(row)
 
-    # Totals
-    lines.append("-" * 70)
-    totals_row = f"{'Total':<8}"
-    grand_total = 0
-    for v in variants:
-        col_total = sum(counts.get(str(h), {}).get(v, counts.get(h, {}).get(v, 0)) for h in range(max_hints + 1))
-        grand_total += col_total
-        totals_row += f"{col_total:>14}"
-    totals_row += f"{grand_total:>12}"
+    # Totals row
+    lines.append("-" * 90)
+    totals_row = f"{'Total':<12}"
+    for h in range(max_hints + 1):
+        totals_row += f"{col_totals[h]:>10}"
+    totals_row += f"{grand_total:>10}{grand_hints:>10}"
     lines.append(totals_row)
-
-    # Hints totals
-    hints_row = f"{'Hints':<8}"
-    hints_grand = 0
-    for v in variants:
-        hints_total = sum(h * counts.get(str(h), {}).get(v, counts.get(h, {}).get(v, 0)) for h in range(max_hints + 1))
-        hints_grand += hints_total
-        hints_row += f"{hints_total:>14}"
-    hints_row += f"{hints_grand:>12}"
-    lines.append(hints_row)
 
     # Accuracy table
     lines.extend([
         "",
         "",
-        "ACCURACY BY HINTS AND OPERANDS",
-        "-" * 70,
+        "ACCURACY BY OPERANDS AND HINTS",
+        "-" * 90,
     ])
 
     # Header
-    lines.append(header)
-    lines.append("-" * 70)
-
-    # Rows
+    header = f"{'Operands':<12}"
     for h in range(max_hints + 1):
-        row = f"{h:<8}"
+        header += f"{h:>16}"
+    header += f"{'Total':>16}"
+    lines.append(header)
+    lines.append("-" * 90)
+
+    # Rows: one per variant
+    overall_correct = 0
+    overall_total = 0
+    col_correct_totals = [0] * (max_hints + 1)
+    col_count_totals = [0] * (max_hints + 1)
+
+    for v in variants:
+        row = f"{v:<12}"
         row_correct = 0
         row_total = 0
-        for v in variants:
-            c = counts.get(str(h), {}).get(v, counts.get(h, {}).get(v, 0))
-            corr = correct.get(str(h), {}).get(v, correct.get(h, {}).get(v, 0))
+        for h in range(max_hints + 1):
+            c = get_count(h, v)
+            corr = get_correct(h, v)
             row_correct += corr
             row_total += c
+            col_correct_totals[h] += corr
+            col_count_totals[h] += c
             if c > 0:
                 acc = f"{100*corr/c:.0f}%"
                 cell = f"{corr}/{c} ({acc})"
-                row += f"{cell:>14}"
+                row += f"{cell:>16}"
             else:
-                row += f"{'--':>14}"
+                row += f"{'--':>16}"
+        overall_correct += row_correct
+        overall_total += row_total
         if row_total > 0:
             acc = f"{100*row_correct/row_total:.0f}%"
-            row += f"{row_correct}/{row_total} ({acc})".rjust(12)
+            row += f"{row_correct}/{row_total} ({acc})".rjust(16)
         else:
-            row += f"{'--':>12}"
+            row += f"{'--':>16}"
         lines.append(row)
 
-    # Overall accuracy
-    lines.append("-" * 70)
-    totals_row = f"{'Total':<8}"
-    overall_correct = 0
-    overall_total = 0
-    for v in variants:
-        col_correct = sum(correct.get(str(h), {}).get(v, correct.get(h, {}).get(v, 0)) for h in range(max_hints + 1))
-        col_total = sum(counts.get(str(h), {}).get(v, counts.get(h, {}).get(v, 0)) for h in range(max_hints + 1))
-        overall_correct += col_correct
-        overall_total += col_total
-        if col_total > 0:
-            acc = f"{100*col_correct/col_total:.0f}%"
-            cell = f"{col_correct}/{col_total} ({acc})"
-            totals_row += f"{cell:>14}"
+    # Totals row
+    lines.append("-" * 90)
+    totals_row = f"{'Total':<12}"
+    for h in range(max_hints + 1):
+        c = col_count_totals[h]
+        corr = col_correct_totals[h]
+        if c > 0:
+            acc = f"{100*corr/c:.0f}%"
+            cell = f"{corr}/{c} ({acc})"
+            totals_row += f"{cell:>16}"
         else:
-            totals_row += f"{'--':>14}"
+            totals_row += f"{'--':>16}"
     if overall_total > 0:
         acc = f"{100*overall_correct/overall_total:.0f}%"
-        totals_row += f"{overall_correct}/{overall_total} ({acc})".rjust(12)
+        totals_row += f"{overall_correct}/{overall_total} ({acc})".rjust(16)
     lines.append(totals_row)
 
     return "\n".join(lines)

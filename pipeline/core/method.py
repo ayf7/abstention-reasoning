@@ -24,6 +24,7 @@ class Method:
     - reward_kwargs: Additional arguments for reward function
     - allow_hint: Enable multi-turn hint generation in RL (default: False)
     - assistant_prefix: Prefix for assistant responses (used in SFT and RL)
+    - mask_response_tokens: Mask <response>...</response> tokens during SFT (default: False)
 
     Methods also provide auto-derived artifact paths based on task and method name.
     """
@@ -35,6 +36,7 @@ class Method:
     multi_turn: bool = False  # Enable multi-turn hint generation
     max_turns: int = 5  # Maximum turns for multi-turn generation
     assistant_prefix: str | None = None  # If None, use task's default
+    mask_response_tokens: bool = False  # Mask <response>...</response> in SFT
 
     # Backwards compatibility alias
     @property
@@ -88,6 +90,7 @@ class Method:
             multi_turn=multi_turn,
             max_turns=data.get("max_turns", 5),
             assistant_prefix=data.get("assistant_prefix"),
+            mask_response_tokens=data.get("mask_response_tokens", False),
         )
 
     @staticmethod
