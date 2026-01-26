@@ -306,12 +306,18 @@ class vLLMRollout(BaseRollout):
         idx_to_masks = [[] for _ in range(num_outputs)]
         idx_to_num_hints = [0.0 for _ in range(num_outputs)]
         idx_to_truncation = [0.0 for _ in range(num_outputs)]
+        idx_to_malformed = [False for _ in range(num_outputs)]  # Track malformed requests
         completed_indices = [False for _ in range(num_outputs)]
         hint_list_dups = [h for h in hint_list for _ in range(sampling_params.n)]
 
-        hint_pattern = r'</request>'
+        # Pattern for valid hint request: exactly <request></request> with nothing inside
+        valid_request_pattern = r'<request></request>'
+        # Pattern to detect any request tag (for malformed detection)
+        any_request_pattern = r'</request>'
         answer_pattern = r'<answer>(.*?)</answer>'
         eps = prompts.non_tensor_batch["epsilon"][0]
+        sampling_params_nohint = copy.deepcopy(sampling_params)
+        sampling_params_nohint.bad_words = ['</r']  # Prevent </request> in no-hint mode
 
         # Single sampling params for all rollouts (n=1 since expansion already done)
         loop_sampling_params = copy.deepcopy(sampling_params)
@@ -355,22 +361,37 @@ class vLLMRollout(BaseRollout):
                 partial_tokens.append(output.outputs[0].token_ids)
                 partial_masks.append([1] * len(output.outputs[0].token_ids))
 
-                hint_matches = re.findall(hint_pattern, output_text, re.DOTALL)
+                # Check for any </request> tag in output
+                has_request_tag = any_request_pattern in output_text
+                valid_request_matches = re.findall(valid_request_pattern, output_text)
                 answer_matches = re.findall(answer_pattern, output_text, re.DOTALL)
 
-                if len(hint_matches) != 0:
-                    # Model requested a hint
-                    idx_to_num_hints[curr_idx] += 1
+                if has_request_tag:
+                    # Check if it's a valid request (exactly <request></request>)
+                    if len(valid_request_matches) > 0:
+                        # Valid hint request
+                        idx_to_num_hints[curr_idx] += 1
 
-                    if idx_to_num_hints[curr_idx] > self.max_hints:
-                        # Exceeded hint limit
-                        hint_result = "\n<response>HINT LIMIT REACHED</response>\n"
-                        doc_tokens = list(self.tokenizer(hint_result, add_special_tokens=False)['input_ids'])
-                        partial_tokens.append(doc_tokens)
-                        partial_masks.append([0] * len(doc_tokens))
-                        completed_indices[curr_idx] = True
+                        if idx_to_num_hints[curr_idx] > self.max_hints:
+                            # Add the failure message
+                            hint_result = "\n<response>HINT LIMIT REACHED</response>\n"
+                            doc_tokens = list(self.tokenizer(hint_result, add_special_tokens=False)['input_ids'])
+                            partial_tokens.append(doc_tokens)
+                            partial_masks.append([0] * len(doc_tokens))
+                            completed_indices[curr_idx] = True
+
+                            # Early truncation check
+                            if self.exceeds_vllm_length(partial_tokens):
+                                idx_to_truncation[curr_idx] = 1
+                        else:
+                            hint_indices.append(curr_idx)
                     else:
-                        hint_indices.append(curr_idx)
+                        # Malformed request (has </request> but not exactly <request></request>)
+                        # Mark as completed - reward function will give 0
+                        idx_to_malformed[curr_idx] = True
+                        completed_indices[curr_idx] = True
+                        if random.randint(1, 64) == 1:
+                            print(f"Malformed <request> tag detected in output: {output_text[:200]}...")
 
                 elif len(answer_matches) != 0:
                     # Model produced an answer
@@ -380,11 +401,12 @@ class vLLMRollout(BaseRollout):
                     if random.random() < eps and score_curr < 1 and idx_to_num_hints[curr_idx] < self.max_hints:
                         # Force hint request
                         idx_to_num_hints[curr_idx] += 1
-                        doc_tokens = list(self.tokenizer('<request>', add_special_tokens=False)['input_ids'])
+                        # Inject valid <request></request> for epsilon-greedy exploration
+                        doc_tokens = list(self.tokenizer('<request></request>', add_special_tokens=False)['input_ids'])
                         partial_generation = re.sub(answer_pattern, '', output_text)
 
-                        partial_tokens[-1] = self.tokenizer(partial_generation)["input_ids"]
-                        partial_masks[-1] = partial_masks[-1][:len(partial_tokens[-1])]
+                        partial_tokens[-1] = list(self.tokenizer(partial_generation, add_special_tokens=False)['input_ids'])
+                        partial_masks[-1] = [1] * len(partial_tokens[-1])
                         partial_tokens.append(doc_tokens)
                         partial_masks.append([0] * len(doc_tokens))
                         hint_indices.append(curr_idx)
@@ -402,20 +424,17 @@ class vLLMRollout(BaseRollout):
                     partial_tokens.append(correction_tokens)
                     partial_masks.append([0] * len(correction_tokens))
 
-                # Check for length truncation
-                if self.exceeds_vllm_length(partial_tokens):
-                    completed_indices[curr_idx] = True
-                    idx_to_truncation[curr_idx] = 1
-
-            # Provide hints to those who requested them
             if tp_rank == 0:
                 hint_results = self.batched_hint(hint_indices, idx_to_num_hints, hint_list_dups)
-                broadcast_data = {'hint_results': hint_results}
+                broadcast_data = {
+                    'hint_results': hint_results,
+                }
             else:
                 broadcast_data = None
-            hint_results = vllm_ps._TP.broadcast_object(broadcast_data, src=0)['hint_results']
+            hint_results = vllm_ps._TP.broadcast_object(broadcast_data, src=0)['hint_results'] # broadcast tool call results across tp
 
             for curr_idx, hint_result in zip(hint_indices, hint_results):
+                # Add the hint response in <response>...</response> format
                 partial_tokens = idx_to_partials[curr_idx]
                 partial_masks = idx_to_masks[curr_idx]
                 doc_tokens = list(self.tokenizer("\n<response>" + hint_result + "</response>\n", add_special_tokens=False)['input_ids'])
@@ -423,11 +442,12 @@ class vLLMRollout(BaseRollout):
                 partial_tokens.append(doc_tokens)
                 partial_masks.append([0] * len(doc_tokens))
 
+                # Early truncation
                 if self.exceeds_vllm_length(partial_tokens):
                     completed_indices[curr_idx] = True
                     idx_to_truncation[curr_idx] = 1
 
-        return idx_to_partials, idx_to_masks, idx_to_num_hints, idx_to_truncation        
+        return idx_to_partials, idx_to_masks, idx_to_num_hints, idx_to_truncation, idx_to_malformed        
 
     def process_agentic_outputs(self, prompts, idx_to_partials, idx_to_masks, idx_to_truncation, device):
         # Get the vllm response and document mask tokens; pad them
@@ -522,8 +542,8 @@ class vLLMRollout(BaseRollout):
                                                     use_tqdm=False,
                                                 )"""
             #import debugpy; debugpy.breakpoint()
-            idx_to_partials, idx_to_masks, idx_to_num_hints, idx_to_truncation = self.agentic_loop(prompts, self.sampling_params, hint_list=hint_list)
-            
+            idx_to_partials, idx_to_masks, idx_to_num_hints, idx_to_truncation, idx_to_malformed = self.agentic_loop(prompts, self.sampling_params, hint_list=hint_list)
+
             response, document_mask = self.process_agentic_outputs(prompts, idx_to_partials, idx_to_masks, idx_to_truncation, idx.device)
 
             # TODO(sgm): disable logprob when recompute_log_prob is enable

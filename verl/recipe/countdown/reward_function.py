@@ -71,8 +71,32 @@ def evaluate_equation(equation_str):
     except Exception as e:
         return None
     
-def get_num_hints(solution_str, hint_pattern="<request>"):
-    return solution_str.count(hint_pattern)
+def get_num_hints(solution_str):
+    """Count valid hint requests (<request></request> with nothing inside)."""
+    return len(re.findall(r'<request></request>', solution_str))
+
+
+def has_malformed_request(solution_str):
+    """Check for any malformed <request>...</request> tags.
+
+    A request is malformed if:
+    - It contains any content (including whitespace) between tags
+    - Tags are unbalanced (unclosed <request> or extra </request>)
+
+    Returns:
+        True if malformed request found, False otherwise.
+    """
+    # Count valid (exactly empty) vs all request tags
+    valid_count = len(re.findall(r'<request></request>', solution_str))
+    open_count = solution_str.count('<request>')
+    close_count = solution_str.count('</request>')
+
+    # Malformed if: unclosed tags OR any <request>...</request> that isn't exactly <request></request>
+    if open_count != close_count:
+        return True
+    if open_count != valid_count:
+        return True
+    return False
 
 
 def compute_score(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., reward_abstain=False, abstention_score=0.3, penalize_hint=False, hint_penalty=0.2, **kwargs):
@@ -81,18 +105,24 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
     #format_score = 0
     target = ground_truth['target']
     numbers = ground_truth['numbers']
-    
+
     equation = extract_solution(solution_str=solution_str)
     do_print = random.randint(1, 64) == 1
 
     """if len(solution_str.split()) < 200:
         return 0"""
-    
+
     if do_print:
         print(f"--------------------------------")
         print(f"Target: {target} | Numbers: {numbers}")
         print(f"Extracted equation: {equation}")
         print(f"Solution string: {solution_str}")
+
+    # Check for malformed request tags first - return 0 immediately
+    if has_malformed_request(solution_str):
+        if do_print:
+            print(f"Malformed <request> tag detected - awarding 0")
+        return {"score": 0, "score_wo_hint_penalty": 0, "num_hints": 0, "abstained": False, "malformed": True}
 
     num_hints = get_num_hints(solution_str)
 
