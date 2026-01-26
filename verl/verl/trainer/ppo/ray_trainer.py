@@ -185,19 +185,28 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
 
 def compute_response_mask(data: DataProto):
-    """Compute the attention mask for the response part of the sequence.
+    """Compute the mask for response tokens, respecting document_mask if available.
 
-    This function extracts the portion of the attention mask that corresponds to the model's response,
-    which is used for masking computations that should only apply to response tokens.
+    For multi-turn interactions with system-injected tokens (like hint responses),
+    document_mask marks those tokens with 0 to exclude them from training.
+    If document_mask is not present, falls back to standard attention_mask behavior.
 
     Args:
         data (DataProto): The data containing batched model outputs and inputs.
 
     Returns:
-        torch.Tensor: The attention mask for the response tokens.
+        torch.Tensor: The mask for response tokens (1=train on token, 0=skip token).
     """
     responses = data.batch["responses"]
     response_length = responses.size(1)
+
+    # Use document_mask if available (multi-turn with masked tokens)
+    # document_mask has 0s for system-injected tokens like <response>...</response>
+    if "document_mask" in data.batch:
+        document_mask = data.batch["document_mask"]
+        return document_mask[:, -response_length:]
+
+    # Standard case: use attention_mask for response portion
     attention_mask = data.batch["attention_mask"]
     return attention_mask[:, -response_length:]
 

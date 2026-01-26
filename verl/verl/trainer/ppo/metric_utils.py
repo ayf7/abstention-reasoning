@@ -183,13 +183,25 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         metrics["num_turns/mean"] = num_turns.mean()
 
     try:
-        metrics["critic/num_hints/mean"] = torch.mean(num_hints).detach().item()
-        metrics["critic/num_hints/max"] = torch.max(num_hints).detach().item()
-        metrics["critic/num_hints/min"] = torch.min(num_hints).detach().item()
+        metrics["rollout/num_hints/mean"] = torch.mean(num_hints).detach().item()
+        metrics["rollout/num_hints/max"] = torch.max(num_hints).detach().item()
+        metrics["rollout/num_hints/min"] = torch.min(num_hints).detach().item()
+
+        # Add distribution of num_hints (count for each value 0, 1, 2, 3+)
+        num_hints_int = num_hints.detach().long()
+        total_samples = len(num_hints_int)
+        for i in range(4):  # 0, 1, 2, 3 hints
+            count = (num_hints_int == i).sum().item()
+            metrics[f"rollout/num_hints/count_{i}"] = count
+            metrics[f"rollout/num_hints/pct_{i}"] = count / total_samples if total_samples > 0 else 0
+        # 3+ hints (in case max_hints > 3)
+        count_3plus = (num_hints_int >= 3).sum().item()
+        metrics["rollout/num_hints/count_3plus"] = count_3plus
+        metrics["rollout/num_hints/pct_3plus"] = count_3plus / total_samples if total_samples > 0 else 0
     except:
-        metrics["critic/num_hints/mean"] = 0
-        metrics["critic/num_hints/max"] = 0
-        metrics["critic/num_hints/min"] = 0
+        metrics["rollout/num_hints/mean"] = 0
+        metrics["rollout/num_hints/max"] = 0
+        metrics["rollout/num_hints/min"] = 0
 
     return metrics
 

@@ -117,8 +117,19 @@ def compute_data_metrics(batch, use_critic=True):
 
 
 def compute_response_mask(data: DataProto):
+    """Compute the mask for response tokens, respecting document_mask if available.
+
+    For multi-turn interactions with system-injected tokens (like hint responses),
+    document_mask marks those tokens with 0 to exclude them from training.
+    """
     responses = data.batch["responses"]
     response_length = responses.size(1)
+
+    # Use document_mask if available (multi-turn with masked tokens)
+    if "document_mask" in data.batch:
+        document_mask = data.batch["document_mask"]
+        return document_mask[:, -response_length:]
+
     attention_mask = data.batch["attention_mask"]
     return attention_mask[:, -response_length:]
 

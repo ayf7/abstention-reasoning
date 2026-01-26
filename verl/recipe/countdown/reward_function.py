@@ -71,7 +71,7 @@ def evaluate_equation(equation_str):
     except Exception as e:
         return None
     
-def get_num_hints(solution_str, hint_pattern="<hint>"):
+def get_num_hints(solution_str, hint_pattern="<request>"):
     return solution_str.count(hint_pattern)
 
 
@@ -171,7 +171,15 @@ def compute_score_abstain(data_source, solution_str, ground_truth, extra_info, m
         reward_abstain=True, abstention_score=abstention_score, **kwargs
     )
 
-def compute_score_hint(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., **kwargs):
-    """The scoring function for countdown that rewards the model for abstention naively
+def compute_score_hint(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., hint_penalty=0.1, **kwargs):
+    """The scoring function for countdown that penalizes hint usage.
+
+    Args:
+        hint_penalty: Multiplicative penalty per hint (default 0.1).
+            Final score = accuracy * (1 - hint_penalty * num_hints)
     """
-    return compute_score(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=format_score, score=score, penalize_hint=True, hint_penalty=0.1, **kwargs)
+    return compute_score(
+        data_source, solution_str, ground_truth, extra_info,
+        method=method, format_score=format_score, score=score,
+        penalize_hint=True, hint_penalty=hint_penalty, **kwargs
+    )

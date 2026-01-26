@@ -446,10 +446,18 @@ def train_rl(
     reward_kwargs = {}
     template_content = None
     allow_hint = False
+    rollout_backend = "vllm"
+    rollout_mode = "sync"
+    interaction_name = None
+    max_turns = 5
     if method is not None:
         reward_function_name = method.reward_function
         reward_kwargs = method.reward_kwargs
         allow_hint = method.allow_hint
+        rollout_backend = method.rollout_backend
+        rollout_mode = method.rollout_mode
+        interaction_name = method.interaction_name or (f"{task_name}_{method.name}" if method.multi_turn else None)
+        max_turns = method.max_turns
         template_content = method.load_template(task_name, "rl")
 
     # Handle resume path
@@ -512,7 +520,12 @@ def train_rl(
     print(f"Val Prompts: {val_prompts_path}")
     print(f"Reward Function: {reward_function_path}:{reward_function_name}")
     print(f"Reward Kwargs: {reward_kwargs}")
-    print(f"Allow Hint: {allow_hint}")
+    print(f"Rollout Backend: {rollout_backend}")
+    print(f"Rollout Mode: {rollout_mode}")
+    print(f"Multi-Turn: {allow_hint}")
+    if interaction_name:
+        print(f"Interaction: {interaction_name}")
+    print(f"Max Turns: {max_turns}")
     print(f"Run Directory: {run_dir}")
     print(f"Checkpoints: {checkpoints_dir}")
     print(f"Rollouts: {rollouts_dir}")
@@ -545,14 +558,15 @@ def train_rl(
         "actor_rollout_ref.actor.use_dynamic_bsz=True",
         f"actor_rollout_ref.actor.optim.lr={learning_rate}",
         "actor_rollout_ref.actor.ppo_mini_batch_size=64",
-        "actor_rollout_ref.actor.use_kl_loss=True",
+        "actor_rollout_ref.actor.use_kl_loss=False",
+        "actor_rollout_ref.actor.entropy_coeff=0.001",
         "actor_rollout_ref.actor.ppo_micro_batch_size=16",
         f"actor_rollout_ref.rollout.n={n_samples}",
         "actor_rollout_ref.rollout.log_prob_micro_batch_size=4",
         f"actor_rollout_ref.rollout.tensor_model_parallel_size={tensor_parallel_size}",
         f"actor_rollout_ref.rollout.gpu_memory_utilization={gpu_memory_utilization}",
         "actor_rollout_ref.ref.log_prob_micro_batch_size=4",
-        f"algorithm.kl_ctrl.kl_coef={kl_coef}",
+        "algorithm.kl_ctrl.kl_coef=0",
         f"trainer.logger={logger_config}",
         "trainer.default_hdfs_dir=null",
         f"trainer.default_local_dir={checkpoints_dir}",
@@ -581,9 +595,37 @@ def train_rl(
             escaped_prefix = assistant_prefix.replace("\n", "\\n").replace('"', '\\"')
             cmd.append(f'+data.runtime_assistant_prefix="{escaped_prefix}"')
 
-    # Add allow_hint flag for multi-turn hint generation
-    if allow_hint:
-        cmd.append("allow_hint=True")
+    # Add rollout backend configuration
+    if rollout_backend == "sglang":
+        # SGLang async multi-turn configuration
+        cmd.append("actor_rollout_ref.rollout.name=sglang")
+        cmd.append("data.return_raw_chat=True")  # Required for SGLang multi-turn
+
+        if allow_hint and interaction_name:
+            # Enable multi-turn with interaction system
+            cmd.append("actor_rollout_ref.rollout.multi_turn.enable=True")
+            cmd.append(f"actor_rollout_ref.rollout.multi_turn.max_user_turns={max_turns}")
+            cmd.append(f"actor_rollout_ref.rollout.multi_turn.max_assistant_turns={max_turns}")
+
+            # Set interaction config path (use absolute path for reliability)
+            interaction_config_path = repo_root / f"verl/examples/sglang_multiturn/config/interaction_config/{interaction_name}_interaction_config.yaml"
+            if not interaction_config_path.exists():
+                raise FileNotFoundError(
+                    f"Interaction config not found: {interaction_config_path}. "
+                    f"Create a config file for interaction '{interaction_name}'."
+                )
+            cmd.append(f"actor_rollout_ref.rollout.multi_turn.interaction_config_path={interaction_config_path}")
+
+            # Relax tokenization sanity check - delta tokenization has minor mismatches at turn
+            # boundaries due to chat template quirks (whitespace handling). Training still works.
+            cmd.append("actor_rollout_ref.rollout.multi_turn.tokenization_sanity_check_mode=off")
+    else:
+        # vLLM backend (default)
+        # Set rollout mode (sync, async, or async_agentic)
+        cmd.append(f"actor_rollout_ref.rollout.mode={rollout_mode}")
+        # Add allow_hint flag for multi-turn hint generation
+        if allow_hint:
+            cmd.append("allow_hint=True")
 
     # Add reward kwargs if specified in method config
     # Use + prefix to add new config keys

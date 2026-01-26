@@ -356,6 +356,30 @@ class RLHFDataset(Dataset):
         row_dict["index"] = index
         row_dict["tools_kwargs"] = tools_kwargs
         row_dict["interaction_kwargs"] = interaction_kwargs
+
+        # Unpack ground_truth fields to top level for rollout access
+        # The pipeline stores task-specific fields (hint_exprs, target, numbers) in ground_truth
+        # but the rollout expects them at the top level of non_tensor_batch
+        ground_truth = row_dict.get("ground_truth", {})
+        if not ground_truth:
+            # Also check reward_model.ground_truth (legacy format)
+            reward_model = row_dict.get("reward_model", {})
+            if isinstance(reward_model, dict):
+                ground_truth = reward_model.get("ground_truth", {})
+
+        if isinstance(ground_truth, dict):
+            # Extract hint_exprs (also handle legacy hints_expr name)
+            if "hint_exprs" in ground_truth:
+                row_dict["hint_exprs"] = ground_truth["hint_exprs"]
+            elif "hints_expr" in ground_truth:
+                row_dict["hint_exprs"] = ground_truth["hints_expr"]
+
+            # Extract target and numbers for countdown task
+            if "target" in ground_truth:
+                row_dict["target"] = ground_truth["target"]
+            if "numbers" in ground_truth:
+                row_dict["numbers"] = ground_truth["numbers"]
+
         return row_dict
 
     def __getstate__(self):

@@ -125,6 +125,7 @@ def create_prompts(
                 seed=seed,
                 include_assistant_prefix=include_assistant_prefix,
                 assistant_prefix=assistant_prefix,
+                method=method,
             )
         return results
 
@@ -141,6 +142,7 @@ def create_prompts(
         seed=seed,
         include_assistant_prefix=include_assistant_prefix,
         assistant_prefix=assistant_prefix,
+        method=method,
     )
 
 
@@ -154,6 +156,7 @@ def _create_prompts_single(
     seed: int,
     include_assistant_prefix: bool,
     assistant_prefix: str | None = None,
+    method: "Method | None" = None,
 ) -> Path:
     """Create prompts for a single split."""
     # Override task's assistant_prefix if method provided one
@@ -177,6 +180,15 @@ def _create_prompts_single(
     # For other splits (json), apply template now
     if fmt == "parquet":
         print(f"Creating {split_name} data for {len(primitives)} primitives (template applied at runtime)...")
+
+        # Determine interaction name for multi-turn methods
+        # Maps method name to interaction class name (e.g., "hint" -> "countdown_hint")
+        interaction_name = None
+        if method is not None and method.multi_turn:
+            # Use method's interaction_name if specified, else default to {task}_{method}
+            interaction_name = method.interaction_name or f"{task_name}_{method.name}"
+            print(f"  Multi-turn enabled: interaction_name={interaction_name}")
+
         records = []
         for primitive in primitives:
             # Enrich primitive with derived fields if task supports it
@@ -187,6 +199,17 @@ def _create_prompts_single(
                 enriched_primitive = primitive
 
             ground_truth = task.get_ground_truth(primitive)
+
+            # Build extra_info with interaction_kwargs for SGLang multi-turn
+            extra_info = {
+                "index": primitive["index"],
+            }
+            if interaction_name is not None:
+                extra_info["interaction_kwargs"] = {
+                    "name": interaction_name,
+                    "ground_truth": ground_truth,
+                }
+
             record = {
                 "index": primitive["index"],
                 "primitive": enriched_primitive,  # Store enriched primitive for runtime template
@@ -195,6 +218,7 @@ def _create_prompts_single(
                 "split": split_name,
                 "data_source": task_name,
                 "assistant_prefix": assistant_prefix,  # For verl runtime consistency
+                "extra_info": extra_info,  # For SGLang interaction system
                 "reward_model": {
                     "style": "rule",
                     "ground_truth": ground_truth,

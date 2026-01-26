@@ -26,6 +26,7 @@ When working with Megatron:
 - After inference, all the parameters that doesn't belong to this pp rank is freed.
 """
 
+import asyncio
 import logging
 import os
 import pickle
@@ -45,6 +46,7 @@ import zmq
 from filelock import FileLock
 from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
+from tqdm import tqdm
 from vllm import LLM, SamplingParams
 from vllm.distributed import parallel_state as vllm_ps
 from vllm.lora.request import LoRARequest
@@ -197,7 +199,7 @@ class vLLMRollout(BaseRollout):
         self.tokenizer = tokenizer
         self.allow_hint = config.allow_hint
         if self.allow_hint:
-            kwargs["stop"].append("<hint>")
+            kwargs["stop"].append("</request>")
 
         self.n = config.n
 
@@ -287,18 +289,18 @@ class vLLMRollout(BaseRollout):
         return hint_results
 
     def agentic_loop(self, prompts, sampling_params, hint_list, **kwargs):
+        """
+        Multi-turn agentic loop for hint-based generation.
 
+        All rollouts can ask for hints (up to max_hints). The model generates,
+        can request hints via </request>, receives responses, and continues.
+        """
         raw_prompt_ids = _repeat_interleave(prompts.non_tensor_batch["raw_prompt_ids"], sampling_params.n)
         targets = _repeat_interleave(prompts.non_tensor_batch["target"], sampling_params.n)
         numbers = [nos for nos in prompts.non_tensor_batch["numbers"] for _ in range(sampling_params.n)]
 
         num_outputs = len(raw_prompt_ids)
-        max_hint_structure = [0, 1, 2, 3]
-        #max_hint_structure = [0, 1, 2, 3, 0, 1, 2, 3]
         self.max_hints = 3
-        #max_hint_structure = [self.max_hints, self.max_hints, self.max_hints, self.max_hints, self.max_hints, self.max_hints, self.max_hints, self.max_hints, self.max_hints, self.max_hints, self.max_hints, self.max_hints, self.max_hints, self.max_hints, self.max_hints, self.max_hints]
-        hint_list_logs = [max_hint_structure[i] for _ in range(len(hint_list)) for i in range(len(max_hint_structure))]
-
 
         idx_to_partials = [[] for _ in range(num_outputs)]
         idx_to_masks = [[] for _ in range(num_outputs)]
@@ -307,128 +309,123 @@ class vLLMRollout(BaseRollout):
         completed_indices = [False for _ in range(num_outputs)]
         hint_list_dups = [h for h in hint_list for _ in range(sampling_params.n)]
 
-        hint_pattern = r'<hint>'
-        answer_pattern = r'<answer>(.*?)</answer>' 
+        hint_pattern = r'</request>'
+        answer_pattern = r'<answer>(.*?)</answer>'
         eps = prompts.non_tensor_batch["epsilon"][0]
-        sampling_params_nohint = copy.deepcopy(sampling_params)
-        sampling_params_nohint.bad_words = ['</h']
 
-        
+        # Single sampling params for all rollouts (n=1 since expansion already done)
+        loop_sampling_params = copy.deepcopy(sampling_params)
+        loop_sampling_params.n = 1  # Expansion already done via repeat_interleave
+
         for attempt in range(self.max_hints + 1):
             tp_rank = vllm_ps.get_tensor_model_parallel_rank()
+
+            # Get all incomplete indices
             if tp_rank == 0:
-                curr_indices_nohint = [idx for idx, completed in enumerate(completed_indices) if not completed and hint_list_logs[idx] == 0]
-                inputs_no_hint = [self.construct_partial_inputs(raw_prompt_ids[idx], idx_to_partials[idx]) for idx in curr_indices_nohint]
-                curr_indices_hint = [idx for idx, completed in enumerate(completed_indices) if not completed and hint_list_logs[idx] > 0]
-                inputs_hint = [self.construct_partial_inputs(raw_prompt_ids[idx], idx_to_partials[idx]) for idx in curr_indices_hint]
-                broadcast_data = {'curr_indices_nohint' : curr_indices_nohint, 'curr_indices_hint': curr_indices_hint,  'inputs_no_hint' : inputs_no_hint, 'inputs_hint': inputs_hint}
+                curr_indices = [idx for idx, completed in enumerate(completed_indices) if not completed]
+                inputs = [self.construct_partial_inputs(raw_prompt_ids[idx], idx_to_partials[idx]) for idx in curr_indices]
+                broadcast_data = {'curr_indices': curr_indices, 'inputs': inputs}
             else:
                 broadcast_data = None
 
             broadcast_data = vllm_ps._TP.broadcast_object(broadcast_data, src=0)
-            curr_indices_nohint, curr_indices_hint, inputs_no_hint, inputs_hint = broadcast_data['curr_indices_nohint'], broadcast_data['curr_indices_hint'], broadcast_data['inputs_no_hint'], broadcast_data['inputs_hint']
+            curr_indices, inputs = broadcast_data['curr_indices'], broadcast_data['inputs']
+
+            # Skip if all completed
+            if len(curr_indices) == 0:
+                break
 
             if torch.distributed.is_initialized():
-                print(f"Rank {torch.distributed.get_rank()}: Pre-generation barrier")
                 torch.distributed.barrier()
-                print(f"Rank {torch.distributed.get_rank()}: Post-generation barrier")
-            
-            outputs_no_hint = self.inference_engine.generate(inputs_no_hint, sampling_params=sampling_params_nohint, use_tqdm=True)
-            outputs_hint = self.inference_engine.generate(inputs_hint, sampling_params=sampling_params, use_tqdm=True)
 
-            # First pass: Process the generated text
+            # Single generate call for all incomplete prompts
+            outputs = self.inference_engine.generate(inputs, sampling_params=loop_sampling_params, use_tqdm=True)
+
+            # Process the generated text
             hint_indices = []
-            for curr_idx, output in zip(curr_indices_nohint + curr_indices_hint, outputs_no_hint + outputs_hint):
+            for curr_idx, output in zip(curr_indices, outputs):
                 partial_tokens = idx_to_partials[curr_idx]
                 partial_masks = idx_to_masks[curr_idx]
 
-                # First append what we have already
+                # First append prompt if this is the first generation
                 if len(partial_tokens) == 0:
                     partial_tokens.append(output.prompt_token_ids)
+
                 output_text = output.outputs[0].text
                 partial_tokens.append(output.outputs[0].token_ids)
                 partial_masks.append([1] * len(output.outputs[0].token_ids))
 
                 hint_matches = re.findall(hint_pattern, output_text, re.DOTALL)
                 answer_matches = re.findall(answer_pattern, output_text, re.DOTALL)
-                if len(hint_matches) != 0:
-                    idx_to_num_hints[curr_idx] += 1
-                    hint_list_logs[curr_idx] -= 1
 
-                    # Case 1: The model searches
+                if len(hint_matches) != 0:
+                    # Model requested a hint
+                    idx_to_num_hints[curr_idx] += 1
+
                     if idx_to_num_hints[curr_idx] > self.max_hints:
-                        # Add the failure message
-                        hint_result = "\n<warning>HINT LIMIT REACHED</warning></hint>\n"
+                        # Exceeded hint limit
+                        hint_result = "\n<response>HINT LIMIT REACHED</response>\n"
                         doc_tokens = list(self.tokenizer(hint_result, add_special_tokens=False)['input_ids'])
                         partial_tokens.append(doc_tokens)
                         partial_masks.append([0] * len(doc_tokens))
-
-                        # Early truncation
-                        if self.exceeds_vllm_length(partial_tokens):
-                            completed_indices[curr_idx] = True
-                            idx_to_truncation[curr_idx] = 1
+                        completed_indices[curr_idx] = True
                     else:
                         hint_indices.append(curr_idx)
-                elif len(answer_matches) != 0:
-                    score_curr = compute_score("countdown", output_text, {"target": targets[curr_idx], "numbers": numbers[curr_idx]}, None)["score_wo_hint_penalty"]
-                    if random.random() < eps and score_curr < 1 and hint_list_logs[curr_idx] > 0:
-                        if idx_to_num_hints[curr_idx] > self.max_hints:
-                            completed_indices[curr_idx] = True
-                        else:
-                            idx_to_num_hints[curr_idx] += 1
-                            doc_tokens = list(self.tokenizer('<hint> ', add_special_tokens=False)['input_ids'])
-                            partial_generation = re.sub(answer_pattern, '', output_text)
 
-                            partial_tokens[-1] = self.tokenizer(partial_generation)["input_ids"]
-                            partial_masks[-1] = partial_masks[-1][:len(partial_tokens[-1])]
-                            partial_tokens.append(doc_tokens)
-                            partial_masks.append([0] * len(doc_tokens))
-                            hint_indices.append(curr_idx)
+                elif len(answer_matches) != 0:
+                    # Model produced an answer
+                    score_curr = compute_score("countdown", output_text, {"target": targets[curr_idx], "numbers": numbers[curr_idx]}, None)["score_wo_hint_penalty"]
+
+                    # Epsilon-greedy: sometimes force wrong answers to ask for hints
+                    if random.random() < eps and score_curr < 1 and idx_to_num_hints[curr_idx] < self.max_hints:
+                        # Force hint request
+                        idx_to_num_hints[curr_idx] += 1
+                        doc_tokens = list(self.tokenizer('<request>', add_special_tokens=False)['input_ids'])
+                        partial_generation = re.sub(answer_pattern, '', output_text)
+
+                        partial_tokens[-1] = self.tokenizer(partial_generation)["input_ids"]
+                        partial_masks[-1] = partial_masks[-1][:len(partial_tokens[-1])]
+                        partial_tokens.append(doc_tokens)
+                        partial_masks.append([0] * len(doc_tokens))
+                        hint_indices.append(curr_idx)
                     else:
                         completed_indices[curr_idx] = True
 
                 else:
-                    # Case 3
-                    # Remove eos token 
-                    if partial_tokens[-1][-1] == self.tokenizer.eos_token_id:
+                    # No hint request or answer - course correction
+                    if partial_tokens[-1] and partial_tokens[-1][-1] == self.tokenizer.eos_token_id:
                         partial_tokens[-1] = partial_tokens[-1][:-1]
                         partial_masks[-1] = partial_masks[-1][:-1]
 
-                    # Append course correction message
-                    correction_message = "\nLet me try again.\n" #"\nLet me try again. Maybe ask for a hint?\n"
-
+                    correction_message = "\nLet me try again.\n"
                     correction_tokens = list(self.tokenizer(correction_message, add_special_tokens=False)['input_ids'])
                     partial_tokens.append(correction_tokens)
-                    course_correction_mask_val = 0
-                    partial_masks.append([course_correction_mask_val] * len(correction_tokens))
-                    # Early truncation
-                    if self.exceeds_vllm_length(partial_tokens):
-                        completed_indices[curr_idx] = True
-                        idx_to_truncation[curr_idx] = 1
+                    partial_masks.append([0] * len(correction_tokens))
 
-            if tp_rank == 0:
-                hint_results = self.batched_hint(hint_indices, idx_to_num_hints, hint_list_dups)
-                broadcast_data = {
-                    'hint_results': hint_results,
-                }
-            else:
-                broadcast_data = None
-            hint_results = vllm_ps._TP.broadcast_object(broadcast_data, src=0)['hint_results'] # broadcast tool call results across tp
-
-            for curr_idx, hint_result in zip(hint_indices, hint_results):
-                # Add the search results
-                partial_tokens = idx_to_partials[curr_idx]
-                partial_masks = idx_to_masks[curr_idx]
-                doc_tokens = list(self.tokenizer("Correct solution uses " + hint_result + " </hint> Okay, so let me use this.", add_special_tokens=False)['input_ids'])
-
-                partial_tokens.append(doc_tokens)
-                partial_masks.append([0] * len(doc_tokens))
-
-                # Early truncation
+                # Check for length truncation
                 if self.exceeds_vllm_length(partial_tokens):
                     completed_indices[curr_idx] = True
                     idx_to_truncation[curr_idx] = 1
 
+            # Provide hints to those who requested them
+            if tp_rank == 0:
+                hint_results = self.batched_hint(hint_indices, idx_to_num_hints, hint_list_dups)
+                broadcast_data = {'hint_results': hint_results}
+            else:
+                broadcast_data = None
+            hint_results = vllm_ps._TP.broadcast_object(broadcast_data, src=0)['hint_results']
+
+            for curr_idx, hint_result in zip(hint_indices, hint_results):
+                partial_tokens = idx_to_partials[curr_idx]
+                partial_masks = idx_to_masks[curr_idx]
+                doc_tokens = list(self.tokenizer("\n<response>" + hint_result + "</response>\n", add_special_tokens=False)['input_ids'])
+
+                partial_tokens.append(doc_tokens)
+                partial_masks.append([0] * len(doc_tokens))
+
+                if self.exceeds_vllm_length(partial_tokens):
+                    completed_indices[curr_idx] = True
+                    idx_to_truncation[curr_idx] = 1
 
         return idx_to_partials, idx_to_masks, idx_to_num_hints, idx_to_truncation        
 
@@ -813,6 +810,588 @@ def _monkey_patch_compute_logits(model, vocab_size: int):
         return logits
 
     model.compute_logits = MethodType(compute_logits, model)
+
+
+class vLLMAsyncAgenticRollout(BaseRollout):
+    """
+    Async-style vLLM rollout for multi-turn hint-based generation.
+
+    Uses the sync LLM engine (compatible with FSDP sharding) but with direct
+    LLMEngine.add_request() and step() calls for fine-grained control.
+
+    Each prompt progresses independently - when one finishes and needs a hint,
+    it immediately gets added back to the queue without waiting for others.
+
+    Key benefits:
+    - No waiting for stragglers - fast prompts complete early
+    - Continuous GPU utilization
+    - Compatible with FSDP weight syncing (same inference_engine interface)
+    """
+
+    def __init__(self, model_path: str, config: DictConfig, tokenizer, model_hf_config, **kwargs):
+        """Initialize exactly like vLLMRollout for sharding manager compatibility."""
+        super().__init__()
+
+        self.config = config
+        self.tokenizer = tokenizer
+        self.pad_token_id = tokenizer.pad_token_id
+        self.max_hints = 3
+        self.allow_hint = config.allow_hint
+        self.n = config.n
+
+        tensor_parallel_size = config.get("tensor_model_parallel_size", 1)
+        assert tensor_parallel_size <= torch.distributed.get_world_size(), (
+            "tensor parallel size should be less than or equal to the world size"
+        )
+        max_num_batched_tokens = config.get("max_num_batched_tokens", 8192)
+
+        if kwargs.get("train_tp") is not None:
+            import os
+            os.environ["CUDA_TIMER_STREAM_KAFKA_ENABLE"] = "0"
+            os.environ["MEGATRON_IMPORT_TIMERS"] = "0"
+            vllm_ps.initialize_model_parallel(tensor_model_parallel_size=tensor_parallel_size)
+
+        rope_scaling_config = getattr(model_hf_config, "rope_scaling", None)
+        if not rope_scaling_config:
+            max_position_embeddings = None
+            if hasattr(model_hf_config, "max_position_embeddings"):
+                max_position_embeddings = model_hf_config.max_position_embeddings
+            elif hasattr(model_hf_config, "llm_config") and hasattr(
+                model_hf_config.llm_config, "max_position_embeddings"
+            ):
+                max_position_embeddings = model_hf_config.llm_config.max_position_embeddings
+            elif hasattr(model_hf_config, "text_config") and hasattr(
+                model_hf_config.text_config, "max_position_embeddings"
+            ):
+                max_position_embeddings = model_hf_config.text_config.max_position_embeddings
+            if max_position_embeddings is None:
+                raise ValueError("max_position_embeddings not found in model_hf_config")
+
+            assert max_position_embeddings >= config.prompt_length + config.response_length, (
+                "model context length should be greater than total sequence length"
+            )
+
+        max_model_len = int(config.max_model_len or config.prompt_length + config.response_length)
+
+        if max_num_batched_tokens < max_model_len and config.enable_chunked_prefill:
+            raise ValueError(
+                "Enable chunked prefill, max_num_batched_tokens is smaller than max_model_len"
+            )
+
+        trust_remote_code = kwargs.get("trust_remote_code", False)
+        load_format = "dummy" if config.load_format.startswith("dummy") else config.load_format
+
+        lora_kwargs = kwargs.pop("lora_kwargs", {})
+        self.lora_kwargs = lora_kwargs
+
+        engine_kwargs = (
+            {}
+            if "engine_kwargs" not in config or "vllm" not in config.engine_kwargs
+            else OmegaConf.to_container(deepcopy(config.engine_kwargs.vllm))
+        )
+        engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        if config.get("limit_images", None):
+            engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
+
+        # Create sync LLM engine - same as vLLMRollout for sharding compatibility
+        self.inference_engine = LLM(
+            model=model_path,
+            enable_sleep_mode=config.free_cache_engine,
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend="external_launcher",
+            dtype=config.dtype,
+            enforce_eager=config.enforce_eager,
+            gpu_memory_utilization=config.gpu_memory_utilization,
+            disable_custom_all_reduce=True,
+            skip_tokenizer_init=False,
+            max_model_len=max_model_len,
+            load_format=load_format,
+            disable_log_stats=config.disable_log_stats,
+            max_num_batched_tokens=max_num_batched_tokens,
+            enable_chunked_prefill=config.enable_chunked_prefill,
+            enable_prefix_caching=True,
+            trust_remote_code=trust_remote_code,
+            seed=config.get("seed", 0),
+            **lora_kwargs,
+            **engine_kwargs,
+        )
+
+        if config.free_cache_engine:
+            self.inference_engine.sleep(level=1)
+
+        # Build default sampling params
+        self.sampling_params_kwargs = dict(
+            n=1,
+            logprobs=0,
+            max_tokens=config.response_length,
+            include_stop_str_in_output=True,
+            stop=["</answer>", "</request>"],
+            detokenize=True,
+        )
+
+        for k in config.keys():
+            if hasattr(SamplingParams(), str(k)):
+                self.sampling_params_kwargs[k] = config.get(k)
+
+    @torch.no_grad()
+    def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
+        """Generate sequences using direct LLMEngine control for async-like behavior."""
+        if self.allow_hint:
+            return self._agentic_generate(prompts, **kwargs)
+        else:
+            # Fall back to standard generation for non-hint mode
+            return self._simple_generate(prompts, **kwargs)
+
+    def _agentic_generate(self, prompts: DataProto, **kwargs) -> DataProto:
+        """
+        Async-style multi-turn generation using direct LLMEngine control.
+
+        Uses add_request() and step() to process prompts independently.
+        When a prompt completes and needs a hint, it's immediately re-queued.
+        Uses TokensPrompt to avoid re-tokenization overhead.
+        """
+        from vllm.inputs import TokensPrompt
+        from dataclasses import dataclass
+
+        # Extract data from prompts
+        idx = prompts.batch['input_ids']
+        attention_mask = prompts.batch['attention_mask']
+        position_ids = prompts.batch['position_ids']
+        eos_token_id = prompts.meta_info['eos_token_id']
+        batch_size = idx.size(0)
+
+        non_tensor_batch = prompts.non_tensor_batch
+        hint_list = non_tensor_batch.get("hint_exprs", [[] for _ in range(batch_size)])
+        eps = non_tensor_batch.get("epsilon", np.array([0.0]))[0]
+
+        do_sample = prompts.meta_info.get("do_sample", True)
+        is_validate = prompts.meta_info.get("validate", False)
+
+        # Build sampling params
+        if not do_sample:
+            sampling_params = SamplingParams(
+                best_of=1, top_p=1.0, top_k=-1, min_p=0.0, temperature=0, n=1,
+                max_tokens=self.config.response_length,
+                stop=["</answer>", "</request>"],
+                include_stop_str_in_output=True,
+            )
+        elif is_validate:
+            sampling_params = SamplingParams(
+                top_k=self.config.val_kwargs.top_k,
+                top_p=self.config.val_kwargs.top_p,
+                temperature=self.config.val_kwargs.temperature,
+                n=1,
+                max_tokens=self.config.response_length,
+                stop=["</answer>", "</request>"],
+                include_stop_str_in_output=True,
+            )
+        else:
+            sampling_params = SamplingParams(**self.sampling_params_kwargs)
+
+        # Expand prompts by n_samples
+        n_samples = self.n
+        raw_prompt_ids = _repeat_interleave(non_tensor_batch["raw_prompt_ids"], n_samples)
+        targets = _repeat_interleave(non_tensor_batch["target"], n_samples)
+        numbers = [nos for nos in non_tensor_batch["numbers"] for _ in range(n_samples)]
+        hint_list_expanded = [h for h in hint_list for _ in range(n_samples)]
+
+        num_outputs = len(raw_prompt_ids)
+
+        # Pre-tokenize common strings to avoid repeated tokenization
+        request_end_tokens = list(self.tokenizer('</request>', add_special_tokens=False)['input_ids'])
+
+        # Per-prompt state tracking
+        @dataclass
+        class PromptState:
+            prompt_idx: int
+            accumulated_tokens: list  # List of token lists
+            accumulated_masks: list   # List of mask lists
+            hints: list               # Available hints (as token lists)
+            hint_index: int           # Next hint to use
+            num_hints_used: int
+            target: any
+            numbers: any
+            completed: bool
+            turn: int
+
+        # Initialize states
+        states = {}
+        for i in range(num_outputs):
+            prompt_ids = raw_prompt_ids[i]
+            if isinstance(prompt_ids, np.ndarray):
+                prompt_ids = prompt_ids.tolist()
+
+            hints = hint_list_expanded[i]
+            if isinstance(hints, str):
+                import ast
+                try:
+                    hints = ast.literal_eval(hints)
+                except:
+                    hints = []
+
+            # Pre-tokenize hints
+            hint_tokens_list = []
+            for hint in hints:
+                hint_response = f"\n<response>{hint}</response>\n"
+                hint_tokens_list.append(
+                    list(self.tokenizer(hint_response, add_special_tokens=False)['input_ids'])
+                )
+
+            states[i] = PromptState(
+                prompt_idx=i,
+                accumulated_tokens=[list(prompt_ids)],  # Ensure it's a mutable list
+                accumulated_masks=[],
+                hints=hint_tokens_list,  # Store pre-tokenized hints
+                hint_index=0,
+                num_hints_used=0,
+                target=targets[i],
+                numbers=numbers[i],
+                completed=False,
+                turn=0,
+            )
+
+        # Request ID to prompt index mapping
+        request_to_prompt = {}
+        next_request_id = 0
+
+        # Get the underlying LLMEngine
+        llm_engine = self.inference_engine.llm_engine
+
+        # Add initial requests for all prompts using TokensPrompt
+        for i, state in states.items():
+            request_id = f"req_{next_request_id}"
+            next_request_id += 1
+            request_to_prompt[request_id] = i
+
+            llm_engine.add_request(
+                request_id=request_id,
+                prompt=TokensPrompt(prompt_token_ids=state.accumulated_tokens[0]),
+                params=sampling_params,
+            )
+
+        hint_pattern = r'</request>'
+        answer_pattern = r'<answer>(.*?)</answer>'
+
+        completed_count = 0
+
+        # Progress bar for async generation - only on TP rank 0
+        tp_rank = vllm_ps.get_tensor_model_parallel_rank()
+        pbar = None
+        if tp_rank == 0:
+            pbar = tqdm(
+                total=num_outputs,
+                desc="Async agentic generation",
+                unit="prompts",
+                dynamic_ncols=True,
+            )
+
+        # Main processing loop
+        while llm_engine.has_unfinished_requests():
+            # Process one step
+            step_outputs = llm_engine.step()
+
+            for output in step_outputs:
+                if not output.finished:
+                    continue
+
+                request_id = output.request_id
+                if request_id not in request_to_prompt:
+                    continue
+
+                prompt_idx = request_to_prompt.pop(request_id)
+                state = states[prompt_idx]
+
+                if state.completed:
+                    continue
+
+                # Get generated text and tokens
+                generated_text = output.outputs[0].text
+                generated_tokens = list(output.outputs[0].token_ids)
+
+                # Add to accumulated
+                state.accumulated_tokens.append(generated_tokens)
+                state.accumulated_masks.append([1] * len(generated_tokens))
+
+                # Check for patterns - use generated_text for pattern matching
+                hint_matches = re.findall(hint_pattern, generated_text, re.DOTALL)
+                answer_matches = re.findall(answer_pattern, generated_text, re.DOTALL)
+
+                should_continue = False
+
+                if hint_matches:
+                    # Model requested a hint (ends with </request>)
+                    state.num_hints_used += 1
+
+                    if state.num_hints_used > self.max_hints:
+                        # Exceeded limit - complete
+                        limit_tokens = list(self.tokenizer(
+                            "\n<response>HINT LIMIT REACHED</response>\n",
+                            add_special_tokens=False
+                        )['input_ids'])
+                        state.accumulated_tokens.append(limit_tokens)
+                        state.accumulated_masks.append([0] * len(limit_tokens))
+                        state.completed = True
+                    elif state.hint_index < len(state.hints):
+                        # Provide pre-tokenized hint and continue
+                        hint_tokens = state.hints[state.hint_index]
+                        state.hint_index += 1
+                        state.accumulated_tokens.append(hint_tokens)
+                        state.accumulated_masks.append([0] * len(hint_tokens))
+                        should_continue = True
+                    else:
+                        # No more hints
+                        no_hints_tokens = list(self.tokenizer(
+                            "\n<response>No more hints available.</response>\n",
+                            add_special_tokens=False
+                        )['input_ids'])
+                        state.accumulated_tokens.append(no_hints_tokens)
+                        state.accumulated_masks.append([0] * len(no_hints_tokens))
+                        state.completed = True
+
+                elif answer_matches:
+                    # Model produced an answer
+                    score = compute_score(
+                        "countdown", generated_text,
+                        {"target": state.target, "numbers": state.numbers},
+                        None
+                    )["score_wo_hint_penalty"]
+
+                    # Epsilon-greedy exploration
+                    if (random.random() < eps and score < 1 and
+                        state.num_hints_used < self.max_hints and
+                        state.hint_index < len(state.hints)):
+                        # Force hint request - strip the answer and add hint
+                        state.num_hints_used += 1
+                        partial_gen = re.sub(answer_pattern, '', generated_text)
+                        state.accumulated_tokens[-1] = list(
+                            self.tokenizer(partial_gen, add_special_tokens=False)['input_ids']
+                        )
+                        state.accumulated_masks[-1] = [1] * len(state.accumulated_tokens[-1])
+
+                        # Add <request> tag
+                        request_tokens = list(
+                            self.tokenizer('<request>', add_special_tokens=False)['input_ids']
+                        )
+                        state.accumulated_tokens.append(request_tokens)
+                        state.accumulated_masks.append([0] * len(request_tokens))
+
+                        # Add pre-tokenized hint
+                        hint_tokens = state.hints[state.hint_index]
+                        state.hint_index += 1
+                        state.accumulated_tokens.append(hint_tokens)
+                        state.accumulated_masks.append([0] * len(hint_tokens))
+                        should_continue = True
+                    else:
+                        # Complete
+                        state.completed = True
+                else:
+                    # No hint or answer - add correction and continue
+                    if (state.accumulated_tokens[-1] and
+                        state.accumulated_tokens[-1][-1] == self.tokenizer.eos_token_id):
+                        state.accumulated_tokens[-1] = state.accumulated_tokens[-1][:-1]
+                        state.accumulated_masks[-1] = state.accumulated_masks[-1][:-1]
+
+                    correction_tokens = list(
+                        self.tokenizer("\nLet me try again.\n", add_special_tokens=False)['input_ids']
+                    )
+                    state.accumulated_tokens.append(correction_tokens)
+                    state.accumulated_masks.append([0] * len(correction_tokens))
+                    should_continue = True
+
+                # Check length limit
+                total_len = sum(len(t) for t in state.accumulated_tokens)
+                if total_len >= self.config.prompt_length + self.config.response_length:
+                    state.completed = True
+                    should_continue = False
+
+                # Check turn limit
+                state.turn += 1
+                if state.turn > self.max_hints:
+                    state.completed = True
+                    should_continue = False
+
+                if state.completed:
+                    completed_count += 1
+                    if pbar is not None:
+                        pbar.update(1)
+
+                # Re-queue if should continue - use TokensPrompt with flattened tokens
+                if should_continue and not state.completed:
+                    new_request_id = f"req_{next_request_id}"
+                    next_request_id += 1
+                    request_to_prompt[new_request_id] = prompt_idx
+
+                    # Flatten all accumulated tokens for the prompt
+                    all_tokens = []
+                    for token_list in state.accumulated_tokens:
+                        all_tokens.extend(token_list)
+
+                    llm_engine.add_request(
+                        request_id=new_request_id,
+                        prompt=TokensPrompt(prompt_token_ids=all_tokens),
+                        params=sampling_params,
+                    )
+
+        # Close progress bar
+        if pbar is not None:
+            pbar.close()
+
+        # Log summary
+        total_hints = sum(states[i].num_hints_used for i in range(num_outputs))
+        avg_hints = total_hints / num_outputs if num_outputs > 0 else 0
+        print(f"[Async Agentic] Completed {num_outputs} prompts, avg hints: {avg_hints:.2f}")
+
+        # Build results
+        response_list = []
+        mask_list = []
+        num_hints_list = []
+
+        for i in range(num_outputs):
+            state = states[i]
+            # Flatten tokens (skip prompt which is first element)
+            response_tokens = []
+            response_mask = []
+            for tokens, masks in zip(state.accumulated_tokens[1:], state.accumulated_masks):
+                response_tokens.extend(tokens)
+                response_mask.extend(masks)
+
+            # Truncate to response_length
+            response_tokens = response_tokens[:self.config.response_length]
+            response_mask = response_mask[:self.config.response_length]
+
+            response_list.append(response_tokens)
+            mask_list.append(response_mask)
+            num_hints_list.append(state.num_hints_used)
+
+        # Build output tensors
+        device = idx.device
+        response = pad_2d_list_to_length(
+            response_list, self.pad_token_id, max_length=self.config.response_length
+        ).to(device)
+        document_mask = pad_2d_list_to_length(
+            mask_list, 0, max_length=self.config.response_length
+        ).to(device)
+
+        # Expand idx, attention_mask, position_ids to match n_samples
+        idx = _repeat_interleave(idx, n_samples)
+        attention_mask = _repeat_interleave(attention_mask, n_samples)
+        position_ids = _repeat_interleave(position_ids, n_samples)
+        batch_size = batch_size * n_samples
+
+        # Expand non_tensor_batch
+        for key in ["raw_prompt_ids", "target", "hint_exprs", "epsilon"]:
+            if key in non_tensor_batch:
+                non_tensor_batch[key] = _repeat_interleave(non_tensor_batch[key], n_samples)
+        if "numbers" in non_tensor_batch:
+            non_tensor_batch["numbers"] = [n for n in non_tensor_batch["numbers"] for _ in range(n_samples)]
+
+        # Build sequence
+        seq = torch.cat([idx, response], dim=-1)
+
+        # Build position ids for response
+        response_length = response.size(1)
+        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
+        delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
+        response_position_ids = position_ids[..., -1:] + delta_position_id
+        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+
+        # Build attention mask
+        response_attention_mask = get_response_mask(
+            response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype
+        )
+        full_attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+        attention_mask_with_documents = torch.cat([attention_mask, document_mask], dim=-1)
+
+        batch_dict = {
+            "prompts": idx,
+            "responses": response,
+            "input_ids": seq,
+            "attention_mask": full_attention_mask,
+            "document_mask": attention_mask_with_documents,
+            "position_ids": position_ids,
+            "num_hints": torch.tensor(num_hints_list, dtype=torch.float32),
+        }
+
+        return DataProto.from_dict(batch_dict, non_tensors=non_tensor_batch)
+
+    def _simple_generate(self, prompts: DataProto, **kwargs) -> DataProto:
+        """Simple generation without multi-turn hints - uses standard LLM.generate()."""
+        idx = prompts.batch['input_ids']
+        attention_mask = prompts.batch['attention_mask']
+        position_ids = prompts.batch['position_ids']
+        eos_token_id = prompts.meta_info['eos_token_id']
+        batch_size = idx.size(0)
+
+        non_tensor_batch = prompts.non_tensor_batch
+
+        do_sample = prompts.meta_info.get("do_sample", True)
+        if not do_sample:
+            sampling_params = SamplingParams(
+                best_of=1, top_p=1.0, top_k=-1, min_p=0.0, temperature=0, n=1,
+                max_tokens=self.config.response_length,
+                stop=["</answer>"],
+                include_stop_str_in_output=True,
+            )
+        else:
+            sampling_params = SamplingParams(**self.sampling_params_kwargs)
+
+        # Expand by n_samples
+        n_samples = self.n
+        raw_prompt_ids = _repeat_interleave(non_tensor_batch["raw_prompt_ids"], n_samples)
+        num_outputs = len(raw_prompt_ids)
+
+        # Decode prompts
+        prompt_texts = []
+        for i in range(num_outputs):
+            prompt_ids = raw_prompt_ids[i]
+            if isinstance(prompt_ids, np.ndarray):
+                prompt_ids = prompt_ids.tolist()
+            prompt_texts.append(self.tokenizer.decode(prompt_ids))
+
+        # Generate using standard LLM.generate()
+        outputs = self.inference_engine.generate(prompt_texts, sampling_params)
+
+        # Extract results
+        results = []
+        for output in outputs:
+            if output.outputs:
+                results.append(list(output.outputs[0].token_ids))
+            else:
+                results.append([])
+
+        # Build output tensors
+        device = idx.device
+        response = pad_2d_list_to_length(
+            results, self.pad_token_id, max_length=self.config.response_length
+        ).to(device)
+
+        idx = _repeat_interleave(idx, n_samples)
+        attention_mask = _repeat_interleave(attention_mask, n_samples)
+        position_ids = _repeat_interleave(position_ids, n_samples)
+        batch_size = batch_size * n_samples
+
+        seq = torch.cat([idx, response], dim=-1)
+
+        response_length = response.size(1)
+        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
+        delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
+        response_position_ids = position_ids[..., -1:] + delta_position_id
+        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+
+        response_attention_mask = get_response_mask(
+            response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype
+        )
+        attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+
+        batch_dict = {
+            "prompts": idx,
+            "responses": response,
+            "input_ids": seq,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+        }
+
+        return DataProto.from_dict(batch_dict, non_tensors=non_tensor_batch)
 
 
 class vLLMAsyncRollout:
