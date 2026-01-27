@@ -331,6 +331,7 @@ def train_rl(
     test_freq: int | None = None,
     max_prompt_length: int = 1024,
     max_response_length: int = 2048,
+    max_model_len: int | None = None,
     tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.4,
     project_name: str | None = None,
@@ -362,6 +363,8 @@ def train_rl(
         test_freq: Validation/logging frequency (default: same as save_freq)
         max_prompt_length: Maximum prompt length in tokens
         max_response_length: Maximum response length in tokens
+        max_model_len: Maximum model context length (default: prompt + response length).
+            Set higher than prompt + response for multi-turn hint mode.
         tensor_parallel_size: Tensor parallel size
         gpu_memory_utilization: GPU memory utilization for vLLM
         project_name: Wandb project name (default: {task}-rl)
@@ -562,6 +565,7 @@ def train_rl(
         "actor_rollout_ref.actor.entropy_coeff=0.001",
         "actor_rollout_ref.actor.ppo_micro_batch_size=16",
         f"actor_rollout_ref.rollout.n={n_samples}",
+        f"actor_rollout_ref.rollout.max_model_len={max_model_len or max_prompt_length + max_response_length}",
         "actor_rollout_ref.rollout.log_prob_micro_batch_size=4",
         f"actor_rollout_ref.rollout.tensor_model_parallel_size={tensor_parallel_size}",
         f"actor_rollout_ref.rollout.gpu_memory_utilization={gpu_memory_utilization}",
