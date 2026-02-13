@@ -1,0 +1,4 @@
+name: idea_1
+template_variant: idea_1
+reward_function: compute_score
+reward_kwargs: {}

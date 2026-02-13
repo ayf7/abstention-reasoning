@@ -187,17 +187,21 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         metrics["rollout/num_hints/max"] = torch.max(num_hints).detach().item()
         metrics["rollout/num_hints/min"] = torch.min(num_hints).detach().item()
 
-        # Add distribution of num_hints (count for each value 0, 1, 2, 3+)
+        # Add distribution of num_hints (count for each value 0-6)
         num_hints_int = num_hints.detach().long()
         total_samples = len(num_hints_int)
-        for i in range(4):  # 0, 1, 2, 3 hints
+        for i in range(7):  # 0, 1, 2, 3, 4, 5, 6 hints
             count = (num_hints_int == i).sum().item()
             metrics[f"rollout/num_hints/count_{i}"] = count
             metrics[f"rollout/num_hints/pct_{i}"] = count / total_samples if total_samples > 0 else 0
-        # 3+ hints (in case max_hints > 3)
-        count_3plus = (num_hints_int >= 3).sum().item()
-        metrics["rollout/num_hints/count_3plus"] = count_3plus
-        metrics["rollout/num_hints/pct_3plus"] = count_3plus / total_samples if total_samples > 0 else 0
+
+        # Add average reward breakdown by number of hints (only log if count > 0)
+        for i in range(7):  # 0, 1, 2, 3, 4, 5, 6 hints
+            mask = (num_hints_int == i)
+            count = mask.sum().item()
+            if count > 0:
+                avg_reward = sequence_reward[mask].mean().detach().item()
+                metrics[f"rollout/num_hints/{i}_reward_avg"] = avg_reward
     except:
         metrics["rollout/num_hints/mean"] = 0
         metrics["rollout/num_hints/max"] = 0

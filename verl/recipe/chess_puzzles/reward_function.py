@@ -42,6 +42,53 @@ def check_correctness(predicted, ground_truth):
         return False, {"error": "wrong_move", "predicted_move": predicted_move}
 
 
+def get_num_hints(solution_str):
+    """Count valid hint requests (<request></request> with nothing inside)."""
+    return len(re.findall(r'<request></request>', solution_str))
+
+
+def has_malformed_request(solution_str):
+    """Check for malformed hint request/response structure.
+
+    Valid structure (sequential order):
+        </think><request></request>
+        <response>...</response>
+        <think>
+
+    Malformed if:
+    - <request> has content inside (not tight <request></request>)
+    - <response> appears without preceding </think><request></request>
+
+    Returns:
+        True if malformed structure found, False otherwise.
+    """
+    # First check: any <request> tag must be exactly <request></request> (tight, no content)
+    open_count = solution_str.count('<request>')
+    valid_request_count = len(re.findall(r'<request></request>', solution_str))
+    if open_count != valid_request_count:
+        return True
+
+    # Second check: validate sequential structure around each <response>
+    response_starts = [m.start() for m in re.finditer(r'<response>', solution_str)]
+
+    for pos in response_starts:
+        prefix = solution_str[:pos]
+        valid_prefix_pattern = r'</think>\s*<request></request>\s*$'
+        if not re.search(valid_prefix_pattern, prefix):
+            return True
+
+    # Third check: every <request></request> should be followed by whitespace then <response>
+    request_ends = [m.end() for m in re.finditer(r'<request></request>', solution_str)]
+
+    for pos in request_ends:
+        suffix = solution_str[pos:]
+        if not re.match(r'\s*<response>', suffix):
+            if len(suffix.strip()) > 0:
+                return True
+
+    return False
+
+
 def compute_score(
     data_source,
     solution_str,
@@ -170,3 +217,67 @@ def compute_score_abstain(
         score=score,
         **kwargs,
     )
+
+
+def compute_score_hint(
+    data_source,
+    solution_str,
+    ground_truth,
+    extra_info,
+    format_score=0.0,
+    score=1.0,
+    hint_penalty=0.1,
+    **kwargs,
+):
+    """
+    Reward function for Chess Puzzles with hint penalty.
+
+    Penalizes hint usage: final_score = score * (1 - hint_penalty * num_hints)
+
+    Args:
+        hint_penalty: Multiplicative penalty per hint (default 0.1).
+    """
+    do_print = random.randint(1, 64) == 1
+
+    # Check for malformed request tags first
+    if has_malformed_request(solution_str):
+        if do_print:
+            print(f"Malformed <request> tag detected - awarding 0")
+        return {
+            "score": 0,
+            "score_wo_hint_penalty": 0,
+            "num_hints": 0,
+            "correct": False,
+            "error": "malformed_request",
+            "predicted_move": None,
+            "abstained": False,
+            "malformed": True,
+        }
+
+    num_hints = get_num_hints(solution_str)
+
+    # Get base score from compute_score
+    result = compute_score(
+        data_source,
+        solution_str,
+        ground_truth,
+        extra_info,
+        format_score=format_score,
+        score=score,
+        **kwargs,
+    )
+
+    # Apply hint penalty to correct answers
+    base_score = result["score"]
+    if result["correct"] and num_hints > 0:
+        result["score"] = score * (1 - hint_penalty * num_hints)
+
+    result["score_wo_hint_penalty"] = base_score
+    result["num_hints"] = num_hints
+    result["malformed"] = False
+
+    if do_print and num_hints > 0:
+        print(f"Hints used: {num_hints}, penalty: {hint_penalty}, "
+              f"score: {base_score} -> {result['score']}")
+
+    return result

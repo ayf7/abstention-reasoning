@@ -1,18 +1,21 @@
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
-# Copyright 2023-2024 SGLang Team
-# Copyright 2025 ModelBest Inc. and/or its affiliates
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Licensed under the Apache License, Version 2.0
+
+"""Interaction handler for competition_math task with sequential hint support.
+
+This implements the 'hints_naive' strategy: hints are provided sequentially
+(hint_1, hint_2, ..., hint_5) regardless of model's current progress.
+
+The primitives file should contain `prefix_hints` dict:
+{
+    "prefix_hints": {
+        "hint_1": "First step...",
+        "hint_2": "Second step...",
+        ...
+        "hint_5": "Final step..."
+    }
+}
+"""
 
 import logging
 import os
@@ -26,18 +29,19 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-class CountdownHintInteraction(BaseInteraction):
-    """Interaction handler for countdown task with hint support.
+class CompetitionMathHintInteraction(BaseInteraction):
+    """Interaction handler for competition_math with hint support.
 
     During RL rollouts, when the model outputs <request></request>, this handler
-    provides the next intermediate expression hint from the ground truth.
-
-    Supports both sequential and smart hint selection via HintSelector.
+    provides hints from prefix_hints. Supports both sequential and smart selection.
 
     Flow:
     1. Model generates: <think>reasoning...</think><request></request>
-    2. System responds: <response>(35 / 1)</response>
-    3. Model continues: <think>more reasoning...</think><answer>...</answer>
+    2. System responds: <response>hint_1 content</response>
+    3. Model continues: <think>more reasoning...</think>
+    4. Model can request again: </think><request></request>
+    5. System responds: <response>hint_2 content</response>
+    ... up to 6 hints
 
     The reward function penalizes hint usage via hint_penalty.
     """
@@ -46,6 +50,7 @@ class CountdownHintInteraction(BaseInteraction):
         super().__init__(config)
         self._instance_dict: Dict[str, Dict[str, Any]] = {}
         self.request_tag_pattern = re.compile(r"<request>.*?</request>|<request>|<request/>", re.DOTALL)
+        self.max_hints = 6
 
         # Smart hint selection
         self.hint_selector = None
@@ -72,7 +77,7 @@ class CountdownHintInteraction(BaseInteraction):
 
         Args:
             instance_id: Unique ID for this trajectory
-            ground_truth: Dict containing 'hints_expr' list of intermediate expressions
+            ground_truth: Dict containing 'prefix_hints' with hint_1...hint_5
 
         Returns:
             The instance_id
@@ -80,29 +85,24 @@ class CountdownHintInteraction(BaseInteraction):
         if instance_id is None:
             instance_id = str(uuid4())
 
-        hints_expr = []
+        # Extract hints from prefix_hints dict
+        hints = []
         if ground_truth is not None:
-            # Handle both list and string representations
-            # Support both hint_exprs (pipeline) and hints_expr (legacy)
-            raw_hints = ground_truth.get("hint_exprs", ground_truth.get("hints_expr", []))
-            if isinstance(raw_hints, str):
-                # Parse string representation like "['(35 / 1)', '(30 + 2)']"
-                try:
-                    import ast
-                    hints_expr = ast.literal_eval(raw_hints)
-                except (ValueError, SyntaxError):
-                    hints_expr = []
-            elif isinstance(raw_hints, list):
-                hints_expr = list(raw_hints)
+            prefix_hints = ground_truth.get("prefix_hints", {})
+            if isinstance(prefix_hints, dict):
+                for i in range(1, self.max_hints + 1):
+                    hint_key = f"hint_{i}"
+                    if hint_key in prefix_hints:
+                        hints.append(prefix_hints[hint_key])
 
         self._instance_dict[instance_id] = {
-            "hints_expr": hints_expr,
+            "hints": hints,
             "last_given_index": -1,
             "num_hints_given": 0,
             "ground_truth": ground_truth,
         }
 
-        logger.debug(f"Started countdown hint interaction {instance_id} with {len(hints_expr)} hints")
+        logger.debug(f"Started competition_math hint interaction {instance_id} with {len(hints)} hints")
         return instance_id
 
     async def generate_response(
@@ -143,7 +143,7 @@ class CountdownHintInteraction(BaseInteraction):
             return True, "", 0.0, {"num_hints": inst["num_hints_given"]}
 
         # Model requested a hint
-        hints = inst["hints_expr"]
+        hints = inst["hints"]
         last_given = inst["last_given_index"]
 
         if last_given + 1 < len(hints):
@@ -153,8 +153,7 @@ class CountdownHintInteraction(BaseInteraction):
                     last_content, hints, last_given,
                 )
                 if hint_text is None:
-                    # Fallback
-                    response = "<warning>No more hints available. Please provide your final answer.</warning>"
+                    response = "<response>No more hints available. Please provide your final answer.</response>"
                     return False, response, 0.0, {"num_hints": inst["num_hints_given"], "hint_exhausted": True}
             else:
                 next_idx = last_given + 1
@@ -164,13 +163,13 @@ class CountdownHintInteraction(BaseInteraction):
             inst["num_hints_given"] += 1
 
             response = f"<response>{hint_text}</response>"
-            logger.debug(f"Providing hint (last_given={new_last}): {hint_text}")
+            logger.debug(f"Providing hint (last_given={new_last}): {hint_text[:100]}...")
 
             # Continue the interaction (model should keep reasoning)
             return False, response, 0.0, {"num_hints": inst["num_hints_given"], "hint_provided": hint_text}
         else:
             # No more hints available
-            response = "<warning>No more hints available. Please provide your final answer.</warning>"
+            response = "<response>No more hints available. Please provide your final answer.</response>"
             logger.debug(f"No more hints available (last_given={last_given}, have {len(hints)})")
 
             # Continue but with warning

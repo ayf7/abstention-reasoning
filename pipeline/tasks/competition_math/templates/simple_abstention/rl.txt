@@ -1,0 +1,7 @@
+Solve this math problem.
+
+{problem}
+
+If you believe you cannot solve this problem correctly, output <abstain> instead of guessing.
+
+Think through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and IMMEDIATELY provide your final answer in <answer> </answer> tags, or <abstain> if you choose not to answer. No text between </think> and your answer.

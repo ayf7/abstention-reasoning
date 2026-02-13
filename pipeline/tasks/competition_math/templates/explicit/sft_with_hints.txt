@@ -1,0 +1,14 @@
+Solve this math problem.
+
+{problem}
+
+Here are the key concepts you should apply in your solution:
+{hints}
+
+Show your reasoning in <think> </think> tags. After each reasoning step, annotate the mathematical concept being applied in parentheses using the pattern "(using the <category> of <name>)".
+
+For example:
+- "There are $6^5$ total possible outcomes when rolling 5 dice (using the principle of Multiplication Principle)."
+- "Since the triangle is isosceles, the base angles are equal (using the property of Isosceles Triangles)."
+
+Once you are done thinking, close the </think> tag and immediately provide your final answer in <answer> </answer> tags.

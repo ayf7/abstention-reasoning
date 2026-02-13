@@ -1352,6 +1352,13 @@ class RayPPOTrainer:
                                 dump_path=rollout_data_dir,
                             )
 
+                            # Print rollout score summary
+                            s = np.array(scores)
+                            print(f"[Step {self.global_steps}] Rollout scores: "
+                                  f"mean={s.mean():.3f}, std={s.std():.3f}, "
+                                  f"min={s.min():.3f}, max={s.max():.3f}, "
+                                  f">0: {(s > 0).sum()}/{len(s)} ({100*(s > 0).mean():.1f}%)")
+
                     # validate
                     if (
                         self.val_reward_fn is not None

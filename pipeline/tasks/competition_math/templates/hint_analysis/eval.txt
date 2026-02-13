@@ -1,0 +1,5 @@
+Solve this math problem.
+
+{problem}
+
+{hints_block}Think through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and IMMEDIATELY provide your final answer in <answer> </answer> tags with no text in between.

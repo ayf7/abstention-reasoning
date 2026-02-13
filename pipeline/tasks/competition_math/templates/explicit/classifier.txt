@@ -1,0 +1,17 @@
+Solve this math problem.
+
+{problem}
+
+Show your reasoning in <think> </think> tags. Inside your thinking, after each reasoning step, annotate the mathematical concept being applied in parentheses using the pattern "(using the <category> of <name>)" where:
+- <category> is one of: concept, theorem, strategy, property, principle, formula, definition, identity
+- <name> is the specific mathematical concept
+
+For example:
+- "There are $6^5$ total possible outcomes when rolling 5 dice (using the principle of Multiplication Principle)."
+- "Since the triangle is isosceles, the base angles are equal (using the property of Isosceles Triangles)."
+- "We solve for x (using the formula of Quadratic Formula)."
+- "We consider two cases: when x > 0 and when x ≤ 0 (using the strategy of Casework)."
+
+Only annotate steps where a recognizable mathematical concept is being applied. Not every sentence needs an annotation.
+
+Once you are done thinking, close the </think> tag and immediately provide your final answer in <answer> </answer> tags.

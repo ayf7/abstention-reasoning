@@ -1,0 +1,4 @@
+name: simple
+template_variant: simple
+reward_function: compute_score
+reward_kwargs: {}

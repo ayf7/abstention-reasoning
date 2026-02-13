@@ -1,0 +1,4 @@
+name: explicit
+template_variant: explicit
+reward_function: compute_score
+reward_kwargs: {}

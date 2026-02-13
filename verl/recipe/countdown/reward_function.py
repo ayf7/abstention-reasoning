@@ -77,29 +77,60 @@ def get_num_hints(solution_str):
 
 
 def has_malformed_request(solution_str):
-    """Check for any malformed <request>...</request> tags.
+    """Check for malformed hint request/response structure.
 
-    A request is malformed if:
-    - It contains any content (including whitespace) between tags
-    - Tags are unbalanced (unclosed <request> or extra </request>)
+    Valid structure (sequential order):
+        </think><request></request>
+        <response>...</response>
+        <think>
+
+    Malformed if:
+    - <request> has content inside (not tight <request></request>)
+    - <response> appears without preceding </think><request></request>
+    - Any deviation from the expected sequential pattern
 
     Returns:
-        True if malformed request found, False otherwise.
+        True if malformed structure found, False otherwise.
     """
-    # Count valid (exactly empty) vs all request tags
-    valid_count = len(re.findall(r'<request></request>', solution_str))
+    # First check: any <request> tag must be exactly <request></request> (tight, no content)
     open_count = solution_str.count('<request>')
-    close_count = solution_str.count('</request>')
+    valid_request_count = len(re.findall(r'<request></request>', solution_str))
+    if open_count != valid_request_count:
+        return True
 
-    # Malformed if: unclosed tags OR any <request>...</request> that isn't exactly <request></request>
-    if open_count != close_count:
-        return True
-    if open_count != valid_count:
-        return True
+    # Second check: validate sequential structure around each <response>
+    # Every <response> must be preceded by </think> ... <request></request> ... \n
+    # Allow whitespace between tags, but structure must be: </think> then <request></request> then <response>
+
+    # Find all <response> positions and validate what precedes each one
+    response_starts = [m.start() for m in re.finditer(r'<response>', solution_str)]
+
+    for pos in response_starts:
+        # Look at what precedes this <response>
+        prefix = solution_str[:pos]
+
+        # Must have </think> followed by <request></request> followed by whitespace before <response>
+        # Allow whitespace between </think> and <request>, and between </request> and <response>
+        valid_prefix_pattern = r'</think>\s*<request></request>\s*$'
+        if not re.search(valid_prefix_pattern, prefix):
+            return True
+
+    # Third check: every <request></request> should be followed by whitespace then <response>
+    request_ends = [m.end() for m in re.finditer(r'<request></request>', solution_str)]
+
+    for pos in request_ends:
+        suffix = solution_str[pos:]
+        # Must start with whitespace followed by <response> (system injects this)
+        # Allow variable whitespace between </request> and <response>
+        if not re.match(r'\s*<response>', suffix):
+            # Exception: if this is at the very end (truncated or no more content), allow it
+            if len(suffix.strip()) > 0:
+                return True
+
     return False
 
 
-def compute_score(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., reward_abstain=False, abstention_score=0.3, penalize_hint=False, hint_penalty=0.2, **kwargs):
+def compute_score(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., reward_abstain=False, abstention_score=0.3, penalize_hint=False, hint_penalty=0.2, hint_bonus=0.0, **kwargs):
     """The scoring function for countdown
     """
     #format_score = 0
@@ -135,12 +166,13 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
             "score_wo_hint_penalty": abstention_score,
             "num_hints": num_hints,
             "abstained": True,
+            "malformed": False,
         }
 
     if equation is None:
         if do_print:
             print(f"No equation found or length too short")
-        return {"score": 0, "score_wo_hint_penalty": 0, "num_hints": num_hints, "abstained": False}
+        return {"score": 0, "score_wo_hint_penalty": 0, "num_hints": num_hints, "abstained": False, "malformed": False}
 
     # Check for abstention via answer content (legacy support)
     if reward_abstain and abstain_equation(equation):
@@ -151,13 +183,14 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
             "score_wo_hint_penalty": abstention_score,
             "num_hints": num_hints,
             "abstained": True,
+            "malformed": False,
         }
 
     # Validate equation uses correct numbers
     if not validate_equation(equation, numbers):
         if do_print:
             print(f"Invalid equation")
-        return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False}
+        return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False, "malformed": False}
         
     # Evaluate equation
     try:
@@ -165,7 +198,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
         if result is None:
             if do_print:
                 print(f"Could not evaluate equation")
-            return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False}
+            return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False, "malformed": False}
             
         if abs(result - target) < 1e-5:  # Account for floating point precision
             if do_print:
@@ -174,18 +207,20 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
                 final_score = score * (1 - hint_penalty * num_hints)
             else:
                 final_score = score
-            return {"score": final_score, "score_wo_hint_penalty": score, "num_hints": num_hints, "abstained": False}
+            return {"score": final_score, "score_wo_hint_penalty": score, "num_hints": num_hints, "abstained": False, "malformed": False}
         else:
+            final_format_score = format_score
+            if hint_bonus > 0 and num_hints > 0:
+                final_format_score = format_score + hint_bonus * num_hints
             if do_print:
                 print(f"Wrong result: equation = {result}, target = {target}")
-            score = format_score
-            """if num_hints > 0:
-                score = format_score + hint_penalty"""
-            return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False}
+                if hint_bonus > 0 and num_hints > 0:
+                    print(f"  Hint bonus applied: {format_score} + {hint_bonus}*{num_hints} = {final_format_score}")
+            return {"score": final_format_score, "score_wo_hint_penalty": final_format_score, "num_hints": num_hints, "abstained": False, "malformed": False}
     except:
         if do_print:
             print(f"Error evaluating equation")
-        return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False}
+        return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False, "malformed": False}
     
 
 
@@ -201,15 +236,17 @@ def compute_score_abstain(data_source, solution_str, ground_truth, extra_info, m
         reward_abstain=True, abstention_score=abstention_score, **kwargs
     )
 
-def compute_score_hint(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., hint_penalty=0.1, **kwargs):
+def compute_score_hint(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., hint_penalty=0.1, hint_bonus=0.0, **kwargs):
     """The scoring function for countdown that penalizes hint usage.
 
     Args:
         hint_penalty: Multiplicative penalty per hint (default 0.1).
             Final score = accuracy * (1 - hint_penalty * num_hints)
+        hint_bonus: Bonus added to format_score when hints were used and
+            answer is wrong but formatted (default 0.0, no bonus).
     """
     return compute_score(
         data_source, solution_str, ground_truth, extra_info,
         method=method, format_score=format_score, score=score,
-        penalize_hint=True, hint_penalty=hint_penalty, **kwargs
+        penalize_hint=True, hint_penalty=hint_penalty, hint_bonus=hint_bonus, **kwargs
     )
