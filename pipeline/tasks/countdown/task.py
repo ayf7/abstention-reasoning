@@ -53,6 +53,15 @@ class CountdownTask(BaseTask):
         content = content.replace("{{numbers}}", str(primitive["numbers"]))
         content = content.replace("{numbers}", str(primitive["numbers"]))
 
+        # Format hints_block (for hint_analysis: empty when no hints, block of text when hints present)
+        if "{hints_block}" in content:
+            hints = primitive.get("hints", [])
+            if hints:
+                hints_str = "Here are some hints to help you:\n" + "\n".join(f"- {h}" for h in hints) + "\n\n"
+            else:
+                hints_str = ""
+            content = content.replace("{hints_block}", hints_str)
+
         messages = [
             {"role": "system", "content": self.system_message},
             {"role": "user", "content": content},

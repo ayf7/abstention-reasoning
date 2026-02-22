@@ -219,6 +219,7 @@ class ZebraLogicTask(BaseTask):
             "rl_val": (0.72, 0.77),
             "classifier": (0.77, 0.92),
             "eval": (0.92, 1.0),
+            "eval_augmented": (0.77, 1.0),
         }
 
         if split not in splits:

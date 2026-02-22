@@ -169,8 +169,11 @@ class CompetitionMathTask(BaseTask):
         """
         Check if the generated answer matches the correct answer.
 
-        Handles LaTeX math expressions with some normalization.
+        Uses math-verify for robust symbolic equivalence checking.
+        Gold answers are parsed as LaTeX, predicted answers as plain expressions.
         """
+        from math_verify import parse, verify, LatexExtractionConfig, ExprExtractionConfig
+
         predicted = self.extract_answer(generation)
 
         if predicted is None:
@@ -189,123 +192,51 @@ class CompetitionMathTask(BaseTask):
                 "error": "no_ground_truth",
             }
 
-        # Normalize both answers for comparison
-        pred_normalized = self._normalize_math(predicted)
-        correct_normalized = self._normalize_math(correct_answer)
+        # Parse gold (LaTeX from dataset) and predicted (plain symbolic from model)
+        try:
+            gold_parsed = parse(
+                f"${correct_answer}$",
+                extraction_config=[LatexExtractionConfig()],
+            )
+        except Exception:
+            gold_parsed = []
 
-        is_correct = pred_normalized == correct_normalized
+        try:
+            pred_parsed = parse(
+                f"${predicted}$",
+                extraction_config=[LatexExtractionConfig(), ExprExtractionConfig()],
+            )
+        except Exception:
+            pred_parsed = []
 
-        # Numeric fallback: try evaluating as numbers if string comparison fails
+        # Try verification if both parsed successfully
+        is_correct = False
+        if gold_parsed and pred_parsed:
+            try:
+                is_correct = verify(gold_parsed, pred_parsed)
+            except Exception:
+                pass
+
+        # Fallback: try both as plain expressions (no LaTeX wrapping)
         if not is_correct:
-            numeric_result = self._try_numeric_equal(pred_normalized, correct_normalized)
-            if numeric_result is True:
-                is_correct = True
+            try:
+                gold_plain = parse(
+                    correct_answer,
+                    extraction_config=[ExprExtractionConfig()],
+                )
+                pred_plain = parse(
+                    predicted,
+                    extraction_config=[ExprExtractionConfig()],
+                )
+                if gold_plain and pred_plain:
+                    is_correct = verify(gold_plain, pred_plain)
+            except Exception:
+                pass
 
         return is_correct, {
             "predicted_answer": predicted,
             "correct_answer": correct_answer,
-            "predicted_normalized": pred_normalized,
-            "correct_normalized": correct_normalized,
         }
-
-    def _normalize_math(self, expr: str) -> str:
-        """Normalize math expression for comparison."""
-        if not expr:
-            return ""
-
-        s = expr.strip()
-
-        # Remove common LaTeX wrappers
-        s = re.sub(r'^\$+|\$+$', '', s)
-        s = re.sub(r'^\\text\{(.+)\}$', r'\1', s)
-        s = re.sub(r'^\\textbf\{(.+)\}$', r'\1', s)
-        s = re.sub(r'^\\mathrm\{(.+)\}$', r'\1', s)
-
-        # Remove \boxed{...} wrapper (handle nested braces)
-        boxed = re.search(r'\\boxed\{', s)
-        if boxed:
-            start = boxed.end()
-            depth = 1
-            pos = start
-            while pos < len(s) and depth > 0:
-                if s[pos] == '{':
-                    depth += 1
-                elif s[pos] == '}':
-                    depth -= 1
-                pos += 1
-            if depth == 0:
-                s = s[:boxed.start()] + s[start:pos - 1] + s[pos:]
-
-        # Remove trailing period if present
-        s = s.rstrip('.')
-
-        # Normalize common LaTeX commands
-        s = s.replace('\\left', '').replace('\\right', '')
-        s = s.replace('\\!', '').replace('\\,', '').replace('\\;', '').replace('\\:', '')
-        s = s.replace('\\cdot', '*').replace('\\times', '*')
-        s = s.replace('\\infty', 'inf')
-        s = s.replace('\\le', '<=').replace('\\ge', '>=')
-
-        # Normalize degrees: ^\circ -> empty (just keep the number)
-        s = re.sub(r'\^\\circ', '', s)
-        s = re.sub(r'°', '', s)
-
-        # Normalize sqrt: \sqrt{x} -> sqrt(x)
-        s = re.sub(r'\\sqrt\{([^{}]+)\}', r'sqrt(\1)', s)
-        # \sqrt x (single char, no braces)
-        s = re.sub(r'\\sqrt\s*([a-zA-Z0-9])', r'sqrt(\1)', s)
-
-        # Normalize pi
-        s = re.sub(r'\\pi', 'pi', s)
-
-        # Normalize fractions: \frac{a}{b}, \dfrac{a}{b}, \tfrac{a}{b} -> a/b
-        # Two-brace form: \frac{num}{den}
-        s = re.sub(r'\\[dt]?frac\{([^{}]+)\}\{([^{}]+)\}', r'(\1)/(\2)', s)
-        # One-brace shorthand: \frac{num}d or \frac n{den}
-        s = re.sub(r'\\[dt]?frac\{([^{}]+)\}([a-zA-Z0-9])', r'(\1)/(\2)', s)
-        s = re.sub(r'\\[dt]?frac([a-zA-Z0-9])\{([^{}]+)\}', r'(\1)/(\2)', s)
-        # No-brace shorthand: \frac ab (single char args)
-        s = re.sub(r'\\[dt]?frac([a-zA-Z0-9])([a-zA-Z0-9])', r'(\1)/(\2)', s)
-
-        # Simplify parenthesized fractions: (a)/(b) -> a/b when args are simple
-        s = re.sub(r'\(([a-zA-Z0-9.]+)\)/\(([a-zA-Z0-9.]+)\)', r'\1/\2', s)
-
-        # Remove thousands separators: comma followed by exactly 3 digits
-        while re.search(r'(\d),(\d{3})(?!\d)', s):
-            s = re.sub(r'(\d),(\d{3})(?!\d)', r'\1\2', s)
-
-        # Normalize "and" to comma for lists (e.g., "1 and 2" -> "1,2")
-        s = re.sub(r'\s+and\s+', ',', s, flags=re.IGNORECASE)
-
-        # Remove any remaining LaTeX backslash commands (cleanup)
-        s = re.sub(r'\\[a-zA-Z]+', '', s)
-
-        # Remove all whitespace for final comparison
-        s = re.sub(r'\s+', '', s)
-
-        # Insert implicit multiplication: 2sqrt(3) -> 2*sqrt(3), 8pi -> 8*pi
-        s = re.sub(r'(\d)(sqrt|pi)', r'\1*\2', s)
-        # Also: pi*2 or sqrt(3)2 are less common but handle )digit
-        s = re.sub(r'\)(\d)', r')*\1', s)
-
-        return s.lower()
-
-    def _try_numeric_equal(self, a: str, b: str) -> bool | None:
-        """Try numeric comparison as fallback. Returns None if not possible."""
-        try:
-            # Safe eval for simple arithmetic: digits, /, *, +, -, ., (, ), sqrt, pi
-            allowed = set('0123456789.+-*/()sqrtpi')
-            for s in (a, b):
-                if not all(c in allowed for c in s):
-                    return None
-
-            import math
-            ns = {"sqrt": math.sqrt, "pi": math.pi}
-            va = eval(a, {"__builtins__": {}}, ns)
-            vb = eval(b, {"__builtins__": {}}, ns)
-            return abs(va - vb) < 1e-9
-        except Exception:
-            return None
 
     def get_ground_truth(self, primitive: dict) -> dict:
         """Extract ground truth for embedding in prompts and RL interactions."""
@@ -357,6 +288,7 @@ class CompetitionMathTask(BaseTask):
             "rl_val": (0.65, 0.70),
             "classifier": (0.70, 0.90),
             "eval": (0.90, 1.0),
+            "eval_augmented": (0.70, 1.0),
         }
 
         if split not in splits:

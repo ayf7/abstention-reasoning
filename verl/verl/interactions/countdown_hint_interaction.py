@@ -154,7 +154,7 @@ class CountdownHintInteraction(BaseInteraction):
                 )
                 if hint_text is None:
                     # Fallback
-                    response = "<warning>No more hints available. Please provide your final answer.</warning>"
+                    response = "<response>No more hints available.</response>"
                     return False, response, 0.0, {"num_hints": inst["num_hints_given"], "hint_exhausted": True}
             else:
                 next_idx = last_given + 1
@@ -170,7 +170,7 @@ class CountdownHintInteraction(BaseInteraction):
             return False, response, 0.0, {"num_hints": inst["num_hints_given"], "hint_provided": hint_text}
         else:
             # No more hints available
-            response = "<warning>No more hints available. Please provide your final answer.</warning>"
+            response = "<response>No more hints available.</response>"
             logger.debug(f"No more hints available (last_given={last_given}, have {len(hints)})")
 
             # Continue but with warning

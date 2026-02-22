@@ -18,45 +18,47 @@ def has_abstain_tag(solution_str: str) -> bool:
     return "<abstain>" in solution_str.lower()
 
 
-def normalize_math(expr: str) -> str:
-    """Normalize math expression for comparison."""
-    if not expr:
-        return ""
-
-    s = expr.strip()
-
-    # Remove common LaTeX wrappers
-    s = re.sub(r'^\$+|\$+$', '', s)
-    s = re.sub(r'^\\text\{(.+)\}$', r'\1', s)
-    s = re.sub(r'^\\textbf\{(.+)\}$', r'\1', s)
-
-    # Normalize whitespace
-    s = re.sub(r'\s+', ' ', s).strip()
-
-    # Remove trailing period if present
-    s = s.rstrip('.')
-
-    # Normalize common LaTeX commands
-    s = s.replace('\\left', '').replace('\\right', '')
-    s = s.replace('\\!', '').replace('\\,', ' ').replace('\\;', ' ')
-    s = s.replace('\\cdot', '*').replace('\\times', '*')
-
-    # Normalize fractions: \frac{a}{b} -> a/b (simple cases)
-    s = re.sub(r'\\frac\{([^{}]+)\}\{([^{}]+)\}', r'(\1)/(\2)', s)
-
-    return s.lower()
-
-
 def check_answer(predicted: str, correct: str) -> bool:
-    """Check if predicted answer matches correct answer."""
+    """Check if predicted answer matches correct answer using math-verify."""
     if not predicted or not correct:
         return False
-    return normalize_math(predicted) == normalize_math(correct)
+
+    from math_verify import parse, verify, LatexExtractionConfig, ExprExtractionConfig
+
+    # Primary: parse both as LaTeX (wrapped in $...$)
+    try:
+        gold_parsed = parse(f"${correct}$", extraction_config=[LatexExtractionConfig()])
+    except Exception:
+        gold_parsed = []
+
+    try:
+        pred_parsed = parse(f"${predicted}$", extraction_config=[LatexExtractionConfig(), ExprExtractionConfig()])
+    except Exception:
+        pred_parsed = []
+
+    if gold_parsed and pred_parsed:
+        try:
+            if verify(gold_parsed, pred_parsed):
+                return True
+        except Exception:
+            pass
+
+    # Fallback: try both as plain expressions
+    try:
+        gold_plain = parse(correct, extraction_config=[ExprExtractionConfig()])
+        pred_plain = parse(predicted, extraction_config=[ExprExtractionConfig()])
+        if gold_plain and pred_plain:
+            return verify(gold_plain, pred_plain)
+    except Exception:
+        pass
+
+    return False
 
 
 def get_num_hints(solution_str: str) -> int:
-    """Count hint requests (<request></request> tags)."""
-    return len(re.findall(r'<request></request>', solution_str))
+    """Count all hint request/response exchanges (including exhausted ones)."""
+    responses = re.findall(r'<response>(.*?)</response>', solution_str, re.DOTALL)
+    return len(responses)
 
 
 def compute_score(
@@ -94,7 +96,7 @@ def compute_score(
         Dict with score and metadata
     """
     correct_answer = ground_truth.get("answer", "")
-    do_print = random.randint(1, 64) == 1
+    do_print = False
 
     if do_print:
         print(f"--------------------------------")
@@ -112,6 +114,7 @@ def compute_score(
             "score_wo_hint_penalty": abstention_score,
             "num_hints": num_hints,
             "abstained": True,
+            "correct": False,
         }
 
     # Extract predicted answer
@@ -125,6 +128,7 @@ def compute_score(
             "score_wo_hint_penalty": 0,
             "num_hints": num_hints,
             "abstained": False,
+            "correct": False,
         }
 
     # Check correctness
@@ -135,7 +139,8 @@ def compute_score(
             print(f"Correct! Predicted: {predicted}")
         base_score = score
         if penalize_hint and num_hints > 0:
-            final_score = base_score * (1 - hint_penalty * num_hints)
+            penalized_hints = min(num_hints, 5)
+            final_score = base_score * (1 - hint_penalty * penalized_hints)
             final_score = max(final_score, 0)  # Don't go negative
         else:
             final_score = base_score
@@ -144,11 +149,13 @@ def compute_score(
             "score_wo_hint_penalty": base_score,
             "num_hints": num_hints,
             "abstained": False,
+            "correct": True,
         }
     else:
         final_format_score = format_score
         if hint_bonus > 0 and num_hints > 0:
-            final_format_score = format_score + hint_bonus * num_hints
+            penalized_hints = min(num_hints, 5)
+            final_format_score = format_score + hint_bonus * penalized_hints
         if do_print:
             print(f"Wrong. Predicted: {predicted}, Expected: {correct_answer}")
             if hint_bonus > 0 and num_hints > 0:
@@ -158,6 +165,7 @@ def compute_score(
             "score_wo_hint_penalty": final_format_score,
             "num_hints": num_hints,
             "abstained": False,
+            "correct": False,
         }
 
 
@@ -216,3 +224,6 @@ def compute_score_hint(
         format_score=format_score,
         **kwargs,
     )
+
+
+

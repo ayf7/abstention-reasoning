@@ -72,8 +72,9 @@ def evaluate_equation(equation_str):
         return None
     
 def get_num_hints(solution_str):
-    """Count valid hint requests (<request></request> with nothing inside)."""
-    return len(re.findall(r'<request></request>', solution_str))
+    """Count all hint request/response exchanges (including exhausted ones)."""
+    responses = re.findall(r'<response>(.*?)</response>', solution_str, re.DOTALL)
+    return len(responses)
 
 
 def has_malformed_request(solution_str):
@@ -138,7 +139,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
     numbers = ground_truth['numbers']
 
     equation = extract_solution(solution_str=solution_str)
-    do_print = random.randint(1, 64) == 1
+    do_print = False
 
     """if len(solution_str.split()) < 200:
         return 0"""
@@ -153,7 +154,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
     if has_malformed_request(solution_str):
         if do_print:
             print(f"Malformed <request> tag detected - awarding 0")
-        return {"score": 0, "score_wo_hint_penalty": 0, "num_hints": 0, "abstained": False, "malformed": True}
+        return {"score": 0, "score_wo_hint_penalty": 0, "num_hints": 0, "abstained": False, "malformed": True, "correct": False}
 
     num_hints = get_num_hints(solution_str)
 
@@ -167,12 +168,13 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
             "num_hints": num_hints,
             "abstained": True,
             "malformed": False,
+            "correct": False,
         }
 
     if equation is None:
         if do_print:
             print(f"No equation found or length too short")
-        return {"score": 0, "score_wo_hint_penalty": 0, "num_hints": num_hints, "abstained": False, "malformed": False}
+        return {"score": 0, "score_wo_hint_penalty": 0, "num_hints": num_hints, "abstained": False, "malformed": False, "correct": False}
 
     # Check for abstention via answer content (legacy support)
     if reward_abstain and abstain_equation(equation):
@@ -184,44 +186,47 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
             "num_hints": num_hints,
             "abstained": True,
             "malformed": False,
+            "correct": False,
         }
 
     # Validate equation uses correct numbers
     if not validate_equation(equation, numbers):
         if do_print:
             print(f"Invalid equation")
-        return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False, "malformed": False}
-        
+        return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False, "malformed": False, "correct": False}
+
     # Evaluate equation
     try:
         result = evaluate_equation(equation)
         if result is None:
             if do_print:
                 print(f"Could not evaluate equation")
-            return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False, "malformed": False}
-            
+            return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False, "malformed": False, "correct": False}
+
         if abs(result - target) < 1e-5:  # Account for floating point precision
             if do_print:
                 print(f"Correct equation: {equation} = {result}")
             if penalize_hint:
-                final_score = score * (1 - hint_penalty * num_hints)
+                penalized_hints = min(num_hints, 5)
+                final_score = score * (1 - hint_penalty * penalized_hints)
             else:
                 final_score = score
-            return {"score": final_score, "score_wo_hint_penalty": score, "num_hints": num_hints, "abstained": False, "malformed": False}
+            return {"score": final_score, "score_wo_hint_penalty": score, "num_hints": num_hints, "abstained": False, "malformed": False, "correct": True}
         else:
             final_format_score = format_score
             if hint_bonus > 0 and num_hints > 0:
-                final_format_score = format_score + hint_bonus * num_hints
+                penalized_hints = min(num_hints, 5)
+                final_format_score = format_score + hint_bonus * penalized_hints
             if do_print:
                 print(f"Wrong result: equation = {result}, target = {target}")
                 if hint_bonus > 0 and num_hints > 0:
                     print(f"  Hint bonus applied: {format_score} + {hint_bonus}*{num_hints} = {final_format_score}")
-            return {"score": final_format_score, "score_wo_hint_penalty": final_format_score, "num_hints": num_hints, "abstained": False, "malformed": False}
+            return {"score": final_format_score, "score_wo_hint_penalty": final_format_score, "num_hints": num_hints, "abstained": False, "malformed": False, "correct": False}
     except:
         if do_print:
             print(f"Error evaluating equation")
-        return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False, "malformed": False}
-    
+        return {"score": format_score, "score_wo_hint_penalty": format_score, "num_hints": num_hints, "abstained": False, "malformed": False, "correct": False}
+
 
 
 def compute_score_abstain(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., abstention_score=0.5, **kwargs):

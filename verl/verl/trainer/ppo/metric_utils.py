@@ -104,10 +104,13 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
 
-    try:
-        num_hints = batch.batch["num_hints"]
-    except:
-        num_hints = torch.tensor([0])
+    # Reward extra info is stored in non_tensor_batch (as numpy arrays)
+    num_hints = None
+    correct = None
+    if "num_hints" in batch.non_tensor_batch:
+        num_hints = batch.non_tensor_batch["num_hints"]
+    if "correct" in batch.non_tensor_batch:
+        correct = batch.non_tensor_batch["correct"]
 
     advantages = batch.batch["advantages"]
     returns = batch.batch["returns"]
@@ -182,30 +185,51 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         metrics["num_turns/max"] = num_turns.max()
         metrics["num_turns/mean"] = num_turns.mean()
 
-    try:
-        metrics["rollout/num_hints/mean"] = torch.mean(num_hints).detach().item()
-        metrics["rollout/num_hints/max"] = torch.max(num_hints).detach().item()
-        metrics["rollout/num_hints/min"] = torch.min(num_hints).detach().item()
+    # Hint distribution and reward/accuracy breakdown by hint count
+    if num_hints is not None:
+        num_hints_arr = np.array(num_hints, dtype=np.int64)
+        total_samples = len(num_hints_arr)
 
-        # Add distribution of num_hints (count for each value 0-6)
-        num_hints_int = num_hints.detach().long()
-        total_samples = len(num_hints_int)
-        for i in range(7):  # 0, 1, 2, 3, 4, 5, 6 hints
-            count = (num_hints_int == i).sum().item()
+        metrics["rollout/num_hints/mean"] = float(np.mean(num_hints_arr))
+        metrics["rollout/num_hints/max"] = int(np.max(num_hints_arr))
+        metrics["rollout/num_hints/min"] = int(np.min(num_hints_arr))
+
+        # Distribution of num_hints (count/pct for 0-5 and 6+)
+        for i in range(6):
+            count = int((num_hints_arr == i).sum())
             metrics[f"rollout/num_hints/count_{i}"] = count
             metrics[f"rollout/num_hints/pct_{i}"] = count / total_samples if total_samples > 0 else 0
+        count_6plus = int((num_hints_arr >= 6).sum())
+        metrics["rollout/num_hints/count_6plus"] = count_6plus
+        metrics["rollout/num_hints/pct_6plus"] = count_6plus / total_samples if total_samples > 0 else 0
 
-        # Add average reward breakdown by number of hints (only log if count > 0)
-        for i in range(7):  # 0, 1, 2, 3, 4, 5, 6 hints
-            mask = (num_hints_int == i)
-            count = mask.sum().item()
-            if count > 0:
-                avg_reward = sequence_reward[mask].mean().detach().item()
-                metrics[f"rollout/num_hints/{i}_reward_avg"] = avg_reward
-    except:
-        metrics["rollout/num_hints/mean"] = 0
-        metrics["rollout/num_hints/max"] = 0
-        metrics["rollout/num_hints/min"] = 0
+        # Average reward breakdown by hint count
+        seq_reward_np = sequence_reward.detach().cpu().numpy()
+        for i in range(6):
+            mask = (num_hints_arr == i)
+            if mask.sum() > 0:
+                metrics[f"rollout/num_hints/{i}_reward_avg"] = float(seq_reward_np[mask].mean())
+        mask_6plus = (num_hints_arr >= 6)
+        if mask_6plus.sum() > 0:
+            metrics["rollout/num_hints/6plus_reward_avg"] = float(seq_reward_np[mask_6plus].mean())
+
+    # Accuracy metrics (overall and by hint count)
+    if correct is not None:
+        correct_arr = np.array(correct, dtype=bool)
+        total_samples = len(correct_arr)
+
+        metrics["accuracy/overall"] = float(correct_arr.mean()) if total_samples > 0 else 0
+
+        if num_hints is not None:
+            num_hints_arr = np.array(num_hints, dtype=np.int64)
+            for i in range(6):
+                mask = (num_hints_arr == i)
+                count = int(mask.sum())
+                if count > 0:
+                    metrics[f"accuracy/hints_{i}"] = float(correct_arr[mask].mean())
+            mask_6plus = (num_hints_arr >= 6)
+            if mask_6plus.sum() > 0:
+                metrics[f"accuracy/hints_6plus"] = float(correct_arr[mask_6plus].mean())
 
     return metrics
 
