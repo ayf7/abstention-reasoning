@@ -14,9 +14,11 @@ def _register_tasks():
     from .countdown.task import CountdownTask
     from .zebra_logic.task import ZebraLogicTask
     from .chess_puzzles.task import ChessPuzzlesTask
+    from .competition_math.task import CompetitionMathTask
     TASKS["countdown"] = CountdownTask
     TASKS["zebra_logic"] = ZebraLogicTask
     TASKS["chess_puzzles"] = ChessPuzzlesTask
+    TASKS["competition_math"] = CompetitionMathTask
 
 
 def get_task(name: str) -> "BaseTask":

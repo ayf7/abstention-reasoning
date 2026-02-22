@@ -53,6 +53,7 @@ def create_prompts(
     split_name: str = "all",
     seed: int = 42,
     include_assistant_prefix: bool = True,
+    num_hints: int | None = None,
 ) -> Path | dict[str, Path]:
     """
     Create prompts from primitives for a given split (or all splits).
@@ -68,6 +69,7 @@ def create_prompts(
         split_name: Name of split (sft, rl_train, rl_val, classifier, eval, or 'all')
         seed: Random seed for split assignment
         include_assistant_prefix: Whether to include assistant's opening
+        num_hints: Number of hints to extract from prefix_hints (0-6). If None, no hint injection.
 
     Returns:
         Path to created prompts file, or dict of paths if split="all"
@@ -126,6 +128,7 @@ def create_prompts(
                 include_assistant_prefix=include_assistant_prefix,
                 assistant_prefix=assistant_prefix,
                 method=method,
+                num_hints=num_hints,
             )
         return results
 
@@ -143,6 +146,7 @@ def create_prompts(
         include_assistant_prefix=include_assistant_prefix,
         assistant_prefix=assistant_prefix,
         method=method,
+        num_hints=num_hints,
     )
 
 
@@ -157,6 +161,7 @@ def _create_prompts_single(
     include_assistant_prefix: bool,
     assistant_prefix: str | None = None,
     method: "Method | None" = None,
+    num_hints: int | None = None,
 ) -> Path:
     """Create prompts for a single split."""
     # Override task's assistant_prefix if method provided one
@@ -230,12 +235,13 @@ def _create_prompts_single(
         if assistant_prefix:
             print(f"  Note: Set verl config data.runtime_assistant_prefix=\"{assistant_prefix}\"")
     else:
-        # Resolve template path
+        # Resolve template path (eval_augmented uses the eval template)
+        template_split = "eval" if split_name == "eval_augmented" else split_name
         if template_variant:
-            template_path = Path(f"pipeline/tasks/{task_name}/templates/{template_variant}/{split_name}.txt")
+            template_path = Path(f"pipeline/tasks/{task_name}/templates/{template_variant}/{template_split}.txt")
         else:
             # Legacy fallback (no variant subdirectory)
-            template_path = Path(f"pipeline/tasks/{task_name}/templates/{split_name}.txt")
+            template_path = Path(f"pipeline/tasks/{task_name}/templates/{template_split}.txt")
 
         if not template_path.exists():
             raise FileNotFoundError(
@@ -249,6 +255,18 @@ def _create_prompts_single(
         print(f"Creating {split_name} prompts for {len(primitives)} primitives (template: {template_path})...")
         records = []
         for primitive in primitives:
+            # Inject hints if --num-hints is specified
+            # Supports both hint_exprs (list, countdown) and prefix_hints (dict, competition_math)
+            if num_hints is not None:
+                hints_list = primitive.get("hint_exprs", [])
+                if not hints_list:
+                    prefix_hints = primitive.get("prefix_hints", {})
+                    for i in range(1, 7):
+                        key = f"hint_{i}"
+                        if key in prefix_hints:
+                            hints_list.append(prefix_hints[key])
+                primitive = {**primitive, "hints": hints_list[:num_hints]}
+
             prompt = task.format_prompt(primitive, template, include_assistant_prefix)
             ground_truth = task.get_ground_truth(primitive)
             record = {

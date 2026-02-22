@@ -314,6 +314,64 @@ class ChessPuzzlesTask(BaseTask):
 
         return result
 
+    def _get_piece_hint(self, primitive: dict) -> str:
+        """Compute the piece-to-move hint from FEN + moves.
+
+        Applies the losing_move to the board dict, then looks up the piece
+        at the winning_move's source square.
+
+        Returns:
+            Hint string like "The piece you should move is the knight on e5."
+        """
+        board = self._build_board_dict(primitive["fen"])
+
+        # Apply losing move to get the board state the model sees
+        lm = primitive["losing_move"]
+        from_sq, to_sq = lm[:2], lm[2:4]
+        piece = board.pop(from_sq, None)
+        if piece:
+            board[to_sq] = piece
+        # Handle promotion
+        if len(lm) > 4:
+            promo = lm[4]
+            if piece and piece.isupper():
+                board[to_sq] = promo.upper()
+            elif piece:
+                board[to_sq] = promo.lower()
+
+        # Look up piece at winning_move source square
+        wm_source = primitive["winning_move"][:2]
+        piece_char = board.get(wm_source)
+
+        piece_type_names = {
+            'K': 'king', 'Q': 'queen', 'R': 'rook',
+            'B': 'bishop', 'N': 'knight', 'P': 'pawn',
+            'k': 'king', 'q': 'queen', 'r': 'rook',
+            'b': 'bishop', 'n': 'knight', 'p': 'pawn',
+        }
+        piece_name = piece_type_names.get(piece_char, "piece")
+        return f"The piece you should move is the {piece_name} on {wm_source}."
+
+    def _get_rank_hint(self, primitive: dict) -> str:
+        """Hint revealing the destination rank (row) of the winning move."""
+        dest_rank = primitive["winning_move"][3]
+        return f"The piece should move to rank {dest_rank}."
+
+    def _get_file_hint(self, primitive: dict) -> str:
+        """Hint revealing the destination file (column) of the winning move."""
+        dest_file = primitive["winning_move"][2]
+        return f"The piece should move to column {dest_file}."
+
+    def get_ground_truth(self, primitive: dict) -> dict:
+        """Extract ground truth, including hint_exprs for multi-turn hint support."""
+        gt = {k: v for k, v in primitive.items() if k != "index"}
+        gt["hint_exprs"] = [
+            self._get_piece_hint(primitive),
+            self._get_rank_hint(primitive),
+            self._get_file_hint(primitive),
+        ]
+        return gt
+
     def enrich_primitive_for_rl(self, primitive: dict) -> dict:
         """
         Enrich primitive with derived fields needed for RL template substitution.
@@ -415,12 +473,16 @@ class ChessPuzzlesTask(BaseTask):
         # Always include expected move in metadata
         expected_move_raw = primitive["winning_move"]
 
+        # Count hint requests
+        num_hints = generation.count("<request>")
+
         # Check for <abstain> tag first
         if "<abstain>" in generation:
             return False, {
                 "predicted_move": None,
                 "expected_move": expected_move_raw,
                 "abstained": True,
+                "num_hints": num_hints,
             }
 
         answer = self.extract_answer(generation)
@@ -431,6 +493,7 @@ class ChessPuzzlesTask(BaseTask):
                 "expected_move": expected_move_raw,
                 "error": "no_answer_tag",
                 "abstained": False,
+                "num_hints": num_hints,
             }
 
         # Clean and normalize the answer (remove spaces, lowercase)
@@ -445,6 +508,7 @@ class ChessPuzzlesTask(BaseTask):
                 "expected_move": expected_move_raw,
                 "error": "invalid_uci_format",
                 "abstained": False,
+                "num_hints": num_hints,
             }
 
         # Check if move matches expected winning move
@@ -454,6 +518,7 @@ class ChessPuzzlesTask(BaseTask):
             "predicted_move": answer,
             "expected_move": expected_move_raw,
             "abstained": False,
+            "num_hints": num_hints,
         }
 
     def filter_for_sft(
@@ -617,6 +682,7 @@ class ChessPuzzlesTask(BaseTask):
             "rl_val": (0.72, 0.77),
             "classifier": (0.77, 0.92),
             "eval": (0.92, 1.0),
+            "eval_augmented": (0.77, 1.0),
         }
 
         # Check if split exists directly first

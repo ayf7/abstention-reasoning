@@ -8,9 +8,41 @@ from pathlib import Path
 
 from pipeline.core.io import load_json, save_json
 from pipeline.core.generator import Generator, GenerationConfig, AsyncGenerator, run_async_generation
+from pipeline.core.hint_selector import HintSelector
 from pipeline.core.method import Method
 from pipeline.core.utils import model_short_name
 from pipeline.tasks import get_task
+
+
+def extract_generation_hints(text: str) -> list[str]:
+    """Extract '(using the <category> of <name>)' hints from generated text.
+
+    Handles nested parentheses in concept names like (a+b)^2.
+    """
+    hints = []
+    pattern_start = re.compile(r'\(using the (\w+) of ', re.IGNORECASE)
+
+    for match in pattern_start.finditer(text):
+        category = match.group(1)
+        start_pos = match.end()
+
+        # Find matching closing paren by counting depth
+        depth = 1
+        pos = start_pos
+        while pos < len(text) and depth > 0:
+            if text[pos] == '(':
+                depth += 1
+            elif text[pos] == ')':
+                depth -= 1
+            pos += 1
+
+        if depth == 0:
+            name = text[start_pos:pos - 1]
+            clean_name = name.strip().replace('**', '').replace('*', '')
+            hint = f'{category} of {clean_name}'
+            hints.append(hint)
+
+    return hints
 
 
 def compute_hint_metrics(details: list[dict]) -> dict:
@@ -20,6 +52,8 @@ def compute_hint_metrics(details: list[dict]) -> dict:
     Returns a dict with:
     - counts_by_hints_and_variant: {num_hints: {variant: count}}
     - correct_by_hints_and_variant: {num_hints: {variant: correct_count}}
+    - counts_by_hints_and_level: {num_hints: {level: count}}
+    - correct_by_hints_and_level: {num_hints: {level: correct_count}}
     - total_hints: total hints used across all examples
     - avg_hints: average hints per example
     """
@@ -27,160 +61,215 @@ def compute_hint_metrics(details: list[dict]) -> dict:
 
     counts = defaultdict(lambda: defaultdict(int))
     correct_counts = defaultdict(lambda: defaultdict(int))
+    counts_by_level = defaultdict(lambda: defaultdict(int))
+    correct_by_level = defaultdict(lambda: defaultdict(int))
     total_hints = 0
     max_hints = 0
 
     for record in details:
         variant = record.get("variant", "unknown")
+        level = record.get("level", "unknown")
         num_hints = record.get("num_hints", 0)
         counts[num_hints][variant] += 1
         total_hints += num_hints
         max_hints = max(max_hints, num_hints)
+        if level != "unknown":
+            counts_by_level[num_hints][level] += 1
         if record.get("correct", False):
             correct_counts[num_hints][variant] += 1
+            if level != "unknown":
+                correct_by_level[num_hints][level] += 1
 
     # Convert defaultdicts to regular dicts for JSON serialization
     counts_dict = {h: dict(counts[h]) for h in range(max_hints + 1)}
     correct_dict = {h: dict(correct_counts[h]) for h in range(max_hints + 1)}
+    counts_level_dict = {h: dict(counts_by_level[h]) for h in range(max_hints + 1)}
+    correct_level_dict = {h: dict(correct_by_level[h]) for h in range(max_hints + 1)}
 
     return {
         "counts_by_hints_and_variant": counts_dict,
         "correct_by_hints_and_variant": correct_dict,
+        "counts_by_hints_and_level": counts_level_dict,
+        "correct_by_hints_and_level": correct_level_dict,
         "total_hints": total_hints,
         "avg_hints": total_hints / len(details) if details else 0,
         "max_hints": max_hints,
     }
 
 
+def _format_hint_tables(
+    row_labels: list[str],
+    counts_map: dict,
+    correct_map: dict,
+    max_hints: int,
+    row_header: str,
+    section_title: str,
+) -> list[str]:
+    """Format counts and accuracy tables for a set of row labels.
+
+    Args:
+        row_labels: Sorted list of row label strings (variants or levels).
+        counts_map: {num_hints: {label: count}} dict.
+        correct_map: {num_hints: {label: correct_count}} dict.
+        max_hints: Maximum hint count to display columns for.
+        row_header: Column header for the row label (e.g. "Type", "Level").
+        section_title: Title prefix (e.g. "TYPE", "DIFFICULTY").
+    """
+
+    def get_val(mapping, h, label):
+        return mapping.get(str(h), {}).get(label, mapping.get(h, {}).get(label, 0))
+
+    # Compute label column width from longest label
+    label_w = max(len(row_header), max((len(l) for l in row_labels), default=8)) + 2
+    num_col_w = 10
+    acc_col_w = 16
+
+    lines = []
+
+    # --- Counts table ---
+    total_w = label_w + num_col_w * (max_hints + 3)
+    lines.extend([
+        "",
+        f"COUNTS BY {section_title} AND HINTS",
+        "-" * total_w,
+    ])
+
+    header = f"{row_header:<{label_w}}"
+    for h in range(max_hints + 1):
+        header += f"{h:>{num_col_w}}"
+    header += f"{'Total':>{num_col_w}}{'Hints':>{num_col_w}}"
+    lines.append(header)
+    lines.append("-" * total_w)
+
+    grand_total = 0
+    grand_hints = 0
+    col_totals = [0] * (max_hints + 1)
+
+    for label in row_labels:
+        row = f"{label:<{label_w}}"
+        row_total = 0
+        row_hints = 0
+        for h in range(max_hints + 1):
+            c = get_val(counts_map, h, label)
+            row_total += c
+            row_hints += h * c
+            col_totals[h] += c
+            row += f"{c:>{num_col_w}}"
+        grand_total += row_total
+        grand_hints += row_hints
+        row += f"{row_total:>{num_col_w}}{row_hints:>{num_col_w}}"
+        lines.append(row)
+
+    lines.append("-" * total_w)
+    totals_row = f"{'Total':<{label_w}}"
+    for h in range(max_hints + 1):
+        totals_row += f"{col_totals[h]:>{num_col_w}}"
+    totals_row += f"{grand_total:>{num_col_w}}{grand_hints:>{num_col_w}}"
+    lines.append(totals_row)
+
+    # --- Accuracy table ---
+    acc_total_w = label_w + acc_col_w * (max_hints + 2)
+    lines.extend([
+        "",
+        "",
+        f"ACCURACY BY {section_title} AND HINTS",
+        "-" * acc_total_w,
+    ])
+
+    header = f"{row_header:<{label_w}}"
+    for h in range(max_hints + 1):
+        header += f"{h:>{acc_col_w}}"
+    header += f"{'Total':>{acc_col_w}}"
+    lines.append(header)
+    lines.append("-" * acc_total_w)
+
+    overall_correct = 0
+    overall_total = 0
+    col_correct_totals = [0] * (max_hints + 1)
+    col_count_totals = [0] * (max_hints + 1)
+
+    for label in row_labels:
+        row = f"{label:<{label_w}}"
+        row_correct = 0
+        row_total = 0
+        for h in range(max_hints + 1):
+            c = get_val(counts_map, h, label)
+            corr = get_val(correct_map, h, label)
+            row_correct += corr
+            row_total += c
+            col_correct_totals[h] += corr
+            col_count_totals[h] += c
+            if c > 0:
+                cell = f"{corr}/{c} ({100*corr/c:.0f}%)"
+                row += f"{cell:>{acc_col_w}}"
+            else:
+                row += f"{'--':>{acc_col_w}}"
+        overall_correct += row_correct
+        overall_total += row_total
+        if row_total > 0:
+            cell = f"{row_correct}/{row_total} ({100*row_correct/row_total:.0f}%)"
+            row += f"{cell:>{acc_col_w}}"
+        else:
+            row += f"{'--':>{acc_col_w}}"
+        lines.append(row)
+
+    lines.append("-" * acc_total_w)
+    totals_row = f"{'Total':<{label_w}}"
+    for h in range(max_hints + 1):
+        c = col_count_totals[h]
+        corr = col_correct_totals[h]
+        if c > 0:
+            cell = f"{corr}/{c} ({100*corr/c:.0f}%)"
+            totals_row += f"{cell:>{acc_col_w}}"
+        else:
+            totals_row += f"{'--':>{acc_col_w}}"
+    if overall_total > 0:
+        cell = f"{overall_correct}/{overall_total} ({100*overall_correct/overall_total:.0f}%)"
+        totals_row += f"{cell:>{acc_col_w}}"
+    lines.append(totals_row)
+
+    return lines
+
+
 def format_hint_metrics(hint_metrics: dict, details: list[dict]) -> str:
     """Format hint metrics as tables for display.
 
-    Tables have operands (variants) as rows and hint counts as columns.
+    Prints tables grouped by variant (problem type) and, if level data is
+    available, by difficulty level.
     """
-    counts = hint_metrics["counts_by_hints_and_variant"]
-    correct = hint_metrics["correct_by_hints_and_variant"]
     max_hints = hint_metrics["max_hints"]
 
-    # Get variants from details
     variants = sorted(set(d.get("variant", "unknown") for d in details))
-
-    # Helper to get count value (handles both int and str keys)
-    def get_count(h, v):
-        return counts.get(str(h), {}).get(v, counts.get(h, {}).get(v, 0))
-
-    def get_correct(h, v):
-        return correct.get(str(h), {}).get(v, correct.get(h, {}).get(v, 0))
+    levels = sorted(set(d.get("level", "unknown") for d in details) - {"unknown"})
 
     lines = [
         "",
         "=" * 90,
         "HINT USAGE ANALYSIS",
         "=" * 90,
-        "",
-        "COUNTS BY OPERANDS AND HINTS",
-        "-" * 90,
     ]
 
-    # Header: Operands | 0 | 1 | 2 | ... | Total | Hints
-    header = f"{'Operands':<12}"
-    for h in range(max_hints + 1):
-        header += f"{h:>10}"
-    header += f"{'Total':>10}{'Hints':>10}"
-    lines.append(header)
-    lines.append("-" * 90)
+    # Tables by variant (problem type)
+    lines.extend(_format_hint_tables(
+        row_labels=variants,
+        counts_map=hint_metrics["counts_by_hints_and_variant"],
+        correct_map=hint_metrics["correct_by_hints_and_variant"],
+        max_hints=max_hints,
+        row_header="Type",
+        section_title="TYPE",
+    ))
 
-    # Rows: one per variant
-    grand_total = 0
-    grand_hints = 0
-    col_totals = [0] * (max_hints + 1)
-
-    for v in variants:
-        row = f"{v:<12}"
-        row_total = 0
-        row_hints = 0
-        for h in range(max_hints + 1):
-            c = get_count(h, v)
-            row_total += c
-            row_hints += h * c
-            col_totals[h] += c
-            row += f"{c:>10}"
-        grand_total += row_total
-        grand_hints += row_hints
-        row += f"{row_total:>10}{row_hints:>10}"
-        lines.append(row)
-
-    # Totals row
-    lines.append("-" * 90)
-    totals_row = f"{'Total':<12}"
-    for h in range(max_hints + 1):
-        totals_row += f"{col_totals[h]:>10}"
-    totals_row += f"{grand_total:>10}{grand_hints:>10}"
-    lines.append(totals_row)
-
-    # Accuracy table
-    lines.extend([
-        "",
-        "",
-        "ACCURACY BY OPERANDS AND HINTS",
-        "-" * 90,
-    ])
-
-    # Header
-    header = f"{'Operands':<12}"
-    for h in range(max_hints + 1):
-        header += f"{h:>16}"
-    header += f"{'Total':>16}"
-    lines.append(header)
-    lines.append("-" * 90)
-
-    # Rows: one per variant
-    overall_correct = 0
-    overall_total = 0
-    col_correct_totals = [0] * (max_hints + 1)
-    col_count_totals = [0] * (max_hints + 1)
-
-    for v in variants:
-        row = f"{v:<12}"
-        row_correct = 0
-        row_total = 0
-        for h in range(max_hints + 1):
-            c = get_count(h, v)
-            corr = get_correct(h, v)
-            row_correct += corr
-            row_total += c
-            col_correct_totals[h] += corr
-            col_count_totals[h] += c
-            if c > 0:
-                acc = f"{100*corr/c:.0f}%"
-                cell = f"{corr}/{c} ({acc})"
-                row += f"{cell:>16}"
-            else:
-                row += f"{'--':>16}"
-        overall_correct += row_correct
-        overall_total += row_total
-        if row_total > 0:
-            acc = f"{100*row_correct/row_total:.0f}%"
-            row += f"{row_correct}/{row_total} ({acc})".rjust(16)
-        else:
-            row += f"{'--':>16}"
-        lines.append(row)
-
-    # Totals row
-    lines.append("-" * 90)
-    totals_row = f"{'Total':<12}"
-    for h in range(max_hints + 1):
-        c = col_count_totals[h]
-        corr = col_correct_totals[h]
-        if c > 0:
-            acc = f"{100*corr/c:.0f}%"
-            cell = f"{corr}/{c} ({acc})"
-            totals_row += f"{cell:>16}"
-        else:
-            totals_row += f"{'--':>16}"
-    if overall_total > 0:
-        acc = f"{100*overall_correct/overall_total:.0f}%"
-        totals_row += f"{overall_correct}/{overall_total} ({acc})".rjust(16)
-    lines.append(totals_row)
+    # Tables by difficulty level (if available)
+    if levels:
+        lines.append("")
+        lines.extend(_format_hint_tables(
+            row_labels=levels,
+            counts_map=hint_metrics["counts_by_hints_and_level"],
+            correct_map=hint_metrics["correct_by_hints_and_level"],
+            max_hints=max_hints,
+            row_header="Level",
+            section_title="DIFFICULTY",
+        ))
 
     return "\n".join(lines)
 
@@ -198,19 +287,27 @@ def extract_cot_length(generation: str) -> int:
     return 0
 
 
-def select_best_sample(samples: list[dict], task, primitive: dict) -> dict:
+def select_best_sample(
+    samples: list[dict],
+    task,
+    primitive: dict,
+    strategy: str = "shortest_cot",
+) -> dict:
     """
     Select the best sample from multiple generations.
 
-    Strategy:
-    1. Check correctness for each sample
-    2. Among correct samples, pick shortest CoT
-    3. If no correct samples, pick shortest CoT anyway
+    Strategies:
+    - "shortest_cot": Among correct samples, pick shortest CoT. Falls back to
+      shortest CoT among incorrect if none correct.
+    - "most_hints": Among correct samples, pick the one with most hint requests.
+      Falls back to most hints among incorrect if none correct. Useful for
+      generating SFT data that teaches models to use hints.
 
     Args:
         samples: List of generation results with 'text', 'finish_reason', 'token_count'
         task: Task instance for checking correctness
         primitive: Primitive data with ground truth
+        strategy: Selection strategy ("shortest_cot" or "most_hints")
 
     Returns:
         Best sample dict with added 'correct' and 'metadata' fields
@@ -220,23 +317,29 @@ def select_best_sample(samples: list[dict], task, primitive: dict) -> dict:
     for sample in samples:
         is_correct, meta = task.check_correctness(primitive, sample["text"])
         cot_length = extract_cot_length(sample["text"])
+        num_hints = sample["text"].count("<request>")
         evaluated_samples.append({
             **sample,
             "correct": is_correct,
             "metadata": meta,
             "cot_length": cot_length,
+            "_num_hints": num_hints,
         })
 
     # Separate correct and incorrect
     correct_samples = [s for s in evaluated_samples if s["correct"]]
     incorrect_samples = [s for s in evaluated_samples if not s["correct"]]
 
-    # Pick shortest CoT among correct, or shortest overall if none correct
     candidates = correct_samples if correct_samples else incorrect_samples
-    best_sample = min(candidates, key=lambda s: s["cot_length"])
 
-    # Remove cot_length (internal field)
+    if strategy == "most_hints":
+        best_sample = max(candidates, key=lambda s: s["_num_hints"])
+    else:
+        best_sample = min(candidates, key=lambda s: s["cot_length"])
+
+    # Remove internal fields
     del best_sample["cot_length"]
+    del best_sample["_num_hints"]
 
     return best_sample
 
@@ -261,6 +364,11 @@ def generate(
     multi_turn: bool | None = None,
     max_turns: int | None = None,
     use_async: bool = False,
+    force_hints_distribution: dict[int, float] | None = None,
+    force_hints_policy: dict[str, float] | None = None,
+    hint_selection: str | None = None,
+    helper_model: str | None = None,
+    helper_gpu_memory_utilization: float | None = None,
 ) -> Path:
     """
     Generate model outputs on prompts.
@@ -280,6 +388,12 @@ def generate(
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
         max_turns: Maximum turns for multi-turn generation. If None, uses method config (default: 5).
         use_async: Use async generation for optimal throughput.
+        force_hints_distribution: Distribution of forced hint counts. Maps number of hints
+            to probability, e.g. {1: 0.5, 2: 0.3, 3: 0.2}. Probabilities must sum to 1.
+            If None, no hints are forced.
+        force_hints_policy: Per-level probability of forcing hints. Maps level number
+            to rate, e.g. {"1": 0.05, "2": 0.05, "3": 0.05, "4": 0.15, "5": 0.15}.
+            If None but force_hints_distribution is set, all examples get forced hints.
         ... generation config ...
 
     Returns:
@@ -295,8 +409,30 @@ def generate(
     # Resolve multi_turn and max_turns from method config (CLI overrides if explicitly set)
     if multi_turn is None:
         multi_turn = method.multi_turn if method else False
+    if force_hints_distribution:
+        multi_turn = True  # force_hints requires multi_turn
     if max_turns is None:
-        max_turns = method.max_turns if method else 5
+        max_turns = method.max_turns if method else 6
+
+    # Resolve hint selection strategy (CLI overrides method config)
+    if hint_selection is None:
+        hint_selection = method.hint_selection if method else "sequential"
+    if helper_model is None:
+        helper_model = method.helper_model if method else None
+
+    # Create HintSelector if using smart selection
+    hint_selector = None
+    if hint_selection == "smart" and multi_turn:
+        helper_gpu_util = helper_gpu_memory_utilization if helper_gpu_memory_utilization is not None else gpu_memory_utilization
+        hint_selector = HintSelector(
+            strategy="smart",
+            helper_model=helper_model,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=helper_gpu_util,
+        )
+        print(f"Smart hint selection enabled (helper: {helper_model}, gpu_util: {helper_gpu_util})")
+    elif hint_selection == "smart" and not multi_turn:
+        print("Warning: --hint-selection smart requires multi-turn mode, ignoring")
 
     # Resolve model shortcuts (sft, rl)
     actual_model_name = model_name
@@ -377,6 +513,55 @@ def generate(
         print("Async mode enabled (optimal throughput)")
     if multi_turn:
         print(f"Multi-turn mode enabled: max_turns={max_turns}")
+    # Compute per-prompt force_hints based on distribution and policy
+    if force_hints_distribution:
+        import random
+        rng = random.Random(42)
+
+        # Build cumulative distribution for sampling hint counts
+        hint_counts = sorted(force_hints_distribution.keys())
+        hint_probs = [force_hints_distribution[k] for k in hint_counts]
+        cum_probs = []
+        cumsum = 0.0
+        for p in hint_probs:
+            cumsum += p
+            cum_probs.append(cumsum)
+
+        def sample_hint_count():
+            r = rng.random()
+            for count, cp in zip(hint_counts, cum_probs):
+                if r < cp:
+                    return count
+            return hint_counts[-1]
+
+        dist_str = ", ".join(f"{k}: {v:.0%}" for k, v in sorted(force_hints_distribution.items()))
+
+        if force_hints_policy:
+            # Per-level gating: only force for selected examples
+            force_hints_list = []
+            level_counts = {}
+            for p in remaining_prompts:
+                level_str = p.get("ground_truth", {}).get("level", "")
+                level_num = level_str.replace("Level ", "") if level_str else ""
+                rate = force_hints_policy.get(level_num, 0.0)
+                if rng.random() < rate:
+                    n = sample_hint_count()
+                    force_hints_list.append(n)
+                    level_counts[level_str] = level_counts.get(level_str, 0) + 1
+                else:
+                    force_hints_list.append(0)
+            forced_total = sum(1 for f in force_hints_list if f > 0)
+            print(f"Force hints policy: {forced_total}/{len(remaining_prompts)} examples will get forced hints")
+            print(f"  Distribution: {dist_str}")
+            for level in sorted(level_counts.keys()):
+                print(f"  {level}: {level_counts[level]} forced")
+        else:
+            # All examples get forced hints sampled from distribution
+            force_hints_list = [sample_hint_count() for _ in remaining_prompts]
+            print(f"Force hints enabled for all {len(remaining_prompts)} examples")
+            print(f"  Distribution: {dist_str}")
+    else:
+        force_hints_list = [0] * len(remaining_prompts)
 
     # For async multi-turn, process all remaining prompts at once
     if multi_turn and use_async:
@@ -392,10 +577,13 @@ def generate(
                 all_prompts,
                 all_ground_truths,
                 max_turns=max_turns,
+                force_hints=force_hints_list,
+                hint_selector=hint_selector,
             )
         )
 
         # Process all results
+        sample_strategy = "most_hints" if multi_turn else "shortest_cot"
         for prompt_data, gen_samples in zip(remaining_prompts, all_results):
             primitive = {
                 "index": prompt_data["index"],
@@ -403,13 +591,16 @@ def generate(
                 "variant": prompt_data.get("variant", "unknown"),
             }
 
-            sample = gen_samples[0]
-            is_correct, meta = task.check_correctness(primitive, sample["text"])
-            best_sample = {
-                **sample,
-                "correct": is_correct,
-                "metadata": meta,
-            }
+            if num_samples > 1:
+                best_sample = select_best_sample(gen_samples, task, primitive, strategy=sample_strategy)
+            else:
+                sample = gen_samples[0]
+                is_correct, meta = task.check_correctness(primitive, sample["text"])
+                best_sample = {
+                    **sample,
+                    "correct": is_correct,
+                    "metadata": meta,
+                }
 
             record = {
                 "index": prompt_data["index"],
@@ -420,12 +611,15 @@ def generate(
                 "finish_reason": best_sample["finish_reason"],
                 "token_count": best_sample["token_count"],
                 "metadata": best_sample["metadata"],
+                "extracted_hints": extract_generation_hints(best_sample["text"]),
             }
 
             if "num_hints" in best_sample:
                 record["num_hints"] = best_sample["num_hints"]
             if "turns" in best_sample:
                 record["turns"] = best_sample["turns"]
+            if "total_token_count" in best_sample:
+                record["total_token_count"] = best_sample["total_token_count"]
 
             records_by_index[prompt_data["index"]] = record
 
@@ -436,6 +630,8 @@ def generate(
         correct = sum(1 for r in records if r["correct"])
         print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%)")
         print(f"Saved dataset to {output_path}")
+        if hint_selector is not None:
+            hint_selector.shutdown()
         return output_path
 
     # Async regular generation (non-multi-turn)
@@ -478,6 +674,7 @@ def generate(
                 "finish_reason": best_sample["finish_reason"],
                 "token_count": best_sample["token_count"],
                 "metadata": best_sample["metadata"],
+                "extracted_hints": extract_generation_hints(best_sample["text"]),
             }
 
             records_by_index[prompt_data["index"]] = record
@@ -499,16 +696,38 @@ def generate(
         # Generate batch
         if multi_turn:
             # Multi-turn generation with hint injection (sync)
-            batch_ground_truths = [p["ground_truth"] for p in batch_prompts_data]
-            batch_results = generator.generate_with_hints(
-                batch_prompts,
-                batch_ground_truths,
-                max_turns=max_turns,
-            )
+            # Duplicate prompts for num_samples > 1 (generate_with_hints produces 1 trajectory each)
+            if num_samples > 1:
+                expanded_prompts = [p for p in batch_prompts for _ in range(num_samples)]
+                expanded_gts = [p["ground_truth"] for p in batch_prompts_data for _ in range(num_samples)]
+                expanded_force = [fh for fh in force_hints_list[batch_idx:batch_idx + batch_size] for _ in range(num_samples)]
+                expanded_results = generator.generate_with_hints(
+                    expanded_prompts,
+                    expanded_gts,
+                    max_turns=max_turns,
+                    force_hints=expanded_force,
+                    hint_selector=hint_selector,
+                )
+                # Group back: every num_samples consecutive results belong to the same prompt
+                batch_results = [
+                    [r[0] for r in expanded_results[i * num_samples:(i + 1) * num_samples]]
+                    for i in range(len(batch_prompts_data))
+                ]
+            else:
+                batch_ground_truths = [p["ground_truth"] for p in batch_prompts_data]
+                batch_force_hints = force_hints_list[batch_idx:batch_idx + batch_size]
+                batch_results = generator.generate_with_hints(
+                    batch_prompts,
+                    batch_ground_truths,
+                    max_turns=max_turns,
+                    force_hints=batch_force_hints,
+                    hint_selector=hint_selector,
+                )
         else:
             batch_results = generator.generate(batch_prompts)
 
         # Process results
+        sample_strategy = "most_hints" if multi_turn else "shortest_cot"
         batch_correct = 0
         for prompt_data, gen_samples in zip(batch_prompts_data, batch_results):
             primitive = {
@@ -519,7 +738,7 @@ def generate(
 
             # If num_samples > 1, select best sample; otherwise use single sample
             if num_samples > 1:
-                best_sample = select_best_sample(gen_samples, task, primitive)
+                best_sample = select_best_sample(gen_samples, task, primitive, strategy=sample_strategy)
             else:
                 # Single sample case - evaluate it
                 sample = gen_samples[0]
@@ -542,6 +761,7 @@ def generate(
                 "finish_reason": best_sample["finish_reason"],
                 "token_count": best_sample["token_count"],
                 "metadata": best_sample["metadata"],
+                "extracted_hints": extract_generation_hints(best_sample["text"]),
             }
 
             # Add multi-turn metadata if available
@@ -549,6 +769,8 @@ def generate(
                 record["num_hints"] = best_sample["num_hints"]
             if "turns" in best_sample:
                 record["turns"] = best_sample["turns"]
+            if "total_token_count" in best_sample:
+                record["total_token_count"] = best_sample["total_token_count"]
 
             # Update in-place (replaces old record if retrying)
             records_by_index[prompt_data["index"]] = record
@@ -568,6 +790,9 @@ def generate(
     save_json(output_path, records)
     print(f"Saved dataset to {output_path}")
 
+    if hint_selector is not None:
+        hint_selector.shutdown()
+
     return output_path
 
 
@@ -576,6 +801,7 @@ def evaluate(
     model_name: str,
     method_name: str | None = None,
     run_id: str | None = None,
+    split: str = "eval",
     prompts_path: Path | None = None,
     output_path: Path | None = None,
     batch_size: int = 16,
@@ -588,6 +814,9 @@ def evaluate(
     multi_turn: bool | None = None,
     max_turns: int | None = None,
     use_async: bool = False,
+    hint_selection: str | None = None,
+    helper_model: str | None = None,
+    helper_gpu_memory_utilization: float | None = None,
 ) -> Path:
     """
     Evaluate a model on prompts and compute metrics.
@@ -618,7 +847,25 @@ def evaluate(
     if multi_turn is None:
         multi_turn = method.multi_turn if method else False
     if max_turns is None:
-        max_turns = method.max_turns if method else 5
+        max_turns = method.max_turns if method else 6
+
+    # Resolve hint selection strategy (CLI overrides method config)
+    if hint_selection is None:
+        hint_selection = method.hint_selection if method else "sequential"
+    if helper_model is None:
+        helper_model = method.helper_model if method else None
+
+    # Create HintSelector if using smart selection
+    hint_selector = None
+    if hint_selection == "smart" and multi_turn:
+        helper_gpu_util = helper_gpu_memory_utilization if helper_gpu_memory_utilization is not None else gpu_memory_utilization
+        hint_selector = HintSelector(
+            strategy="smart",
+            helper_model=helper_model,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=helper_gpu_util,
+        )
+        print(f"Smart hint selection enabled (helper: {helper_model}, gpu_util: {helper_gpu_util})")
 
     # Resolve model shortcuts (sft, rl)
     actual_model_name = model_name
@@ -635,7 +882,7 @@ def evaluate(
                 "Either --method or --prompts must be specified. "
                 "Use --method to auto-derive paths, or --prompts for explicit paths."
             )
-        prompts_path = method.prompts_path(task_name, "eval")
+        prompts_path = method.prompts_path(task_name, split)
 
     # Default output path
     if output_path is None:
@@ -648,7 +895,9 @@ def evaluate(
         output_model_name = model_name
         if model_name in ("sft", "rl") and run_id and run_id != "default":
             output_model_name = f"{model_name}_{run_id}"
-        output_path = method.results_path(task_name, output_model_name)
+        from pipeline.core.method import model_short_name
+        model_slug = model_short_name(output_model_name)
+        output_path = method.results_dir(task_name) / f"{split}_{model_slug}.json"
 
     # Load prompts
     prompts_data = load_json(prompts_path)
@@ -689,6 +938,7 @@ def evaluate(
                 prompts,
                 ground_truths,
                 max_turns=max_turns,
+                hint_selector=hint_selector,
             )
         )
 
@@ -709,6 +959,7 @@ def evaluate(
             prompts,
             ground_truths,
             max_turns=max_turns,
+            hint_selector=hint_selector,
         )
 
     # Sync regular generation
@@ -739,6 +990,7 @@ def evaluate(
         detail = {
             "index": prompt_data["index"],
             "variant": prompt_data.get("variant", "unknown"),
+            "level": prompt_data.get("ground_truth", {}).get("level", "unknown"),
             "correct": is_correct,
             "finish_reason": finish_reason,
             "token_count": token_count,
@@ -754,6 +1006,10 @@ def evaluate(
             detail["num_hints"] = gen_result["num_hints"]
         if "turns" in gen_result:
             detail["turns"] = gen_result["turns"]
+        if "total_token_count" in gen_result:
+            detail["total_token_count"] = gen_result["total_token_count"]
+        if "hint_selections" in gen_result:
+            detail["hint_selections"] = gen_result["hint_selections"]
 
         details.append(detail)
 
@@ -793,10 +1049,28 @@ def evaluate(
     if hint_metrics:
         print(format_hint_metrics(hint_metrics, details))
 
+    # Print per-problem hint selection details if smart selection was used
+    if hint_selection == "smart" and multi_turn:
+        print("\n--- Hint Selection Details ---")
+        for d in details:
+            sels = d.get("hint_selections", [])
+            if sels:
+                level = d.get("level", "?")
+                correct = "Y" if d.get("correct") else "N"
+                idx = d.get("index", "?")
+                sel_strs = [
+                    f"turn {s['turn']}: {s['prev_last_given']}->{s['new_last_given']} ({s['type']})"
+                    for s in sels
+                ]
+                print(f"  [{idx}] level={level} correct={correct} hints={d.get('num_hints', 0)} | {', '.join(sel_strs)}")
+
     # Save
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_json(output_path, results)
     print(f"\nSaved results to {output_path}")
+
+    if hint_selector is not None:
+        hint_selector.shutdown()
 
     return output_path
 

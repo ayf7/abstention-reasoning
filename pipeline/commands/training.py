@@ -321,17 +321,17 @@ def train_rl(
     sft_model_path: Path | None = None,
     output_path: Path | None = None,
     reward_function_path: Path | None = None,
-    train_batch_size: int = 256,
-    val_batch_size: int = 256,
+    train_batch_size: int = 64,
+    val_batch_size: int = 64,
     learning_rate: float = 1e-6,
-    total_steps: int = 100,
+    total_steps: int = 400,
     kl_coef: float = 0.001,
-    n_samples: int = 4,
+    n_samples: int = 16,
     save_freq: int = 25,
     test_freq: int | None = None,
-    max_prompt_length: int = 1024,
+    max_prompt_length: int = 2048,
     max_response_length: int = 2048,
-    max_model_len: int | None = None,
+    max_model_len: int = 8192,
     tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.4,
     project_name: str | None = None,
@@ -339,6 +339,7 @@ def train_rl(
     wandb: bool = True,
     resume_path: Path | None = None,
     cleanup_checkpoints: bool = True,
+    keep_state: bool = False,
 ) -> Path:
     """
     Train RL model using verl (GRPO algorithm).
@@ -372,6 +373,7 @@ def train_rl(
         wandb: Enable wandb logging
         resume_path: Path to resume from existing run (overrides output_path)
         cleanup_checkpoints: Delete checkpoints after training (default: True)
+        keep_state: Keep the last optimizer state checkpoint after training (default: False)
 
     Returns:
         Path to trained model
@@ -452,7 +454,9 @@ def train_rl(
     rollout_backend = "vllm"
     rollout_mode = "sync"
     interaction_name = None
-    max_turns = 5
+    max_turns = 6
+    suppress_abstain_fraction = 0.0
+    max_hints = None
     if method is not None:
         reward_function_name = method.reward_function
         reward_kwargs = method.reward_kwargs
@@ -461,6 +465,8 @@ def train_rl(
         rollout_mode = method.rollout_mode
         interaction_name = method.interaction_name or (f"{task_name}_{method.name}" if method.multi_turn else None)
         max_turns = method.max_turns
+        suppress_abstain_fraction = method.suppress_abstain_fraction
+        max_hints = method.max_hints
         template_content = method.load_template(task_name, "rl")
 
     # Handle resume path
@@ -539,6 +545,8 @@ def train_rl(
     print(f"Learning Rate: {learning_rate}")
     print(f"Total Steps: {total_steps}")
     print(f"Wandb: {wandb}")
+    if suppress_abstain_fraction > 0:
+        print(f"Suppress Abstain Fraction: {suppress_abstain_fraction}")
     if template_content:
         print(f"Template: {method.template_variant}/rl.txt")
     print(f"=================================")
@@ -560,17 +568,16 @@ def train_rl(
         "actor_rollout_ref.model.use_remove_padding=True",
         "actor_rollout_ref.actor.use_dynamic_bsz=True",
         f"actor_rollout_ref.actor.optim.lr={learning_rate}",
-        "actor_rollout_ref.actor.ppo_mini_batch_size=64",
-        "actor_rollout_ref.actor.use_kl_loss=False",
-        "actor_rollout_ref.actor.entropy_coeff=0.001",
+        f"actor_rollout_ref.actor.ppo_mini_batch_size={train_batch_size}",
+        "actor_rollout_ref.actor.use_kl_loss=True",
         "actor_rollout_ref.actor.ppo_micro_batch_size=16",
         f"actor_rollout_ref.rollout.n={n_samples}",
-        f"actor_rollout_ref.rollout.max_model_len={max_model_len or max_prompt_length + max_response_length}",
+        f"actor_rollout_ref.rollout.max_model_len={max_model_len}",
         "actor_rollout_ref.rollout.log_prob_micro_batch_size=4",
         f"actor_rollout_ref.rollout.tensor_model_parallel_size={tensor_parallel_size}",
         f"actor_rollout_ref.rollout.gpu_memory_utilization={gpu_memory_utilization}",
         "actor_rollout_ref.ref.log_prob_micro_batch_size=4",
-        "algorithm.kl_ctrl.kl_coef=0",
+        f"algorithm.kl_ctrl.kl_coef={kl_coef}",
         f"trainer.logger={logger_config}",
         "trainer.default_hdfs_dir=null",
         f"trainer.default_local_dir={checkpoints_dir}",
@@ -579,7 +586,7 @@ def train_rl(
         f"trainer.save_freq={save_freq}",
         f"trainer.test_freq={test_freq if test_freq is not None else save_freq}",
         "trainer.resume_mode=auto",
-        "trainer.max_actor_ckpt_to_keep=2",
+        "trainer.max_actor_ckpt_to_keep=1",
         f"trainer.project_name={project_name}",
         f"trainer.experiment_name={experiment_name}",
         f"trainer.total_training_steps={total_steps}",
@@ -630,12 +637,19 @@ def train_rl(
         # Add allow_hint flag for multi-turn hint generation
         if allow_hint:
             cmd.append("allow_hint=True")
+        # Add max_hints limit for rollout
+        if max_hints is not None:
+            cmd.append(f"+actor_rollout_ref.rollout.max_hints={max_hints}")
 
     # Add reward kwargs if specified in method config
     # Use + prefix to add new config keys
     if reward_kwargs:
         for key, value in reward_kwargs.items():
             cmd.append(f"+custom_reward_function.reward_kwargs.{key}={value}")
+
+    # Add suppress_abstain_fraction for forced decoding in GRPO rollouts
+    if suppress_abstain_fraction > 0:
+        cmd.append(f"+actor_rollout_ref.rollout.suppress_abstain_fraction={suppress_abstain_fraction}")
 
     # Set environment variables
     env = os.environ.copy()
@@ -678,13 +692,32 @@ def train_rl(
             print(f"Warning: actor directory not found in {latest_checkpoint}")
 
     # Cleanup checkpoints if requested (rollouts are preserved for analysis)
-    if cleanup_checkpoints:
+    if cleanup_checkpoints and not keep_state:
         import shutil
         print("Cleaning up checkpoints...")
         if checkpoints_dir.exists():
             shutil.rmtree(checkpoints_dir)
             print(f"  Removed: {checkpoints_dir}")
         print("Cleanup complete.")
+    elif cleanup_checkpoints and keep_state:
+        # Keep only the last checkpoint (with optimizer state), remove the rest
+        import shutil
+        import re as _re
+        if checkpoints_dir.exists():
+            ckpt_dirs = [
+                d for d in checkpoints_dir.iterdir()
+                if d.is_dir() and _re.match(r"global_step_\d+", d.name)
+            ]
+            if len(ckpt_dirs) > 1:
+                def _get_step(d):
+                    m = _re.search(r"global_step_(\d+)", d.name)
+                    return int(m.group(1)) if m else 0
+                ckpt_dirs.sort(key=_get_step)
+                for d in ckpt_dirs[:-1]:
+                    shutil.rmtree(d)
+                    print(f"  Removed old checkpoint: {d.name}")
+            if ckpt_dirs:
+                print(f"  Kept last checkpoint: {ckpt_dirs[-1].name}")
 
     return hf_model_path
 

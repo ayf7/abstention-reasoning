@@ -35,12 +35,16 @@ class Method:
     reward_function: str = "compute_score"
     reward_kwargs: dict[str, Any] = field(default_factory=dict)
     multi_turn: bool = False  # Enable multi-turn hint generation
-    max_turns: int = 5  # Maximum turns for multi-turn generation
+    max_turns: int = 6  # Maximum turns for multi-turn generation
     assistant_prefix: str | None = None  # If None, use task's default
     mask_response_tokens: bool = False  # Mask <response>...</response> in SFT
     rollout_backend: str = "vllm"  # RL rollout backend: "vllm" or "sglang"
     rollout_mode: str = "sync"  # RL rollout mode: "sync", "async", or "async_agentic"
     interaction_name: str | None = None  # Interaction name override (default: {task}_{method})
+    hint_selection: str = "sequential"  # Hint selection strategy: "sequential" or "smart"
+    helper_model: str | None = None  # Model for smart hint selection (e.g., "Qwen/Qwen3-14B")
+    suppress_abstain_fraction: float = 0.0  # Fraction of GRPO rollouts forced to attempt (suppress <abstain>)
+    max_hints: int | None = None  # Maximum number of hints to give during RL rollout (None = unlimited)
 
     # Backwards compatibility alias
     @property
@@ -92,12 +96,16 @@ class Method:
             reward_function=data.get("reward_function", "compute_score"),
             reward_kwargs=data.get("reward_kwargs", {}),
             multi_turn=multi_turn,
-            max_turns=data.get("max_turns", 5),
+            max_turns=data.get("max_turns", 6),
             assistant_prefix=data.get("assistant_prefix"),
             mask_response_tokens=data.get("mask_response_tokens", False),
             rollout_backend=data.get("rollout_backend", "vllm"),
             rollout_mode=data.get("rollout_mode", "sync"),
             interaction_name=data.get("interaction_name"),
+            hint_selection=data.get("hint_selection", "sequential"),
+            helper_model=data.get("helper_model"),
+            suppress_abstain_fraction=data.get("suppress_abstain_fraction", 0.0),
+            max_hints=data.get("max_hints"),
         )
 
     @staticmethod

@@ -8,14 +8,16 @@ authors = [{ name = "Anthony Fei", email = "ayf7@cornell.edu" }]
 
 dependencies = [
   "torch>=2.1",
-  "transformers==4.55.4",
+  "transformers",
   "matplotlib",
   "tqdm",
   "numpy",
   "accelerate",
   "trl",
   "wandb",
-  "vllm<=0.8.4",
+  "vllm==0.15.0",
+  "xformers",
+  "math-verify[antlr4_9_3]",
 ]
 
 [build-system]

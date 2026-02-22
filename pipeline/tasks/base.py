@@ -98,6 +98,7 @@ class BaseTask:
             "rl_val": (0.65, 0.7),
             "classifier": (0.7, 0.9),
             "eval": (0.9, 1.0),
+            "eval_augmented": (0.7, 1.0),
         }
 
         if split not in splits:
