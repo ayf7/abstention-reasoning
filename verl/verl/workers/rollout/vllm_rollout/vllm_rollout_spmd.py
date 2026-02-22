@@ -229,6 +229,10 @@ class vLLMRollout(BaseRollout):
                 print(f"Smart hint selection enabled (helper: {helper_model})")
 
         self.n = config.n
+        self.suppress_abstain_fraction = config.get("suppress_abstain_fraction", 0.0)
+        if self.suppress_abstain_fraction > 0:
+            print(f"Suppress abstain fraction: {self.suppress_abstain_fraction} "
+                  f"({self.suppress_abstain_fraction * 100:.0f}% of rollouts will be forced to attempt)")
 
         kwargs["detokenize"] = True
 
@@ -337,7 +341,7 @@ class vLLMRollout(BaseRollout):
             if next_idx < len(hints):
                 hint_results.append((hints[next_idx], next_idx))
             else:
-                hint_results.append(("We have no more hints to give", last_given))
+                hint_results.append(("No more hints available.", last_given))
 
         return hint_results
 
@@ -354,7 +358,7 @@ class vLLMRollout(BaseRollout):
         numbers = [nos for nos in prompts.non_tensor_batch.get("numbers", [None] * len(raw_prompt_ids)) for _ in range(sampling_params.n)]
 
         num_outputs = len(raw_prompt_ids)
-        self.max_hints = 6
+        self.max_hints = self.config.get("max_hints", 6)
 
         idx_to_partials = [[] for _ in range(num_outputs)]
         idx_to_masks = [[] for _ in range(num_outputs)]
@@ -499,7 +503,7 @@ class vLLMRollout(BaseRollout):
 
                         if idx_to_num_hints[curr_idx] > self.max_hints:
                             # Add the failure message
-                            hint_result = "\n<response>HINT LIMIT REACHED</response>\n"
+                            hint_result = "\n<response>No more hints available.</response>\n"
                             doc_tokens = list(self.tokenizer(hint_result, add_special_tokens=False)['input_ids'])
                             partial_tokens.append(doc_tokens)
                             partial_masks.append([0] * len(doc_tokens))
@@ -869,26 +873,74 @@ class vLLMRollout(BaseRollout):
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
-            outputs = self.inference_engine.generate(
-                prompts=vllm_inputs,  # because we have already convert it to prompt token id
-                sampling_params=self.sampling_params,
-                use_tqdm=False,
+            n_total = self.sampling_params.n
+            should_suppress = (
+                self.suppress_abstain_fraction > 0
+                and do_sample
+                and not is_validate
+                and n_total > 1
             )
 
-            # TODO(sgm): disable logprob when recompute_log_prob is enable
-            # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
+            if should_suppress:
+                n_suppress = max(1, round(n_total * self.suppress_abstain_fraction))
+                n_free = n_total - n_suppress
 
-            response = []
-            rollout_log_probs = []
-            for output in outputs:
-                for sample_id in range(len(output.outputs)):
-                    response_ids = output.outputs[sample_id].token_ids
-                    response.append(response_ids)
-                    if self.config.calculate_log_probs:
-                        curr_log_prob = []
-                        for i, logprob in enumerate(output.outputs[sample_id].logprobs):
-                            curr_log_prob.append(logprob[response_ids[i]].logprob)
-                        rollout_log_probs.append(curr_log_prob)
+                # Call 1: forced attempt (suppress <abstain>)
+                params_suppress = copy.deepcopy(self.sampling_params)
+                params_suppress.n = n_suppress
+                params_suppress.bad_words = ['<abstain']
+
+                outputs_suppress = self.inference_engine.generate(
+                    prompts=vllm_inputs, sampling_params=params_suppress, use_tqdm=False)
+
+                # Call 2: free choice
+                outputs_free = None
+                if n_free > 0:
+                    params_free = copy.deepcopy(self.sampling_params)
+                    params_free.n = n_free
+                    outputs_free = self.inference_engine.generate(
+                        prompts=vllm_inputs, sampling_params=params_free, use_tqdm=False)
+
+                # Merge per-prompt: [suppress_samples, free_samples] for each prompt
+                response = []
+                rollout_log_probs = []
+                for prompt_idx in range(len(vllm_inputs)):
+                    for sample in outputs_suppress[prompt_idx].outputs:
+                        response.append(sample.token_ids)
+                        if self.config.calculate_log_probs:
+                            curr_log_prob = []
+                            for i, logprob in enumerate(sample.logprobs):
+                                curr_log_prob.append(logprob[sample.token_ids[i]].logprob)
+                            rollout_log_probs.append(curr_log_prob)
+                    if outputs_free is not None:
+                        for sample in outputs_free[prompt_idx].outputs:
+                            response.append(sample.token_ids)
+                            if self.config.calculate_log_probs:
+                                curr_log_prob = []
+                                for i, logprob in enumerate(sample.logprobs):
+                                    curr_log_prob.append(logprob[sample.token_ids[i]].logprob)
+                                rollout_log_probs.append(curr_log_prob)
+            else:
+                outputs = self.inference_engine.generate(
+                    prompts=vllm_inputs,
+                    sampling_params=self.sampling_params,
+                    use_tqdm=False,
+                )
+
+                # TODO(sgm): disable logprob when recompute_log_prob is enable
+                # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
+
+                response = []
+                rollout_log_probs = []
+                for output in outputs:
+                    for sample_id in range(len(output.outputs)):
+                        response_ids = output.outputs[sample_id].token_ids
+                        response.append(response_ids)
+                        if self.config.calculate_log_probs:
+                            curr_log_prob = []
+                            for i, logprob in enumerate(output.outputs[sample_id].logprobs):
+                                curr_log_prob.append(logprob[response_ids[i]].logprob)
+                            rollout_log_probs.append(curr_log_prob)
 
             response = pad_2d_list_to_length(response, self.pad_token_id, max_length=self.config.response_length).to(
                 idx.device
@@ -1009,7 +1061,7 @@ class vLLMAsyncAgenticRollout(BaseRollout):
         self.config = config
         self.tokenizer = tokenizer
         self.pad_token_id = tokenizer.pad_token_id
-        self.max_hints = 6
+        self.max_hints = config.get("max_hints", 6)
         self.allow_hint = config.allow_hint
         self.n = config.n
 
@@ -1316,7 +1368,7 @@ class vLLMAsyncAgenticRollout(BaseRollout):
                     if state.num_hints_used > self.max_hints:
                         # Exceeded limit - complete
                         limit_tokens = list(self.tokenizer(
-                            "\n<response>HINT LIMIT REACHED</response>\n",
+                            "\n<response>No more hints available.</response>\n",
                             add_special_tokens=False
                         )['input_ids'])
                         state.accumulated_tokens.append(limit_tokens)
