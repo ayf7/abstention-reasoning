@@ -172,6 +172,13 @@ class CompetitionMathTask(BaseTask):
         Uses math-verify for robust symbolic equivalence checking.
         Gold answers are parsed as LaTeX, predicted answers as plain expressions.
         """
+        # Check for abstention first (matches reward function logic)
+        if generation.rstrip().endswith("</think>\n\n<abstain>"):
+            return False, {
+                "predicted_answer": None,
+                "abstained": True,
+            }
+
         from math_verify import parse, verify, LatexExtractionConfig, ExprExtractionConfig
 
         predicted = self.extract_answer(generation)
@@ -314,7 +321,9 @@ class CompetitionMathTask(BaseTask):
         request/response protocol.
         """
         def is_abstained(ex):
-            return ex.get("abstained", False) or ex.get("metadata", {}).get("abstained", False)
+            return (ex.get("abstained", False)
+                    or ex.get("metadata", {}).get("abstained", False)
+                    or "</think>\n\n<abstain>" in ex.get("generation", ""))
 
         def has_hints_and_answer(ex):
             gen = ex.get("generation", "")

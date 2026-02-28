@@ -476,8 +476,8 @@ class ChessPuzzlesTask(BaseTask):
         # Count hint requests
         num_hints = generation.count("<request>")
 
-        # Check for <abstain> tag first
-        if "<abstain>" in generation:
+        # Check for abstention: rollout ends with </think>\n\n<abstain>
+        if generation.rstrip().endswith("</think>\n\n<abstain>"):
             return False, {
                 "predicted_move": None,
                 "expected_move": expected_move_raw,

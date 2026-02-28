@@ -11,3 +11,7 @@ logs*
 
 artifacts/
 temp_connections/
+
+scripts/
+slurm-scripts/
+*.png

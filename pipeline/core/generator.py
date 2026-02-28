@@ -83,6 +83,8 @@ class Generator:
             max_tokens=self.config.max_new_tokens,
             n=self.config.num_samples,
             seed=self.config.seed,
+            stop=["</answer>", "</think>\n\n<abstain>"],
+            include_stop_str_in_output=True,
         )
 
         # Apply chat template
@@ -702,6 +704,8 @@ class AsyncGenerator:
             max_tokens=self.config.max_new_tokens,
             n=num_samples,
             seed=self.config.seed,
+            stop=["</answer>", "</think>\n\n<abstain>"],
+            include_stop_str_in_output=True,
         )
 
         # Results storage

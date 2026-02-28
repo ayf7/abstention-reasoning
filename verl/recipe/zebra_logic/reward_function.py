@@ -13,6 +13,62 @@ def extract_answer(solution_str):
     return None
 
 
+def has_malformed_structure(solution_str):
+    """Validate the overall tag structure of the response.
+
+    The response starts inside an open <think> block (from assistant prefix).
+    Valid structure:
+        ([text]</think><request></request><response>...</response><think>)*
+        [text]</think>\\n\\n(<answer>...</answer> | <abstain>)
+
+    Validates:
+    - Correct tag sequence (state machine)
+    - <request> tags are tight (no content inside)
+    - No spurious/duplicate tags (e.g. double </think>)
+
+    Returns:
+        True if the structure is malformed, False if valid.
+    """
+    # Content check: <request> tags must be tight (no content inside)
+    if solution_str.count('<request>') != len(re.findall(r'<request></request>', solution_str)):
+        return True
+
+    # Extract all structural tags in order
+    tag_pattern = r'(</think>|<think>|<request>|</request>|<response>|</response>|<answer>|</answer>|<abstain>)'
+    tags = re.findall(tag_pattern, solution_str)
+
+    if not tags:
+        return True
+
+    i = 0
+    while i < len(tags):
+        if tags[i] != '</think>':
+            return True
+        i += 1
+
+        if i >= len(tags):
+            return True
+
+        if tags[i] == '<request>':
+            expected = ['<request>', '</request>', '<response>', '</response>', '<think>']
+            for expected_tag in expected:
+                if i >= len(tags) or tags[i] != expected_tag:
+                    return True
+                i += 1
+        elif tags[i] == '<answer>':
+            if i + 1 >= len(tags) or tags[i + 1] != '</answer>':
+                return True
+            i += 2
+            return i != len(tags)
+        elif tags[i] == '<abstain>':
+            i += 1
+            return i != len(tags)
+        else:
+            return True
+
+    return True
+
+
 def check_correctness(predicted, ground_truth):
     """
     Check if predicted answer matches the correct choice.
@@ -125,6 +181,18 @@ def compute_score(
         print(f"Extracted: {predicted}")
         print(f"Solution: {solution_str[:500]}...")
 
+    # Structural validation: verify entire tag sequence is well-formed
+    if has_malformed_structure(solution_str):
+        if do_print:
+            print(f"Malformed structure detected - awarding 0")
+        return {
+            "score": 0,
+            "correct": False,
+            "error": "malformed_structure",
+            "predicted_answer": None,
+            "abstained": False,
+        }
+
     # Base result with consistent keys
     result = {
         "score": 0,
@@ -177,11 +245,7 @@ def compute_score_abstain(
     """
     Reward function for ZebraLogic with abstention support.
 
-    Abstention is ONLY valid when:
-    1. Must have </think> (completed thinking)
-    2. <abstain> must appear AFTER </think>
-    3. No <answer> tag (if they gave an answer, they're not abstaining)
-    4. Not matching prompt instruction text like "output <abstain>"
+    Abstention is valid when the rollout ends with </think>\\n\\n<abstain>.
 
     Args:
         abstention_score: Reward for abstaining (default 0.5)
@@ -191,29 +255,32 @@ def compute_score_abstain(
     if do_print:
         print(f"[reward_kwargs] format_score={format_score}, abstention_score={abstention_score}, score={score}")
 
+    # Structural validation: verify entire tag sequence is well-formed
+    if has_malformed_structure(solution_str):
+        if do_print:
+            print(f"Malformed structure detected - awarding 0")
+        return {
+            "score": 0,
+            "correct": False,
+            "error": "malformed_structure",
+            "predicted_answer": None,
+            "abstained": False,
+        }
+
     # Extract the answer first
     predicted = extract_answer(solution_str)
 
-    # Check for valid abstention via <abstain> tag
-    # Requirements:
-    # 1. Must have </think> (completed thinking)
-    # 2. <abstain> must appear AFTER </think>
-    # 3. No <answer> tag (predicted is None - if they gave an answer, they're not abstaining)
-    # 4. Exclude "output <abstain>" which is part of the prompt instruction
-    think_end = solution_str.rfind("</think>")
-    if think_end != -1 and predicted is None:
-        answer_section = solution_str[think_end:]
-        # Check for <abstain> but NOT the instruction pattern "output <abstain>"
-        if "<abstain>" in answer_section and "output <abstain>" not in answer_section:
-            if do_print:
-                print(f"Valid abstention (via <abstain> after </think>) - awarding {abstention_score}")
-            return {
-                "score": abstention_score,
-                "correct": False,
-                "error": None,
-                "predicted_answer": None,
-                "abstained": True,
-            }
+    # Check for abstention: rollout must end with </think>\n\n<abstain>
+    if solution_str.rstrip().endswith("</think>\n\n<abstain>"):
+        if do_print:
+            print(f"Abstaining (via </think>\\n\\n<abstain>) - awarding {abstention_score}")
+        return {
+            "score": abstention_score,
+            "correct": False,
+            "error": None,
+            "predicted_answer": None,
+            "abstained": True,
+        }
 
     # Otherwise, use standard scoring
     return compute_score(

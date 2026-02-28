@@ -111,6 +111,13 @@ class ZebraLogicTask(BaseTask):
         - Exact match with answer text
         - Letter choice (A, B, C, D) matching the correct answer's position
         """
+        # Check for abstention first (matches reward function logic)
+        if generation.rstrip().endswith("</think>\n\n<abstain>"):
+            return False, {
+                "predicted_answer": None,
+                "abstained": True,
+            }
+
         predicted = self.extract_answer(generation)
 
         if predicted is None:

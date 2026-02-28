@@ -107,10 +107,13 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     # Reward extra info is stored in non_tensor_batch (as numpy arrays)
     num_hints = None
     correct = None
+    abstained = None
     if "num_hints" in batch.non_tensor_batch:
         num_hints = batch.non_tensor_batch["num_hints"]
     if "correct" in batch.non_tensor_batch:
         correct = batch.non_tensor_batch["correct"]
+    if "abstained" in batch.non_tensor_batch:
+        abstained = batch.non_tensor_batch["abstained"]
 
     advantages = batch.batch["advantages"]
     returns = batch.batch["returns"]
@@ -230,6 +233,20 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
             mask_6plus = (num_hints_arr >= 6)
             if mask_6plus.sum() > 0:
                 metrics[f"accuracy/hints_6plus"] = float(correct_arr[mask_6plus].mean())
+
+    # Abstention metrics
+    if abstained is not None:
+        abstained_arr = np.array(abstained, dtype=bool)
+        total_samples = len(abstained_arr)
+        if total_samples > 0:
+            metrics["abstention/rate"] = float(abstained_arr.mean())
+            metrics["abstention/count"] = int(abstained_arr.sum())
+            # Accuracy among non-abstained samples
+            if correct is not None:
+                correct_arr = np.array(correct, dtype=bool)
+                non_abstained = ~abstained_arr
+                if non_abstained.sum() > 0:
+                    metrics["abstention/accuracy_non_abstained"] = float(correct_arr[non_abstained].mean())
 
     return metrics
 

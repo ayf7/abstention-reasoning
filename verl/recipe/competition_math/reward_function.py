@@ -14,8 +14,8 @@ def extract_answer(solution_str: str) -> str | None:
 
 
 def has_abstain_tag(solution_str: str) -> bool:
-    """Check if the solution contains an <abstain> tag."""
-    return "<abstain>" in solution_str.lower()
+    """Check if the solution ends with the abstention pattern: </think>\\n\\n<abstain>"""
+    return solution_str.rstrip().endswith("</think>\n\n<abstain>")
 
 
 def check_answer(predicted: str, correct: str) -> bool:
@@ -53,6 +53,62 @@ def check_answer(predicted: str, correct: str) -> bool:
         pass
 
     return False
+
+
+def has_malformed_structure(solution_str: str) -> bool:
+    """Validate the overall tag structure of the response.
+
+    The response starts inside an open <think> block (from assistant prefix).
+    Valid structure:
+        ([text]</think><request></request><response>...</response><think>)*
+        [text]</think>\\n\\n(<answer>...</answer> | <abstain>)
+
+    Validates:
+    - Correct tag sequence (state machine)
+    - <request> tags are tight (no content inside)
+    - No spurious/duplicate tags (e.g. double </think>)
+
+    Returns:
+        True if the structure is malformed, False if valid.
+    """
+    # Content check: <request> tags must be tight (no content inside)
+    if solution_str.count('<request>') != len(re.findall(r'<request></request>', solution_str)):
+        return True
+
+    # Extract all structural tags in order
+    tag_pattern = r'(</think>|<think>|<request>|</request>|<response>|</response>|<answer>|</answer>|<abstain>)'
+    tags = re.findall(tag_pattern, solution_str)
+
+    if not tags:
+        return True
+
+    i = 0
+    while i < len(tags):
+        if tags[i] != '</think>':
+            return True
+        i += 1
+
+        if i >= len(tags):
+            return True
+
+        if tags[i] == '<request>':
+            expected = ['<request>', '</request>', '<response>', '</response>', '<think>']
+            for expected_tag in expected:
+                if i >= len(tags) or tags[i] != expected_tag:
+                    return True
+                i += 1
+        elif tags[i] == '<answer>':
+            if i + 1 >= len(tags) or tags[i + 1] != '</answer>':
+                return True
+            i += 2
+            return i != len(tags)
+        elif tags[i] == '<abstain>':
+            i += 1
+            return i != len(tags)
+        else:
+            return True
+
+    return True
 
 
 def get_num_hints(solution_str: str) -> int:
@@ -102,6 +158,18 @@ def compute_score(
         print(f"--------------------------------")
         print(f"Correct answer: {correct_answer}")
         print(f"Solution: {solution_str[:500]}...")
+
+    # Structural validation: verify entire tag sequence is well-formed
+    if has_malformed_structure(solution_str):
+        if do_print:
+            print(f"Malformed structure detected - awarding 0")
+        return {
+            "score": 0,
+            "score_wo_hint_penalty": 0,
+            "num_hints": 0,
+            "abstained": False,
+            "correct": False,
+        }
 
     num_hints = get_num_hints(solution_str)
 

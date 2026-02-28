@@ -68,8 +68,6 @@ from verl import DataProto
 from verl.utils.debug import GPUMemoryLogger
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from verl.workers.rollout.base import BaseRollout
-from recipe.countdown.reward_function import compute_score
-
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -204,9 +202,9 @@ class vLLMRollout(BaseRollout):
                 logprobs=0,  # can be set to 0 and let actor to recompute
                 max_tokens=config.response_length,
                 include_stop_str_in_output=True,
-                stop=["</answer>"]
+                stop=["</answer>", "</think>\n\n<abstain>"]
             )
-        
+
         self.tokenizer = tokenizer
         self.allow_hint = config.allow_hint
         if self.allow_hint:
@@ -229,10 +227,6 @@ class vLLMRollout(BaseRollout):
                 print(f"Smart hint selection enabled (helper: {helper_model})")
 
         self.n = config.n
-        self.suppress_abstain_fraction = config.get("suppress_abstain_fraction", 0.0)
-        if self.suppress_abstain_fraction > 0:
-            print(f"Suppress abstain fraction: {self.suppress_abstain_fraction} "
-                  f"({self.suppress_abstain_fraction * 100:.0f}% of rollouts will be forced to attempt)")
 
         kwargs["detokenize"] = True
 
@@ -359,6 +353,7 @@ class vLLMRollout(BaseRollout):
 
         num_outputs = len(raw_prompt_ids)
         self.max_hints = self.config.get("max_hints", 6)
+        self.max_turns = self.config.get("max_turns", self.max_hints + 1)
 
         idx_to_partials = [[] for _ in range(num_outputs)]
         idx_to_masks = [[] for _ in range(num_outputs)]
@@ -376,15 +371,12 @@ class vLLMRollout(BaseRollout):
         # Pattern to detect any request tag (for malformed detection)
         any_request_pattern = r'</request>'
         answer_pattern = r'<answer>(.*?)</answer>'
-        eps = prompts.non_tensor_batch["epsilon"][0]
-        sampling_params_nohint = copy.deepcopy(sampling_params)
-        sampling_params_nohint.bad_words = ['</r']  # Prevent </request> in no-hint mode
 
         # Single sampling params for all rollouts (n=1 since expansion already done)
         loop_sampling_params = copy.deepcopy(sampling_params)
         loop_sampling_params.n = 1  # Expansion already done via repeat_interleave
 
-        for attempt in range(self.max_hints + 1):
+        for attempt in range(self.max_turns):
             tp_rank = vllm_ps.get_tensor_model_parallel_rank()
 
             # Get all incomplete indices
@@ -502,17 +494,17 @@ class vLLMRollout(BaseRollout):
                         idx_to_num_hints[curr_idx] += 1
 
                         if idx_to_num_hints[curr_idx] > self.max_hints:
-                            # Add the failure message
+                            # Add the failure message but let model continue to produce an answer
                             hint_result = "\n<response>No more hints available.</response>\n"
                             doc_tokens = list(self.tokenizer(hint_result, add_special_tokens=False)['input_ids'])
                             partial_tokens.append(doc_tokens)
                             partial_masks.append([0] * len(doc_tokens))
                             idx_to_response_len[curr_idx] += len(doc_tokens)
-                            completed_indices[curr_idx] = True
 
-                            # Early truncation check
+                            # Truncation check - only terminate if we've run out of token budget
                             if self.exceeds_vllm_length(partial_tokens) or idx_to_response_len[curr_idx] >= max_response_len:
                                 idx_to_truncation[curr_idx] = 1
+                                completed_indices[curr_idx] = True
                         else:
                             hint_indices.append(curr_idx)
                     else:
@@ -524,33 +516,7 @@ class vLLMRollout(BaseRollout):
                             print(f"Malformed <request> tag detected in output: {output_text[:200]}...")
 
                 elif len(answer_matches) != 0:
-                    # Model produced an answer
-                    # Epsilon-greedy exploration: sometimes force wrong answers to ask for hints
-                    # Only works for countdown task (requires targets/numbers); skip for other tasks
-                    try:
-                        score_curr = compute_score("countdown", output_text, {"target": targets[curr_idx], "numbers": numbers[curr_idx]}, None)["score_wo_hint_penalty"]
-                        do_epsilon_force = random.random() < eps and score_curr < 1 and idx_to_num_hints[curr_idx] < self.max_hints
-                    except (NameError, KeyError, IndexError):
-                        # Not countdown task or missing fields - skip epsilon-greedy
-                        do_epsilon_force = False
-
-                    if do_epsilon_force:
-                        # Force hint request
-                        idx_to_num_hints[curr_idx] += 1
-                        # Inject valid <request></request> for epsilon-greedy exploration
-                        doc_tokens = list(self.tokenizer('<request></request>', add_special_tokens=False)['input_ids'])
-                        partial_generation = re.sub(answer_pattern, '', output_text)
-
-                        new_gen_tokens = list(self.tokenizer(partial_generation, add_special_tokens=False)['input_ids'])
-                        # Adjust response length: subtract old gen_tokens, add new_gen_tokens + doc_tokens
-                        idx_to_response_len[curr_idx] = idx_to_response_len[curr_idx] - len(gen_tokens) + len(new_gen_tokens) + len(doc_tokens)
-                        partial_tokens[-1] = new_gen_tokens
-                        partial_masks[-1] = [1] * len(new_gen_tokens)
-                        partial_tokens.append(doc_tokens)
-                        partial_masks.append([0] * len(doc_tokens))
-                        hint_indices.append(curr_idx)
-                    else:
-                        completed_indices[curr_idx] = True
+                    completed_indices[curr_idx] = True
 
                 else:
                     # No hint request or answer - model failed to produce valid output
@@ -766,8 +732,8 @@ class vLLMRollout(BaseRollout):
                     non_tensor_batch["epsilon"] = _repeat_interleave(
                         non_tensor_batch["epsilon"], self.sampling_params.n
                     )
-            
-            
+
+
             seq = torch.cat([idx, response], dim=-1)
 
         response_length = response.size(1)
@@ -873,74 +839,26 @@ class vLLMRollout(BaseRollout):
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
-            n_total = self.sampling_params.n
-            should_suppress = (
-                self.suppress_abstain_fraction > 0
-                and do_sample
-                and not is_validate
-                and n_total > 1
+            outputs = self.inference_engine.generate(
+                prompts=vllm_inputs,
+                sampling_params=self.sampling_params,
+                use_tqdm=True,
             )
 
-            if should_suppress:
-                n_suppress = max(1, round(n_total * self.suppress_abstain_fraction))
-                n_free = n_total - n_suppress
+            # TODO(sgm): disable logprob when recompute_log_prob is enable
+            # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
 
-                # Call 1: forced attempt (suppress <abstain>)
-                params_suppress = copy.deepcopy(self.sampling_params)
-                params_suppress.n = n_suppress
-                params_suppress.bad_words = ['<abstain']
-
-                outputs_suppress = self.inference_engine.generate(
-                    prompts=vllm_inputs, sampling_params=params_suppress, use_tqdm=False)
-
-                # Call 2: free choice
-                outputs_free = None
-                if n_free > 0:
-                    params_free = copy.deepcopy(self.sampling_params)
-                    params_free.n = n_free
-                    outputs_free = self.inference_engine.generate(
-                        prompts=vllm_inputs, sampling_params=params_free, use_tqdm=False)
-
-                # Merge per-prompt: [suppress_samples, free_samples] for each prompt
-                response = []
-                rollout_log_probs = []
-                for prompt_idx in range(len(vllm_inputs)):
-                    for sample in outputs_suppress[prompt_idx].outputs:
-                        response.append(sample.token_ids)
-                        if self.config.calculate_log_probs:
-                            curr_log_prob = []
-                            for i, logprob in enumerate(sample.logprobs):
-                                curr_log_prob.append(logprob[sample.token_ids[i]].logprob)
-                            rollout_log_probs.append(curr_log_prob)
-                    if outputs_free is not None:
-                        for sample in outputs_free[prompt_idx].outputs:
-                            response.append(sample.token_ids)
-                            if self.config.calculate_log_probs:
-                                curr_log_prob = []
-                                for i, logprob in enumerate(sample.logprobs):
-                                    curr_log_prob.append(logprob[sample.token_ids[i]].logprob)
-                                rollout_log_probs.append(curr_log_prob)
-            else:
-                outputs = self.inference_engine.generate(
-                    prompts=vllm_inputs,
-                    sampling_params=self.sampling_params,
-                    use_tqdm=False,
-                )
-
-                # TODO(sgm): disable logprob when recompute_log_prob is enable
-                # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
-
-                response = []
-                rollout_log_probs = []
-                for output in outputs:
-                    for sample_id in range(len(output.outputs)):
-                        response_ids = output.outputs[sample_id].token_ids
-                        response.append(response_ids)
-                        if self.config.calculate_log_probs:
-                            curr_log_prob = []
-                            for i, logprob in enumerate(output.outputs[sample_id].logprobs):
-                                curr_log_prob.append(logprob[response_ids[i]].logprob)
-                            rollout_log_probs.append(curr_log_prob)
+            response = []
+            rollout_log_probs = []
+            for output in outputs:
+                for sample_id in range(len(output.outputs)):
+                    response_ids = output.outputs[sample_id].token_ids
+                    response.append(response_ids)
+                    if self.config.calculate_log_probs:
+                        curr_log_prob = []
+                        for i, logprob in enumerate(output.outputs[sample_id].logprobs):
+                            curr_log_prob.append(logprob[response_ids[i]].logprob)
+                        rollout_log_probs.append(curr_log_prob)
 
             response = pad_2d_list_to_length(response, self.pad_token_id, max_length=self.config.response_length).to(
                 idx.device
@@ -987,6 +905,7 @@ class vLLMRollout(BaseRollout):
                     non_tensor_batch["epsilon"] = _repeat_interleave(
                         non_tensor_batch["epsilon"], self.sampling_params.n
                     )
+
 
             seq = torch.cat([idx, response], dim=-1)
 
@@ -1062,6 +981,7 @@ class vLLMAsyncAgenticRollout(BaseRollout):
         self.tokenizer = tokenizer
         self.pad_token_id = tokenizer.pad_token_id
         self.max_hints = config.get("max_hints", 6)
+        self.max_turns = config.get("max_turns", self.max_hints + 1)
         self.allow_hint = config.allow_hint
         self.n = config.n
 
@@ -1166,7 +1086,7 @@ class vLLMAsyncAgenticRollout(BaseRollout):
             logprobs=0,
             max_tokens=config.response_length,
             include_stop_str_in_output=True,
-            stop=["</answer>", "</request>", "</response>"],  # </response> stops model from generating fake hints
+            stop=["</answer>", "</think>\n\n<abstain>", "</request>", "</response>"],  # </response> stops model from generating fake hints
             detokenize=True,
         )
 
@@ -1203,7 +1123,6 @@ class vLLMAsyncAgenticRollout(BaseRollout):
 
         non_tensor_batch = prompts.non_tensor_batch
         hint_list = non_tensor_batch.get("hint_exprs", [[] for _ in range(batch_size)])
-        eps = non_tensor_batch.get("epsilon", np.array([0.0]))[0]
 
         do_sample = prompts.meta_info.get("do_sample", True)
         is_validate = prompts.meta_info.get("validate", False)
@@ -1213,7 +1132,7 @@ class vLLMAsyncAgenticRollout(BaseRollout):
             sampling_params = SamplingParams(
                 best_of=1, top_p=1.0, top_k=-1, min_p=0.0, temperature=0, n=1,
                 max_tokens=self.config.response_length,
-                stop=["</answer>", "</request>", "</response>"],
+                stop=["</answer>", "</think>\n\n<abstain>", "</request>", "</response>"],
                 include_stop_str_in_output=True,
             )
         elif is_validate:
@@ -1223,7 +1142,7 @@ class vLLMAsyncAgenticRollout(BaseRollout):
                 temperature=self.config.val_kwargs.temperature,
                 n=1,
                 max_tokens=self.config.response_length,
-                stop=["</answer>", "</request>", "</response>"],
+                stop=["</answer>", "</think>\n\n<abstain>", "</request>", "</response>"],
                 include_stop_str_in_output=True,
             )
         else:
@@ -1366,14 +1285,14 @@ class vLLMAsyncAgenticRollout(BaseRollout):
                     state.num_hints_used += 1
 
                     if state.num_hints_used > self.max_hints:
-                        # Exceeded limit - complete
+                        # Exceeded limit - inject message but let model continue to produce an answer
                         limit_tokens = list(self.tokenizer(
                             "\n<response>No more hints available.</response>\n",
                             add_special_tokens=False
                         )['input_ids'])
                         state.accumulated_tokens.append(limit_tokens)
                         state.accumulated_masks.append([0] * len(limit_tokens))
-                        state.completed = True
+                        should_continue = True
                     elif state.last_given_index + 1 < len(state.hints):
                         # Select hint (smart or sequential)
                         if self.hint_selector is not None and state.hints_text:
@@ -1406,57 +1325,17 @@ class vLLMAsyncAgenticRollout(BaseRollout):
                         state.accumulated_masks.append([0] * len(hint_tokens))
                         should_continue = True
                     else:
-                        # No more hints
+                        # No more hints - inject message but let model continue to produce an answer
                         no_hints_tokens = list(self.tokenizer(
                             "\n<response>No more hints available.</response>\n",
                             add_special_tokens=False
                         )['input_ids'])
                         state.accumulated_tokens.append(no_hints_tokens)
                         state.accumulated_masks.append([0] * len(no_hints_tokens))
-                        state.completed = True
+                        should_continue = True
 
                 elif answer_matches:
-                    # Model produced an answer
-                    # Epsilon-greedy exploration (countdown-specific; skipped for other tasks)
-                    try:
-                        score = compute_score(
-                            "countdown", generated_text,
-                            {"target": state.target, "numbers": state.numbers},
-                            None
-                        )["score_wo_hint_penalty"]
-                        do_epsilon_force = (random.random() < eps and score < 1 and
-                            state.num_hints_used < self.max_hints and
-                            state.last_given_index + 1 < len(state.hints))
-                    except (TypeError, KeyError):
-                        # Not countdown task or missing fields - skip epsilon-greedy
-                        do_epsilon_force = False
-
-                    if do_epsilon_force:
-                        # Force hint request - strip the answer and add hint (always sequential)
-                        state.num_hints_used += 1
-                        partial_gen = re.sub(answer_pattern, '', generated_text)
-                        state.accumulated_tokens[-1] = list(
-                            self.tokenizer(partial_gen, add_special_tokens=False)['input_ids']
-                        )
-                        state.accumulated_masks[-1] = [1] * len(state.accumulated_tokens[-1])
-
-                        # Add <request> tag
-                        request_tokens = list(
-                            self.tokenizer('<request>', add_special_tokens=False)['input_ids']
-                        )
-                        state.accumulated_tokens.append(request_tokens)
-                        state.accumulated_masks.append([0] * len(request_tokens))
-
-                        # Add pre-tokenized hint (sequential for forced)
-                        next_idx = state.last_given_index + 1
-                        hint_tokens = state.hints[next_idx]
-                        state.last_given_index = next_idx
-                        state.accumulated_tokens.append(hint_tokens)
-                        state.accumulated_masks.append([0] * len(hint_tokens))
-                        should_continue = True
-                    else:
-                        # Complete
-                        state.completed = True
+                    state.completed = True
                 else:
                     # No hint or answer - add correction and continue
                     if (state.accumulated_tokens[-1] and
@@ -1479,7 +1358,7 @@ class vLLMAsyncAgenticRollout(BaseRollout):
 
                 # Check turn limit
                 state.turn += 1
-                if state.turn > self.max_hints:
+                if state.turn > self.max_turns:
                     state.completed = True
                     should_continue = False
 
@@ -1552,11 +1431,14 @@ class vLLMAsyncAgenticRollout(BaseRollout):
         batch_size = batch_size * n_samples
 
         # Expand non_tensor_batch
-        for key in ["raw_prompt_ids", "target", "hint_exprs", "epsilon"]:
+        for key in ["raw_prompt_ids", "target", "hint_exprs"]:
             if key in non_tensor_batch:
                 non_tensor_batch[key] = _repeat_interleave(non_tensor_batch[key], n_samples)
         if "numbers" in non_tensor_batch:
             non_tensor_batch["numbers"] = [n for n in non_tensor_batch["numbers"] for _ in range(n_samples)]
+
+        if "epsilon" in non_tensor_batch:
+            non_tensor_batch["epsilon"] = _repeat_interleave(non_tensor_batch["epsilon"], n_samples)
 
         # Build sequence
         seq = torch.cat([idx, response], dim=-1)
@@ -1602,7 +1484,7 @@ class vLLMAsyncAgenticRollout(BaseRollout):
             sampling_params = SamplingParams(
                 best_of=1, top_p=1.0, top_k=-1, min_p=0.0, temperature=0, n=1,
                 max_tokens=self.config.response_length,
-                stop=["</answer>"],
+                stop=["</answer>", "</think>\n\n<abstain>"],
                 include_stop_str_in_output=True,
             )
         else:

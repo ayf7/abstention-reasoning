@@ -43,7 +43,6 @@ class Method:
     interaction_name: str | None = None  # Interaction name override (default: {task}_{method})
     hint_selection: str = "sequential"  # Hint selection strategy: "sequential" or "smart"
     helper_model: str | None = None  # Model for smart hint selection (e.g., "Qwen/Qwen3-14B")
-    suppress_abstain_fraction: float = 0.0  # Fraction of GRPO rollouts forced to attempt (suppress <abstain>)
     max_hints: int | None = None  # Maximum number of hints to give during RL rollout (None = unlimited)
 
     # Backwards compatibility alias
@@ -104,7 +103,6 @@ class Method:
             interaction_name=data.get("interaction_name"),
             hint_selection=data.get("hint_selection", "sequential"),
             helper_model=data.get("helper_model"),
-            suppress_abstain_fraction=data.get("suppress_abstain_fraction", 0.0),
             max_hints=data.get("max_hints"),
         )
 

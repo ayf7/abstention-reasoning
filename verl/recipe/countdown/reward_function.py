@@ -32,8 +32,8 @@ def abstain_equation(equation_str):
 
 
 def has_abstain_tag(solution_str):
-    """Check if the solution contains an <abstain> tag."""
-    return "<abstain>" in solution_str
+    """Check if the solution ends with the abstention pattern: </think>\\n\\n<abstain>"""
+    return solution_str.rstrip().endswith("</think>\n\n<abstain>")
 
 
 def validate_equation(equation_str, available_numbers):
@@ -77,58 +77,66 @@ def get_num_hints(solution_str):
     return len(responses)
 
 
-def has_malformed_request(solution_str):
-    """Check for malformed hint request/response structure.
+def has_malformed_structure(solution_str):
+    """Validate the overall tag structure of the response.
 
-    Valid structure (sequential order):
-        </think><request></request>
-        <response>...</response>
-        <think>
+    The response starts inside an open <think> block (from assistant prefix).
+    Valid structure:
+        ([text]</think><request></request><response>...</response><think>)*
+        [text]</think>\\n\\n(<answer>...</answer> | <abstain>)
 
-    Malformed if:
-    - <request> has content inside (not tight <request></request>)
-    - <response> appears without preceding </think><request></request>
-    - Any deviation from the expected sequential pattern
+    Validates:
+    - Correct tag sequence (state machine)
+    - <request> tags are tight (no content inside)
+    - No spurious/duplicate tags (e.g. double </think>)
 
     Returns:
-        True if malformed structure found, False otherwise.
+        True if the structure is malformed, False if valid.
     """
-    # First check: any <request> tag must be exactly <request></request> (tight, no content)
-    open_count = solution_str.count('<request>')
-    valid_request_count = len(re.findall(r'<request></request>', solution_str))
-    if open_count != valid_request_count:
+    # Content check: <request> tags must be tight (no content inside)
+    if solution_str.count('<request>') != len(re.findall(r'<request></request>', solution_str)):
         return True
 
-    # Second check: validate sequential structure around each <response>
-    # Every <response> must be preceded by </think> ... <request></request> ... \n
-    # Allow whitespace between tags, but structure must be: </think> then <request></request> then <response>
+    # Extract all structural tags in order
+    tag_pattern = r'(</think>|<think>|<request>|</request>|<response>|</response>|<answer>|</answer>|<abstain>)'
+    tags = re.findall(tag_pattern, solution_str)
 
-    # Find all <response> positions and validate what precedes each one
-    response_starts = [m.start() for m in re.finditer(r'<response>', solution_str)]
+    if not tags:
+        return True  # No tags at all
 
-    for pos in response_starts:
-        # Look at what precedes this <response>
-        prefix = solution_str[:pos]
-
-        # Must have </think> followed by <request></request> followed by whitespace before <response>
-        # Allow whitespace between </think> and <request>, and between </request> and <response>
-        valid_prefix_pattern = r'</think>\s*<request></request>\s*$'
-        if not re.search(valid_prefix_pattern, prefix):
+    # Validate tag sequence with a state machine
+    # Expected: (</think> <request> </request> <response> </response> <think>)* </think> (<answer> </answer> | <abstain>)
+    i = 0
+    while i < len(tags):
+        # Must start each cycle with </think> (closing current think block)
+        if tags[i] != '</think>':
             return True
+        i += 1
 
-    # Third check: every <request></request> should be followed by whitespace then <response>
-    request_ends = [m.end() for m in re.finditer(r'<request></request>', solution_str)]
+        if i >= len(tags):
+            return True  # Ended after </think> without terminal tag
 
-    for pos in request_ends:
-        suffix = solution_str[pos:]
-        # Must start with whitespace followed by <response> (system injects this)
-        # Allow variable whitespace between </request> and <response>
-        if not re.match(r'\s*<response>', suffix):
-            # Exception: if this is at the very end (truncated or no more content), allow it
-            if len(suffix.strip()) > 0:
+        if tags[i] == '<request>':
+            # Hint exchange: <request> </request> <response> </response> <think>
+            expected = ['<request>', '</request>', '<response>', '</response>', '<think>']
+            for expected_tag in expected:
+                if i >= len(tags) or tags[i] != expected_tag:
+                    return True
+                i += 1
+            # Loop back to expect next </think>
+        elif tags[i] == '<answer>':
+            # Terminal: <answer> </answer>
+            if i + 1 >= len(tags) or tags[i + 1] != '</answer>':
                 return True
+            i += 2
+            return i != len(tags)  # Malformed if extra tags after
+        elif tags[i] == '<abstain>':
+            i += 1
+            return i != len(tags)  # Malformed if extra tags after
+        else:
+            return True  # Unexpected tag after </think>
 
-    return False
+    return True  # Ran out of tags without proper termination
 
 
 def compute_score(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., reward_abstain=False, abstention_score=0.3, penalize_hint=False, hint_penalty=0.2, hint_bonus=0.0, **kwargs):
@@ -150,10 +158,10 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
         print(f"Extracted equation: {equation}")
         print(f"Solution string: {solution_str}")
 
-    # Check for malformed request tags first - return 0 immediately
-    if has_malformed_request(solution_str):
+    # Structural validation: verify entire tag sequence is well-formed
+    if has_malformed_structure(solution_str):
         if do_print:
-            print(f"Malformed <request> tag detected - awarding 0")
+            print(f"Malformed structure detected - awarding 0")
         return {"score": 0, "score_wo_hint_penalty": 0, "num_hints": 0, "abstained": False, "malformed": True, "correct": False}
 
     num_hints = get_num_hints(solution_str)

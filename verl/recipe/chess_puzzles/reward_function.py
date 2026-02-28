@@ -47,46 +47,60 @@ def get_num_hints(solution_str):
     return len(re.findall(r'<request></request>', solution_str))
 
 
-def has_malformed_request(solution_str):
-    """Check for malformed hint request/response structure.
+def has_malformed_structure(solution_str):
+    """Validate the overall tag structure of the response.
 
-    Valid structure (sequential order):
-        </think><request></request>
-        <response>...</response>
-        <think>
+    The response starts inside an open <think> block (from assistant prefix).
+    Valid structure:
+        ([text]</think><request></request><response>...</response><think>)*
+        [text]</think>\\n\\n(<answer>...</answer> | <abstain>)
 
-    Malformed if:
-    - <request> has content inside (not tight <request></request>)
-    - <response> appears without preceding </think><request></request>
+    Validates:
+    - Correct tag sequence (state machine)
+    - <request> tags are tight (no content inside)
+    - No spurious/duplicate tags (e.g. double </think>)
 
     Returns:
-        True if malformed structure found, False otherwise.
+        True if the structure is malformed, False if valid.
     """
-    # First check: any <request> tag must be exactly <request></request> (tight, no content)
-    open_count = solution_str.count('<request>')
-    valid_request_count = len(re.findall(r'<request></request>', solution_str))
-    if open_count != valid_request_count:
+    # Content check: <request> tags must be tight (no content inside)
+    if solution_str.count('<request>') != len(re.findall(r'<request></request>', solution_str)):
         return True
 
-    # Second check: validate sequential structure around each <response>
-    response_starts = [m.start() for m in re.finditer(r'<response>', solution_str)]
+    # Extract all structural tags in order
+    tag_pattern = r'(</think>|<think>|<request>|</request>|<response>|</response>|<answer>|</answer>|<abstain>)'
+    tags = re.findall(tag_pattern, solution_str)
 
-    for pos in response_starts:
-        prefix = solution_str[:pos]
-        valid_prefix_pattern = r'</think>\s*<request></request>\s*$'
-        if not re.search(valid_prefix_pattern, prefix):
+    if not tags:
+        return True
+
+    i = 0
+    while i < len(tags):
+        if tags[i] != '</think>':
+            return True
+        i += 1
+
+        if i >= len(tags):
             return True
 
-    # Third check: every <request></request> should be followed by whitespace then <response>
-    request_ends = [m.end() for m in re.finditer(r'<request></request>', solution_str)]
-
-    for pos in request_ends:
-        suffix = solution_str[pos:]
-        if not re.match(r'\s*<response>', suffix):
-            if len(suffix.strip()) > 0:
+        if tags[i] == '<request>':
+            expected = ['<request>', '</request>', '<response>', '</response>', '<think>']
+            for expected_tag in expected:
+                if i >= len(tags) or tags[i] != expected_tag:
+                    return True
+                i += 1
+        elif tags[i] == '<answer>':
+            if i + 1 >= len(tags) or tags[i + 1] != '</answer>':
                 return True
+            i += 2
+            return i != len(tags)
+        elif tags[i] == '<abstain>':
+            i += 1
+            return i != len(tags)
+        else:
+            return True
 
-    return False
+    return True
 
 
 def compute_score(
@@ -121,6 +135,18 @@ def compute_score(
         print(f"Expected move: {ground_truth.get('winning_move')}")
         print(f"Extracted: {predicted}")
         print(f"Solution: {solution_str[:500]}...")
+
+    # Structural validation: verify entire tag sequence is well-formed
+    if has_malformed_structure(solution_str):
+        if do_print:
+            print(f"Malformed structure detected - awarding 0")
+        return {
+            "score": 0,
+            "correct": False,
+            "error": "malformed_structure",
+            "predicted_move": None,
+            "abstained": False,
+        }
 
     # Base result with consistent keys
     result = {
@@ -183,29 +209,32 @@ def compute_score_abstain(
     if do_print:
         print(f"[reward_kwargs] format_score={format_score}, abstention_score={abstention_score}, score={score}")
 
+    # Structural validation: verify entire tag sequence is well-formed
+    if has_malformed_structure(solution_str):
+        if do_print:
+            print(f"Malformed structure detected - awarding 0")
+        return {
+            "score": 0,
+            "correct": False,
+            "error": "malformed_structure",
+            "predicted_move": None,
+            "abstained": False,
+        }
+
     # Extract the answer first
     predicted = extract_answer(solution_str)
 
-    # Check for abstention via <abstain> tag ONLY (not <answer>abstain</answer>)
-    # Requirements:
-    # 1. Must have </think> (completed thinking)
-    # 2. <abstain> must appear AFTER </think>
-    # 3. No <answer> tag (if they gave an answer, they're not abstaining)
-    # This avoids matching prompt instruction text like "output <abstain>"
-    think_end = solution_str.rfind("</think>")
-    if think_end != -1 and predicted is None:
-        answer_section = solution_str[think_end:]
-        # Check for <abstain> but NOT the instruction pattern "output <abstain>"
-        if "<abstain>" in answer_section and "output <abstain>" not in answer_section:
-            if do_print:
-                print(f"Abstaining (via <abstain> tag) - awarding {abstention_score}")
-            return {
-                "score": abstention_score,
-                "correct": False,
-                "error": None,
-                "predicted_move": None,
-                "abstained": True,
-            }
+    # Check for abstention: rollout must end with </think>\n\n<abstain>
+    if solution_str.rstrip().endswith("</think>\n\n<abstain>"):
+        if do_print:
+            print(f"Abstaining (via </think>\\n\\n<abstain>) - awarding {abstention_score}")
+        return {
+            "score": abstention_score,
+            "correct": False,
+            "error": None,
+            "predicted_move": None,
+            "abstained": True,
+        }
 
     # Otherwise, use standard scoring
     return compute_score(
@@ -239,16 +268,16 @@ def compute_score_hint(
     """
     do_print = random.randint(1, 64) == 1
 
-    # Check for malformed request tags first
-    if has_malformed_request(solution_str):
+    # Structural validation: verify entire tag sequence is well-formed
+    if has_malformed_structure(solution_str):
         if do_print:
-            print(f"Malformed <request> tag detected - awarding 0")
+            print(f"Malformed structure detected - awarding 0")
         return {
             "score": 0,
             "score_wo_hint_penalty": 0,
             "num_hints": 0,
             "correct": False,
-            "error": "malformed_request",
+            "error": "malformed_structure",
             "predicted_move": None,
             "abstained": False,
             "malformed": True,

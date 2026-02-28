@@ -96,6 +96,7 @@ def cmd_create_prompts(args):
         split_name=args.split,
         seed=args.seed,
         include_assistant_prefix=not args.no_assistant_prefix,
+        num_hints=args.num_hints,
     )
 
 
@@ -103,6 +104,26 @@ def cmd_generate(args):
     """Generate dataset."""
     prompts_path = Path(args.prompts) if args.prompts else None
     output_path = Path(args.output) if args.output else None
+
+    # Parse force-hints-distribution string into dict {num_hints: probability}
+    force_hints_distribution = None
+    dist_str = getattr(args, "force_hints_distribution", None)
+    if dist_str:
+        force_hints_distribution = {}
+        for pair in dist_str.split(","):
+            num_hints, prob = pair.strip().split(":")
+            force_hints_distribution[int(num_hints.strip())] = float(prob.strip())
+
+    # Parse force-hints-policy string into dict {level: rate}
+    force_hints_policy = None
+    policy_str = getattr(args, "force_hints_policy", None)
+    if policy_str:
+        if not force_hints_distribution:
+            parser.error("--force-hints-policy requires --force-hints-distribution")
+        force_hints_policy = {}
+        for pair in policy_str.split(","):
+            level, rate = pair.strip().split(":")
+            force_hints_policy[level.strip()] = float(rate.strip())
 
     commands.generate(
         task_name=args.task,
@@ -124,6 +145,11 @@ def cmd_generate(args):
         multi_turn=args.multi_turn,  # None = use method config
         max_turns=args.max_turns,  # None = use method config
         use_async=getattr(args, "use_async", False),
+        force_hints_distribution=force_hints_distribution,
+        force_hints_policy=force_hints_policy,
+        hint_selection=getattr(args, "hint_selection", None),
+        helper_model=getattr(args, "helper_model", None),
+        helper_gpu_memory_utilization=getattr(args, "helper_gpu_memory_utilization", None),
     )
 
 
@@ -137,6 +163,7 @@ def cmd_evaluate(args):
         model_name=args.model,
         method_name=args.method,
         run_id=args.run_id,
+        split=args.split,
         prompts_path=prompts_path,
         output_path=output_path,
         batch_size=args.batch_size,
@@ -149,6 +176,9 @@ def cmd_evaluate(args):
         multi_turn=args.multi_turn,  # None = use method config
         max_turns=args.max_turns,  # None = use method config
         use_async=getattr(args, "use_async", False),
+        hint_selection=getattr(args, "hint_selection", None),
+        helper_model=getattr(args, "helper_model", None),
+        helper_gpu_memory_utilization=getattr(args, "helper_gpu_memory_utilization", None),
     )
 
 
@@ -245,6 +275,7 @@ def cmd_train_rl(args):
         wandb=not args.no_wandb,
         resume_path=resume_path,
         cleanup_checkpoints=not args.keep_checkpoints,
+        keep_state=args.keep_state,
     )
 
 
@@ -317,6 +348,8 @@ def main():
     p.add_argument("--split", default="all", help="Split name (sft, rl_train, rl_val, classifier, eval, or 'all')")
     p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
+    p.add_argument("--num-hints", type=int, default=None,
+        help="Number of hints to include from prefix_hints (0-6). Populates 'hints' field on each primitive.")
     p.set_defaults(func=cmd_create_prompts)
 
     # generate
@@ -338,8 +371,21 @@ def main():
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
     p.add_argument("--retry-incorrect", action="store_true", help="Re-run incorrect examples from existing output")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
-    p.add_argument("--max-turns", type=int, default=None, help="Maximum turns for multi-turn generation (default: from method config or 5)")
+    p.add_argument("--max-turns", type=int, default=None, help="Maximum turns for multi-turn generation (default: from method config or 6)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput, processes all prompts concurrently)")
+    p.add_argument("--force-hints-distribution", type=str, default=None,
+        help="Distribution of forced hint counts, e.g. '1:0.5,2:0.3,3:0.2'. "
+             "Maps number of hints to probability. Probabilities must sum to 1.")
+    p.add_argument("--force-hints-policy", type=str, default=None,
+        help="Per-level force rate, e.g. '1:0.05,2:0.05,3:0.05,4:0.15,5:0.15'. "
+             "Only this fraction of examples at each level will get forced hints. "
+             "Requires --force-hints-distribution.")
+    p.add_argument("--hint-selection", default=None, choices=["sequential", "smart"],
+        help="Hint selection strategy (default: from method config or 'sequential')")
+    p.add_argument("--helper-model", default=None,
+        help="Helper model for smart hint selection (default: from method config)")
+    p.add_argument("--helper-gpu-memory-utilization", type=float, default=None,
+        help="GPU memory utilization for helper model (default: same as --gpu-memory-utilization)")
     p.set_defaults(func=cmd_generate)
 
     # evaluate
@@ -348,8 +394,9 @@ def main():
     p.add_argument("--model", required=True, help="Model name/path, or 'sft'/'rl' to use method's model")
     p.add_argument("--method", help="Method name for auto-derived paths")
     p.add_argument("--run-id", help="Run identifier for model resolution (used with --model sft/rl)")
-    p.add_argument("--prompts", help="Path to eval prompts (default: artifacts/{task}/{method}/prompts/eval.json)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/results/eval_{model}.json)")
+    p.add_argument("--split", default="eval", help="Prompts split to evaluate (default: eval)")
+    p.add_argument("--prompts", help="Path to eval prompts (default: artifacts/{task}/{method}/prompts/{split}.json)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/results/{split}_{model}.json)")
     p.add_argument("--batch-size", type=int, default=16, help="Batch size")
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
     p.add_argument("--temperature", type=float, default=0.0, help="Temperature (0 for greedy)")
@@ -358,8 +405,14 @@ def main():
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
-    p.add_argument("--max-turns", type=int, default=None, help="Maximum turns for multi-turn generation (default: from method config or 5)")
+    p.add_argument("--max-turns", type=int, default=None, help="Maximum turns for multi-turn generation (default: from method config or 6)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput)")
+    p.add_argument("--hint-selection", default=None, choices=["sequential", "smart"],
+        help="Hint selection strategy (default: from method config or 'sequential')")
+    p.add_argument("--helper-model", default=None,
+        help="Helper model for smart hint selection (default: from method config)")
+    p.add_argument("--helper-gpu-memory-utilization", type=float, default=None,
+        help="GPU memory utilization for helper model (default: same as --gpu-memory-utilization)")
     p.set_defaults(func=cmd_evaluate)
 
     # analyze
@@ -416,17 +469,17 @@ def main():
     p.add_argument("--sft-model", help="Path to SFT model (mutually exclusive with --base-model)")
     p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/models/rl/{run_id}/model)")
     p.add_argument("--reward-function", help="Path to reward function (default: task's reward function)")
-    p.add_argument("--train-batch-size", type=int, default=256, help="Training batch size")
-    p.add_argument("--val-batch-size", type=int, default=256, help="Validation batch size")
+    p.add_argument("--train-batch-size", type=int, default=64, help="Training batch size")
+    p.add_argument("--val-batch-size", type=int, default=64, help="Validation batch size")
     p.add_argument("--learning-rate", type=float, default=1e-6, help="Learning rate")
-    p.add_argument("--total-steps", type=int, default=100, help="Total training steps")
+    p.add_argument("--total-steps", type=int, default=400, help="Total training steps")
     p.add_argument("--kl-coef", type=float, default=0.001, help="KL divergence coefficient")
-    p.add_argument("--n-samples", type=int, default=4, help="Number of samples per prompt")
+    p.add_argument("--n-samples", type=int, default=16, help="Number of samples per prompt (group size)")
     p.add_argument("--save-freq", type=int, default=25, help="Checkpoint save frequency")
     p.add_argument("--test-freq", type=int, default=None, help="Validation/logging frequency (default: same as save-freq)")
-    p.add_argument("--max-prompt-length", type=int, default=1024, help="Maximum prompt length in tokens")
+    p.add_argument("--max-prompt-length", type=int, default=2048, help="Maximum prompt length in tokens")
     p.add_argument("--max-response-length", type=int, default=2048, help="Maximum response length in tokens")
-    p.add_argument("--max-model-len", type=int, default=None, help="Maximum model context length (default: prompt + response). Set higher for multi-turn.")
+    p.add_argument("--max-model-len", type=int, default=8192, help="Maximum model context length (default: 8192). Set higher for multi-turn.")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.4, help="GPU memory utilization")
     p.add_argument("--project-name", help="Wandb project name (default: {task}-rl)")
@@ -434,6 +487,7 @@ def main():
     p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     p.add_argument("--resume", help="Path to resume from existing run")
     p.add_argument("--keep-checkpoints", action="store_true", help="Keep checkpoints and rollouts after training (by default they are deleted)")
+    p.add_argument("--keep-state", action="store_true", help="Keep the last optimizer state checkpoint after training")
     p.set_defaults(func=cmd_train_rl)
 
     # train_classifier

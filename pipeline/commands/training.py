@@ -139,7 +139,9 @@ def train_sft(
 
     # Helper to check if example is abstained
     def is_abstained(ex):
-        return ex.get("abstained", False) or ex.get("metadata", {}).get("abstained", False)
+        return (ex.get("abstained", False)
+                or ex.get("metadata", {}).get("abstained", False)
+                or "</think>\n\n<abstain>" in ex.get("generation", ""))
 
     # Use task-specific filter if available, otherwise default logic
     if hasattr(task, 'filter_for_sft'):
@@ -455,7 +457,6 @@ def train_rl(
     rollout_mode = "sync"
     interaction_name = None
     max_turns = 6
-    suppress_abstain_fraction = 0.0
     max_hints = None
     if method is not None:
         reward_function_name = method.reward_function
@@ -465,7 +466,6 @@ def train_rl(
         rollout_mode = method.rollout_mode
         interaction_name = method.interaction_name or (f"{task_name}_{method.name}" if method.multi_turn else None)
         max_turns = method.max_turns
-        suppress_abstain_fraction = method.suppress_abstain_fraction
         max_hints = method.max_hints
         template_content = method.load_template(task_name, "rl")
 
@@ -545,8 +545,6 @@ def train_rl(
     print(f"Learning Rate: {learning_rate}")
     print(f"Total Steps: {total_steps}")
     print(f"Wandb: {wandb}")
-    if suppress_abstain_fraction > 0:
-        print(f"Suppress Abstain Fraction: {suppress_abstain_fraction}")
     if template_content:
         print(f"Template: {method.template_variant}/rl.txt")
     print(f"=================================")
@@ -640,16 +638,14 @@ def train_rl(
         # Add max_hints limit for rollout
         if max_hints is not None:
             cmd.append(f"+actor_rollout_ref.rollout.max_hints={max_hints}")
+        # Add max_turns for loop bound (model gets extra turns after hints exhausted)
+        cmd.append(f"+actor_rollout_ref.rollout.max_turns={max_turns}")
 
     # Add reward kwargs if specified in method config
     # Use + prefix to add new config keys
     if reward_kwargs:
         for key, value in reward_kwargs.items():
             cmd.append(f"+custom_reward_function.reward_kwargs.{key}={value}")
-
-    # Add suppress_abstain_fraction for forced decoding in GRPO rollouts
-    if suppress_abstain_fraction > 0:
-        cmd.append(f"+actor_rollout_ref.rollout.suppress_abstain_fraction={suppress_abstain_fraction}")
 
     # Set environment variables
     env = os.environ.copy()
