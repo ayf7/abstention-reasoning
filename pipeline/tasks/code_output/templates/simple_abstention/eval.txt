@@ -1,0 +1,17 @@
+Predict the exact output of the following Python program for the given input.
+
+```python
+{code}
+```
+
+Input:
+```
+{stdin_input}
+```
+
+If you believe you cannot determine the correct output, output <abstain> instead of guessing.
+
+Trace through the code step by step in <think> </think> tags, carefully tracking variable values and control flow as the program executes with the given input. When you are finished thinking, close with </think> and provide the program's exact output in <answer> </answer> tags, or <abstain> if you choose not to answer. Preserve the output format exactly, including newlines. No text between </think> and your answer.
+
+For example: <answer> 42 </answer> or <answer> YES
+NO </answer>
