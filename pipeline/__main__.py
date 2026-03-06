@@ -150,6 +150,7 @@ def cmd_generate(args):
         hint_selection=getattr(args, "hint_selection", None),
         helper_model=getattr(args, "helper_model", None),
         helper_gpu_memory_utilization=getattr(args, "helper_gpu_memory_utilization", None),
+        sample_strategy=getattr(args, "sample_strategy", None),
     )
 
 
@@ -365,7 +366,9 @@ def main():
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
     p.add_argument("--temperature", type=float, default=0.7, help="Temperature")
     p.add_argument("--top-p", type=float, default=0.9, help="Top-p")
-    p.add_argument("--num-samples", type=int, default=1, help="Number of samples per prompt (best selected by shortest correct CoT)")
+    p.add_argument("--num-samples", type=int, default=1, help="Number of samples per prompt (best selected by --sample-strategy)")
+    p.add_argument("--sample-strategy", default=None, choices=["shortest_cot", "most_hints", "prefer_abstain"],
+        help="Selection strategy when --num-samples > 1 (default: most_hints for multi-turn, shortest_cot otherwise)")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")

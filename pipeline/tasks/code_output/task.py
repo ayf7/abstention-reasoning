@@ -12,6 +12,8 @@ Dataset: https://huggingface.co/datasets/microsoft/rStar-Coder
 
 import ast
 import re
+import subprocess
+import sys
 
 from pipeline.tasks.base import BaseTask
 from pipeline.tasks.code_output.tracer import trace_execution
@@ -150,6 +152,27 @@ def _normalize_stdout(text: str) -> str:
     return "\n".join(lines)
 
 
+def _validate_code(code: str, stdin_input: str, expected_stdout: str, timeout: float = 10.0) -> bool:
+    """Run code with stdin and check if stdout matches expected output."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            input=stdin_input,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    except Exception:
+        return False
+
+    if result.returncode != 0:
+        return False
+
+    return _normalize_stdout(result.stdout) == _normalize_stdout(expected_stdout)
+
+
 class CodeOutputTask(BaseTask):
     """
     Code Output prediction task (stdin/stdout).
@@ -227,12 +250,17 @@ class CodeOutputTask(BaseTask):
 
         # Phase 2: Process each question — parse I/O, anonymize, filter, expand
         primitives = []
-        skipped = {"no_io": 0, "too_short": 0, "anonymize_fail": 0}
+        skipped = {"no_io": 0, "too_short": 0, "anonymize_fail": 0,
+                   "original_fail": 0, "anonymized_fail": 0}
         no_io_samples = []  # collect failed questions for diagnostics
 
-        for qid, entry in best_per_question.items():
+        for q_idx, (qid, entry) in enumerate(best_per_question.items()):
             code = entry["code"]
             question = entry["question"]
+
+            if (q_idx + 1) % 500 == 0:
+                print(f"  [{q_idx + 1}/{len(best_per_question)}] "
+                      f"{len(primitives)} primitives, skipped: {dict(skipped)}")
 
             # Parse example I/O from question text
             io_pairs = _parse_example_ios(question)
@@ -265,6 +293,16 @@ class CodeOutputTask(BaseTask):
             ][:MAX_TEST_CASES]
 
             for tc_idx, (stdin_input, expected_stdout) in enumerate(valid_pairs):
+                # Validate original code produces expected output
+                if not _validate_code(code, stdin_input, expected_stdout):
+                    skipped["original_fail"] += 1
+                    continue
+
+                # Validate anonymized code still produces correct output
+                if not _validate_code(anonymized, stdin_input, expected_stdout):
+                    skipped["anonymized_fail"] += 1
+                    continue
+
                 # Generate execution trace hints for this test case
                 hint_exprs = trace_execution(anonymized, stdin_input)
 
@@ -301,6 +339,18 @@ class CodeOutputTask(BaseTask):
 
         return primitives
 
+    @staticmethod
+    def _add_line_numbers(code: str) -> str:
+        """Add line numbers to code for cross-referencing with hint_exprs."""
+        lines = code.splitlines()
+        return "\n".join(f"{i + 1}. {line}" for i, line in enumerate(lines))
+
+    def enrich_primitive_for_rl(self, primitive: dict) -> dict:
+        """Pre-compute line-numbered code for verl runtime template substitution."""
+        enriched = dict(primitive)
+        enriched["code"] = self._add_line_numbers(primitive["code"])
+        return enriched
+
     def format_prompt(
         self,
         primitive: dict,
@@ -309,8 +359,7 @@ class CodeOutputTask(BaseTask):
     ) -> list[dict]:
         """Format code output prediction into chat messages."""
         # Add line numbers so the model can cross-reference hint_exprs
-        lines = primitive["code"].splitlines()
-        numbered_code = "\n".join(f"{i + 1}. {line}" for i, line in enumerate(lines))
+        numbered_code = self._add_line_numbers(primitive["code"])
         content = template.replace("{code}", numbered_code)
         content = content.replace("{stdin_input}", primitive["stdin_input"])
 

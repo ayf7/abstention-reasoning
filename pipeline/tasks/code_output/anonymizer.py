@@ -120,12 +120,11 @@ class _IdentifierCollector(ast.NodeVisitor):
 
 
 def _find_string_spans(source: str) -> list[tuple[int, int]]:
-    """Find all string literal spans in source code.
+    """Find protected string literal spans in source code.
 
-    Uses a regex that matches:
-    - Triple-quoted strings (''' or \"\"\")
-    - Single-quoted strings (' or \")
-    - f-strings with the same patterns
+    For regular strings, the entire span is protected from renaming.
+    For f-strings, only the literal text is protected — {expression}
+    regions are left unprotected so identifiers inside them get renamed.
     """
     spans = []
     # Match triple-quoted first (greedy), then single-quoted
@@ -137,7 +136,70 @@ def _find_string_spans(source: str) -> list[tuple[int, int]]:
         re.DOTALL,
     )
     for m in pattern.finditer(source):
-        spans.append((m.start(), m.end()))
+        matched = m.group()
+        # Determine prefix (f, r, b, etc.)
+        prefix_end = next(i for i, c in enumerate(matched) if c in ('"', "'"))
+        prefix = matched[:prefix_end].lower()
+
+        if 'f' in prefix:
+            spans.extend(_fstring_literal_spans(matched, m.start()))
+        else:
+            spans.append((m.start(), m.end()))
+    return spans
+
+
+def _fstring_literal_spans(text: str, offset: int) -> list[tuple[int, int]]:
+    """Return protected (literal-only) spans for an f-string.
+
+    Expressions inside {...} are excluded so identifiers get renamed.
+    """
+    quote_pos = next(i for i, c in enumerate(text) if c in ('"', "'"))
+    quote_char = text[quote_pos]
+    delim_len = 3 if text[quote_pos:quote_pos + 3] == quote_char * 3 else 1
+
+    content_start = quote_pos + delim_len
+    content_end = len(text) - delim_len
+
+    spans = []
+    lit_start = 0  # start of current literal region (text-relative)
+    pos = content_start
+
+    while pos < content_end:
+        ch = text[pos]
+        if ch == '{' and pos + 1 < content_end and text[pos + 1] == '{':
+            pos += 2  # escaped {{ — stays literal
+        elif ch == '}' and pos + 1 < content_end and text[pos + 1] == '}':
+            pos += 2  # escaped }}
+        elif ch == '{':
+            # Protect literal text before this expression
+            if pos > lit_start:
+                spans.append((offset + lit_start, offset + pos))
+            # Find matching }
+            depth = 1
+            pos += 1
+            while pos < content_end and depth > 0:
+                c = text[pos]
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                elif c in ('"', "'"):
+                    # Skip nested string inside expression
+                    q = c
+                    pos += 1
+                    while pos < content_end and text[pos] != q:
+                        if text[pos] == '\\':
+                            pos += 1
+                        pos += 1
+                pos += 1
+            lit_start = pos  # resume literal after '}'
+        else:
+            pos += 1
+
+    # Final literal span including closing delimiter
+    if len(text) > lit_start:
+        spans.append((offset + lit_start, offset + len(text)))
+
     return spans
 
 
@@ -271,6 +333,6 @@ def anonymize_code(source: str, fn_name: str | None = None) -> tuple[str, dict[s
     for i, name in enumerate(collector.variables, 1):
         rename_map[name] = f"var_{i}"
 
-    anonymized = _apply_renames(source, rename_map)
-    anonymized = _strip_comments(anonymized)
+    source_clean = _strip_comments(source)
+    anonymized = _apply_renames(source_clean, rename_map)
     return anonymized, rename_map
