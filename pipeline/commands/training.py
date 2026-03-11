@@ -101,6 +101,7 @@ def train_sft(
                 "Either --method or --output must be specified. "
                 "Use --method to auto-derive paths, or --output for explicit paths."
             )
+        method.ensure_sft_run_dir(task_name, run_id)
         output_path = method.sft_model_path(task_name, run_id)
 
     # Generate project name if not provided: {task}-sft
@@ -335,7 +336,7 @@ def train_rl(
     max_response_length: int = 2048,
     max_model_len: int = 8192,
     tensor_parallel_size: int = 1,
-    gpu_memory_utilization: float = 0.4,
+    gpu_memory_utilization: float = 0.5,
     project_name: str | None = None,
     experiment_name: str | None = None,
     wandb: bool = True,
@@ -419,6 +420,7 @@ def train_rl(
     checkpoints_dir = None
     rollouts_dir = None
     if method is not None and output_path is None:
+        method.ensure_rl_run_dir(task_name, run_id)
         run_dir = method.rl_run_dir(task_name, run_id)
         checkpoints_dir = method.rl_checkpoints_dir(task_name, run_id)
         rollouts_dir = method.rl_rollouts_dir(task_name, run_id)
@@ -568,7 +570,7 @@ def train_rl(
         f"actor_rollout_ref.actor.optim.lr={learning_rate}",
         f"actor_rollout_ref.actor.ppo_mini_batch_size={train_batch_size}",
         "actor_rollout_ref.actor.use_kl_loss=True",
-        "actor_rollout_ref.actor.ppo_micro_batch_size=16",
+        "actor_rollout_ref.actor.ppo_micro_batch_size=8",
         f"actor_rollout_ref.rollout.n={n_samples}",
         f"actor_rollout_ref.rollout.max_model_len={max_model_len}",
         "actor_rollout_ref.rollout.log_prob_micro_batch_size=4",
@@ -579,7 +581,7 @@ def train_rl(
         f"trainer.logger={logger_config}",
         "trainer.default_hdfs_dir=null",
         f"trainer.default_local_dir={checkpoints_dir}",
-        "trainer.n_gpus_per_node=1",
+        f"trainer.n_gpus_per_node={tensor_parallel_size}",
         "trainer.nnodes=1",
         f"trainer.save_freq={save_freq}",
         f"trainer.test_freq={test_freq if test_freq is not None else save_freq}",
@@ -646,6 +648,10 @@ def train_rl(
     if reward_kwargs:
         for key, value in reward_kwargs.items():
             cmd.append(f"+custom_reward_function.reward_kwargs.{key}={value}")
+
+    # Set reward manager type if non-default
+    if method is not None and method.reward_manager != "naive":
+        cmd.append(f"+reward_model.reward_manager={method.reward_manager}")
 
     # Set environment variables
     env = os.environ.copy()

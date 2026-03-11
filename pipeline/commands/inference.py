@@ -302,12 +302,15 @@ def select_best_sample(
     - "most_hints": Among correct samples, pick the one with most hint requests.
       Falls back to most hints among incorrect if none correct. Useful for
       generating SFT data that teaches models to use hints.
+    - "prefer_abstain": If any sample is correct, pick shortest correct CoT.
+      Otherwise, prefer an abstaining sample (for hard problems the model should
+      learn to abstain on). Falls back to shortest incorrect CoT.
 
     Args:
         samples: List of generation results with 'text', 'finish_reason', 'token_count'
         task: Task instance for checking correctness
         primitive: Primitive data with ground truth
-        strategy: Selection strategy ("shortest_cot" or "most_hints")
+        strategy: Selection strategy ("shortest_cot", "most_hints", or "prefer_abstain")
 
     Returns:
         Best sample dict with added 'correct' and 'metadata' fields
@@ -324,22 +327,33 @@ def select_best_sample(
             "metadata": meta,
             "cot_length": cot_length,
             "_num_hints": num_hints,
+            "_abstained": meta.get("abstained", False),
         })
 
     # Separate correct and incorrect
     correct_samples = [s for s in evaluated_samples if s["correct"]]
     incorrect_samples = [s for s in evaluated_samples if not s["correct"]]
 
-    candidates = correct_samples if correct_samples else incorrect_samples
-
-    if strategy == "most_hints":
+    if strategy == "prefer_abstain":
+        # Abstaining sample always wins if available
+        abstained = [s for s in evaluated_samples if s["_abstained"]]
+        if abstained:
+            best_sample = abstained[0]
+        elif correct_samples:
+            best_sample = min(correct_samples, key=lambda s: s["cot_length"])
+        else:
+            best_sample = min(incorrect_samples, key=lambda s: s["cot_length"])
+    elif strategy == "most_hints":
+        candidates = correct_samples if correct_samples else incorrect_samples
         best_sample = max(candidates, key=lambda s: s["_num_hints"])
     else:
+        candidates = correct_samples if correct_samples else incorrect_samples
         best_sample = min(candidates, key=lambda s: s["cot_length"])
 
     # Remove internal fields
     del best_sample["cot_length"]
     del best_sample["_num_hints"]
+    del best_sample["_abstained"]
 
     return best_sample
 
@@ -369,6 +383,7 @@ def generate(
     hint_selection: str | None = None,
     helper_model: str | None = None,
     helper_gpu_memory_utilization: float | None = None,
+    sample_strategy: str | None = None,
 ) -> Path:
     """
     Generate model outputs on prompts.
@@ -472,10 +487,17 @@ def generate(
 
         if retry_incorrect:
             # Identify incorrect indices to retry (but keep all records)
-            incorrect_indices = {r["index"] for r in existing_records if not r.get("correct", False)}
-            correct_count = len(existing_records) - len(incorrect_indices)
-            print(f"Retry mode: {correct_count} correct, retrying {len(incorrect_indices)} incorrect")
-            completed_indices = {r["index"] for r in existing_records if r.get("correct", False)}
+            # Preserve abstained examples — they are intentional non-answers
+            def _is_done(r):
+                if r.get("correct", False):
+                    return True
+                if r.get("metadata", {}).get("abstained", False):
+                    return True
+                return False
+            incorrect_indices = {r["index"] for r in existing_records if not _is_done(r)}
+            done_count = len(existing_records) - len(incorrect_indices)
+            print(f"Retry mode: {done_count} done (correct + abstained), retrying {len(incorrect_indices)} incorrect")
+            completed_indices = {r["index"] for r in existing_records if _is_done(r)}
         else:
             completed_indices = set(records_by_index.keys())
             print(f"Resuming: found {len(completed_indices)} completed examples")
@@ -583,7 +605,7 @@ def generate(
         )
 
         # Process all results
-        sample_strategy = "most_hints" if multi_turn else "shortest_cot"
+        sample_strategy = sample_strategy or ("most_hints" if multi_turn else "shortest_cot")
         for prompt_data, gen_samples in zip(remaining_prompts, all_results):
             primitive = {
                 "index": prompt_data["index"],
@@ -727,7 +749,7 @@ def generate(
             batch_results = generator.generate(batch_prompts)
 
         # Process results
-        sample_strategy = "most_hints" if multi_turn else "shortest_cot"
+        sample_strategy = sample_strategy or ("most_hints" if multi_turn else "shortest_cot")
         batch_correct = 0
         for prompt_data, gen_samples in zip(batch_prompts_data, batch_results):
             primitive = {

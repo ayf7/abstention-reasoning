@@ -1,5 +1,6 @@
 """Method configuration - bundles template variant + reward function + artifact paths."""
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,14 @@ from .utils import model_short_name
 
 # Default artifacts root
 ARTIFACTS_ROOT = Path("artifacts")
+
+# External storage for models (symlinked from artifacts)
+# Set EXTERNAL_MODELS_ROOT env var to override, or None to disable
+EXTERNAL_MODELS_ROOT = (
+    Path(os.environ["EXTERNAL_MODELS_ROOT"])
+    if "EXTERNAL_MODELS_ROOT" in os.environ
+    else Path("/share/goyal/ayf7/models")
+)
 
 
 @dataclass
@@ -44,6 +53,7 @@ class Method:
     hint_selection: str = "sequential"  # Hint selection strategy: "sequential" or "smart"
     helper_model: str | None = None  # Model for smart hint selection (e.g., "Qwen/Qwen3-14B")
     max_hints: int | None = None  # Maximum number of hints to give during RL rollout (None = unlimited)
+    reward_manager: str = "naive"  # Reward manager type: "naive" or "batch"
 
     # Backwards compatibility alias
     @property
@@ -104,6 +114,7 @@ class Method:
             hint_selection=data.get("hint_selection", "sequential"),
             helper_model=data.get("helper_model"),
             max_hints=data.get("max_hints"),
+            reward_manager=data.get("reward_manager", "naive"),
         )
 
     @staticmethod
@@ -159,6 +170,52 @@ class Method:
     def models_dir(self, task_name: str) -> Path:
         """Get the models directory."""
         return self.artifacts_dir(task_name) / "models"
+
+    def _ensure_run_dir(self, run_dir: Path, task_name: str) -> Path:
+        """
+        Ensure a run directory exists, using external storage if configured.
+
+        If EXTERNAL_MODELS_ROOT is set and the run directory doesn't already
+        exist, creates the target directory on external storage and symlinks
+        the run dir to it. This operates at the run level (e.g.,
+        models/sft/{run_id}/) so that new runs go to external storage even
+        if older runs exist locally.
+
+        Args:
+            run_dir: The run directory path (e.g., models/sft/{run_id}/)
+            task_name: Task name
+
+        Returns:
+            Path to the run directory.
+        """
+        # Already exists (real dir or symlink) -> leave as-is
+        if run_dir.exists() or run_dir.is_symlink():
+            return run_dir
+
+        # External storage configured -> create symlink
+        if EXTERNAL_MODELS_ROOT is not None:
+            # Mirror the relative path under external storage
+            # run_dir is like: artifacts/{task}/{method}/models/sft/{run_id}
+            # external is:     /share/goyal/ayf7/models/{task}/{method}/sft/{run_id}
+            rel_to_models = run_dir.relative_to(self.models_dir(task_name))
+            external_path = EXTERNAL_MODELS_ROOT / task_name / self.name / rel_to_models
+            external_path.mkdir(parents=True, exist_ok=True)
+            # Ensure parent dir exists locally
+            run_dir.parent.mkdir(parents=True, exist_ok=True)
+            run_dir.symlink_to(external_path)
+            print(f"Created symlink: {run_dir} -> {external_path}")
+        else:
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+        return run_dir
+
+    def ensure_sft_run_dir(self, task_name: str, run_id: str | None = None) -> Path:
+        """Ensure the SFT run directory exists, symlinking to external storage if needed."""
+        return self._ensure_run_dir(self.sft_run_dir(task_name, run_id), task_name)
+
+    def ensure_rl_run_dir(self, task_name: str, run_id: str | None = None) -> Path:
+        """Ensure the RL run directory exists, symlinking to external storage if needed."""
+        return self._ensure_run_dir(self.rl_run_dir(task_name, run_id), task_name)
 
     def sft_run_dir(self, task_name: str, run_id: str | None = None) -> Path:
         """
