@@ -1,0 +1,13 @@
+name: hint_exponential
+template_variant: hint
+reward_function: compute_score_hint_exponential
+multi_turn: true
+max_turns: 6
+mask_response_tokens: true
+rollout_backend: vllm
+rollout_mode: sync
+interaction_config: verl/examples/sglang_multiturn/config/interaction_config/competition_math_hint_interaction_config.yaml
+reward_kwargs:
+  final: 0.5
+  format_score: 0.1
+  base: 0.5

@@ -263,3 +263,137 @@ def compute_score_hint(data_source, solution_str, ground_truth, extra_info, meth
         method=method, format_score=format_score, score=score,
         penalize_hint=True, hint_penalty=hint_penalty, hint_bonus=hint_bonus, **kwargs
     )
+
+
+def compute_score_hint_dynamic(
+    data_source, solution_str, ground_truth, extra_info,
+    method='strict', format_score=0.1, score=1.0, final=0.5, max_hints=5,
+    **kwargs,
+):
+    """Dynamic hint scoring where correct and incorrect converge toward `final`.
+
+    correct(n)  = score - (score - final) * n / max_hints          (inclusive)
+    wrong(n)    = format_score + (final - format_score) * n / (max_hints + 1)  (exclusive)
+    malformed   = 0
+    """
+    result = compute_score(
+        data_source, solution_str, ground_truth, extra_info,
+        method=method, format_score=format_score, penalize_hint=False, **kwargs,
+    )
+
+    n = min(result['num_hints'], max_hints)
+
+    if result.get('malformed', False):
+        result['score'] = 0.0
+    elif result['correct']:
+        result['score'] = score - (score - final) * n / max_hints
+    else:
+        result['score'] = format_score + (final - format_score) * n / (max_hints + 1)
+
+    return result
+
+
+def compute_score_dynamic_abstain(
+    data_sources, solution_strs, ground_truths, extra_infos,
+    uids=None, r_c=1.0, r_w=0.1, **kwargs,
+):
+    """Batch reward function with dynamic per-group abstention scoring.
+
+    Computes per-group abstention reward:
+        r_a(x) = r_w + (r_c - r_w) * (1 - p_hat) * (1 - n_a / G)
+
+    where p_hat is accuracy among non-abstaining samples and n_a/G is
+    the group abstention rate. Anti-collapse: as n_a -> G, r_a -> r_w.
+
+    Must be used with reward_manager: batch (BatchRewardManager).
+    """
+    from collections import defaultdict
+
+    # First pass: classify each sample using per-sample scoring
+    results = []
+    for i in range(len(solution_strs)):
+        extra_info = extra_infos[i] if extra_infos[i] is not None else {}
+        result = compute_score(
+            data_source=data_sources[i],
+            solution_str=solution_strs[i],
+            ground_truth=ground_truths[i],
+            extra_info=extra_info,
+            **kwargs,
+        )
+        # Detect abstention (compute_score without reward_abstain=True won't set this)
+        if not result.get("abstained", False):
+            if not has_malformed_structure(solution_strs[i]) and has_abstain_tag(solution_strs[i]):
+                result["abstained"] = True
+        results.append(result)
+
+    if uids is None:
+        return results
+
+    # Group by uid
+    groups = defaultdict(list)
+    for i, uid in enumerate(uids):
+        groups[uid].append(i)
+
+    # Second pass: compute dynamic r_a per group and assign rewards
+    for uid, indices in groups.items():
+        G = len(indices)
+        k = sum(1 for i in indices if results[i].get("correct", False))
+        n_a = sum(1 for i in indices if results[i].get("abstained", False))
+        n_attempts = G - n_a
+
+        if n_attempts > 0:
+            p_hat = k / n_attempts
+        else:
+            p_hat = 0.0
+
+        damping = 1.0 - (n_a / G)
+        r_a_dynamic = r_w + (r_c - r_w) * (1.0 - p_hat) * damping
+
+        for i in indices:
+            if results[i].get("correct", False):
+                results[i]["score"] = r_c
+            elif results[i].get("abstained", False):
+                results[i]["score"] = r_a_dynamic
+            # else: keep original per-sample score (format_score or 0)
+
+            results[i]["r_a_dynamic"] = r_a_dynamic
+            results[i]["group_p_hat"] = p_hat
+            results[i]["group_n_a"] = n_a
+            results[i]["group_size"] = G
+
+    return results
+
+
+def compute_score_hint_exponential(
+    data_source, solution_str, ground_truth, extra_info,
+    method='strict', format_score=0.1, score=1.0, final=0.5, max_hints=5,
+    base=0.5, **kwargs,
+):
+    """Exponential hint scoring where early hints are expensive and later hints are cheap.
+
+    Uses exponential interpolation factor: (1 - base^n) / (1 - base^max_hints)
+
+    correct(n)  = score - (score - final) * factor(n)
+    wrong(n)    = format_score + (final - format_score) * factor_wrong(n)
+    malformed   = 0
+
+    At n=0: correct = score, wrong = format_score
+    At n=max_hints: correct = final
+    """
+    result = compute_score(
+        data_source, solution_str, ground_truth, extra_info,
+        method=method, format_score=format_score, penalize_hint=False, **kwargs,
+    )
+
+    n = min(result['num_hints'], max_hints)
+
+    if result.get('malformed', False):
+        result['score'] = 0.0
+    elif result['correct']:
+        factor = (1 - base ** n) / (1 - base ** max_hints)
+        result['score'] = score - (score - final) * factor
+    else:
+        factor = (1 - base ** n) / (1 - base ** (max_hints + 1))
+        result['score'] = format_score + (final - format_score) * factor
+
+    return result

@@ -58,12 +58,14 @@ class BatchRewardManager:
         ground_truths = [item.non_tensor_batch["reward_model"].get("ground_truth", None) for item in data]
         data_sources = data.non_tensor_batch[self.reward_fn_key]
         extras = data.non_tensor_batch.get("extra_info", [None] * len(data))
+        uids = data.non_tensor_batch.get("uid", None)
 
         scores = self.compute_score(
             data_sources=data_sources,
             solution_strs=responses_str,
             ground_truths=ground_truths,
             extra_infos=extras,
+            uids=uids,
             **self.reward_kwargs,
         )
 

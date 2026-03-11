@@ -249,7 +249,7 @@ class RLHFDataset(Dataset):
 
         return messages
 
-    def __getitem__(self, item):
+    def __getitem__(self, item, _skip_attempts=0):
         """
         Note that we also return the raw_input_ids so that it can be combined with other chat template
         """
@@ -293,6 +293,21 @@ class RLHFDataset(Dataset):
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
+
+        # Safety net: skip overlong prompts that weren't caught by the pre-filter
+        # (can happen due to tokenization differences or runtime template application)
+        seq_len = input_ids.shape[-1]
+        if seq_len > self.max_prompt_length and self.truncation == "error":
+            if _skip_attempts >= 10:
+                raise RuntimeError(
+                    f"Too many consecutive overlong prompts (10) starting from item {item - _skip_attempts}. "
+                    f"Consider increasing --max-prompt-length."
+                )
+            logger.warning(
+                f"Skipping overlong prompt at index {item} "
+                f"(length {seq_len} > max_prompt_length {self.max_prompt_length})"
+            )
+            return self.__getitem__((item + 1) % len(self), _skip_attempts + 1)
 
         input_ids, attention_mask = verl_F.postprocess_data(
             input_ids=input_ids,
