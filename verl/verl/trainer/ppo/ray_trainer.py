@@ -970,6 +970,11 @@ class RayPPOTrainer:
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
+        # Save reward manager state if it supports it (e.g., AdaptiveRewardManager EMA state)
+        if hasattr(self.reward_fn, "state_dict"):
+            reward_state_path = os.path.join(local_global_step_folder, "reward_manager.pt")
+            torch.save(self.reward_fn.state_dict(), reward_state_path)
+
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
@@ -1033,6 +1038,13 @@ class RayPPOTrainer:
             self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+
+        # Restore reward manager state if available (e.g., AdaptiveRewardManager EMA state)
+        reward_state_path = os.path.join(global_step_folder, "reward_manager.pt")
+        if os.path.exists(reward_state_path) and hasattr(self.reward_fn, "load_state_dict"):
+            reward_state = torch.load(reward_state_path, weights_only=False)
+            self.reward_fn.load_state_dict(reward_state)
+            print(f"Restored reward manager state from {reward_state_path}")
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""

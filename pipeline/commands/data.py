@@ -14,6 +14,7 @@ def create_primitives(
     output_path: Path | None = None,
     num_puzzles: int | None = None,
     seed: int = 42,
+    **kwargs,
 ) -> Path:
     """
     Generate raw puzzle data.
@@ -23,6 +24,7 @@ def create_primitives(
         output_path: Where to save primitives.json (default: artifacts/{task}/primitives.json)
         num_puzzles: Number of puzzles to generate (None = all available)
         seed: Random seed
+        **kwargs: Additional task-specific options (e.g., tracer="uniform" for code_output)
 
     Returns:
         Path to created primitives.json
@@ -36,7 +38,7 @@ def create_primitives(
     count_str = str(num_puzzles) if num_puzzles is not None else "all"
     print(f"Generating {count_str} primitives for task '{task_name}'...")
 
-    primitives = task.create_primitives(num_puzzles, seed)
+    primitives = task.create_primitives(num_puzzles, seed, **kwargs)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_json(output_path, primitives)

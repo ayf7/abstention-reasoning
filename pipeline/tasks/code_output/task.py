@@ -17,6 +17,7 @@ import sys
 
 from pipeline.tasks.base import BaseTask
 from pipeline.tasks.code_output.tracer import trace_execution
+from pipeline.tasks.code_output.tracer_uniform import trace_execution_uniform
 
 
 # Regex to extract example I/O blocks from question text.
@@ -191,7 +192,7 @@ class CodeOutputTask(BaseTask):
 
     assistant_prefix = "<think>\nLet me trace through this code step by step."
 
-    def create_primitives(self, num_puzzles: int | None, seed: int = 42) -> list[dict]:
+    def create_primitives(self, num_puzzles: int | None, seed: int = 42, **kwargs) -> list[dict]:
         """
         Load rStar-Coder problems, filter, anonymize, and expand test cases.
 
@@ -203,10 +204,20 @@ class CodeOutputTask(BaseTask):
             num_puzzles: Max unique questions to collect (None = all available).
                          Total primitives will be higher due to test case expansion.
             seed: Random seed
+            **kwargs: Additional options. Supports:
+                tracer: "original" (default) or "uniform" — which execution
+                    tracer to use for generating hint_exprs.
         """
         import random
         from datasets import load_dataset
         from .anonymizer import anonymize_code
+
+        tracer_name = kwargs.get("tracer", "original")
+        if tracer_name == "uniform":
+            _trace_fn = trace_execution_uniform
+            print("Using uniform execution tracer for hint generation")
+        else:
+            _trace_fn = trace_execution
 
         rng = random.Random(seed)
 
@@ -304,7 +315,7 @@ class CodeOutputTask(BaseTask):
                     continue
 
                 # Generate execution trace hints for this test case
-                hint_exprs = trace_execution(anonymized, stdin_input)
+                hint_exprs = _trace_fn(anonymized, stdin_input)
 
                 primitives.append({
                     "index": -1,  # re-indexed below

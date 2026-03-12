@@ -248,6 +248,108 @@ def compute_score_abstain(
     )
 
 
+def compute_score_dynamic_abstain(
+    data_sources, solution_strs, ground_truths, extra_infos,
+    uids=None, r_c=1.0, r_w=0.1, **kwargs,
+):
+    """Batch reward function for adaptive abstention (used with AdaptiveRewardManager).
+
+    Classifies each sample as correct, abstained, or wrong. Returns per-sample
+    dicts with 'score', 'correct', 'abstained' fields. The AdaptiveRewardManager
+    overrides the score for abstained samples with the EMA-derived r_a.
+
+    Must be used with reward_manager: adaptive (AdaptiveRewardManager).
+    """
+    results = []
+    for i in range(len(solution_strs)):
+        extra_info = extra_infos[i] if extra_infos[i] is not None else {}
+        result = compute_score(
+            data_source=data_sources[i],
+            solution_str=solution_strs[i],
+            ground_truth=ground_truths[i],
+            extra_info=extra_info,
+            **kwargs,
+        )
+        if not result.get("abstained", False):
+            if not has_malformed_structure(solution_strs[i]) and solution_strs[i].rstrip().endswith("</think>\n\n<abstain>"):
+                result["abstained"] = True
+        if result.get("correct", False):
+            result["score"] = r_c
+        results.append(result)
+    return results
+
+
+def compute_score_damped_abstain(
+    data_sources, solution_strs, ground_truths, extra_infos,
+    uids=None, r_c=1.0, r_w=0.1, **kwargs,
+):
+    """Batch reward function with damped per-group abstention scoring.
+
+    Computes per-group abstention reward:
+        r_a(x) = r_w + (r_c - r_w) * (1 - p_hat) * (1 - n_a / G)
+
+    where p_hat is accuracy among non-abstaining samples and n_a/G is
+    the group abstention rate. Anti-collapse: as n_a -> G, r_a -> r_w.
+
+    Must be used with reward_manager: batch (BatchRewardManager).
+    """
+    from collections import defaultdict
+
+    # First pass: classify each sample using per-sample scoring
+    results = []
+    for i in range(len(solution_strs)):
+        extra_info = extra_infos[i] if extra_infos[i] is not None else {}
+        result = compute_score(
+            data_source=data_sources[i],
+            solution_str=solution_strs[i],
+            ground_truth=ground_truths[i],
+            extra_info=extra_info,
+            **kwargs,
+        )
+        # Detect abstention (compute_score doesn't check for it)
+        if not result.get("abstained", False):
+            if not has_malformed_structure(solution_strs[i]) and solution_strs[i].rstrip().endswith("</think>\n\n<abstain>"):
+                result["abstained"] = True
+        results.append(result)
+
+    if uids is None:
+        return results
+
+    # Group by uid
+    groups = defaultdict(list)
+    for i, uid in enumerate(uids):
+        groups[uid].append(i)
+
+    # Second pass: compute dynamic r_a per group and assign rewards
+    for uid, indices in groups.items():
+        G = len(indices)
+        k = sum(1 for i in indices if results[i].get("correct", False))
+        n_a = sum(1 for i in indices if results[i].get("abstained", False))
+        n_attempts = G - n_a
+
+        if n_attempts > 0:
+            p_hat = k / n_attempts
+        else:
+            p_hat = 0.0
+
+        damping = 1.0 - (n_a / G)
+        r_a_dynamic = r_w + (r_c - r_w) * (1.0 - p_hat) * damping
+
+        for i in indices:
+            if results[i].get("correct", False):
+                results[i]["score"] = r_c
+            elif results[i].get("abstained", False):
+                results[i]["score"] = r_a_dynamic
+            # else: keep original per-sample score (format_score or 0)
+
+            results[i]["r_a_dynamic"] = r_a_dynamic
+            results[i]["group_p_hat"] = p_hat
+            results[i]["group_n_a"] = n_a
+            results[i]["group_size"] = G
+
+    return results
+
+
 def compute_score_hint(
     data_source,
     solution_str,

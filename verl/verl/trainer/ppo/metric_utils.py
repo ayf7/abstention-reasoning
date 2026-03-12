@@ -248,6 +248,26 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
                 if non_abstained.sum() > 0:
                     metrics["abstention/accuracy_non_abstained"] = float(correct_arr[non_abstained].mean())
 
+    # Adaptive abstention metrics (from AdaptiveRewardManager)
+    if "r_a_adaptive" in batch.non_tensor_batch:
+        metrics["reward/r_a"] = float(batch.non_tensor_batch["r_a_adaptive"][0])
+    if "R_att_ema" in batch.non_tensor_batch:
+        metrics["reward/R_att_ema"] = float(batch.non_tensor_batch["R_att_ema"][0])
+    if "R_all_batch" in batch.non_tensor_batch:
+        metrics["reward/R_all_batch"] = float(batch.non_tensor_batch["R_all_batch"][0])
+    if "R_att_batch" in batch.non_tensor_batch:
+        metrics["reward/R_att_batch"] = float(batch.non_tensor_batch["R_att_batch"][0])
+    if "R_att_batch_flat" in batch.non_tensor_batch:
+        metrics["reward/R_att_batch_flat"] = float(batch.non_tensor_batch["R_att_batch_flat"][0])
+    if "abstention_rate" in batch.non_tensor_batch:
+        metrics["abstention/rate_adaptive"] = float(batch.non_tensor_batch["abstention_rate"][0])
+    if "abstention_rate_by_problem" in batch.non_tensor_batch:
+        metrics["abstention/rate_by_problem"] = float(batch.non_tensor_batch["abstention_rate_by_problem"][0])
+    if "abstention_threshold_p" in batch.non_tensor_batch:
+        metrics["abstention/threshold_p"] = float(batch.non_tensor_batch["abstention_threshold_p"][0])
+    if "attempted_accuracy" in batch.non_tensor_batch:
+        metrics["abstention/attempted_accuracy"] = float(batch.non_tensor_batch["attempted_accuracy"][0])
+
     return metrics
 
 

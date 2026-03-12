@@ -80,6 +80,7 @@ def cmd_create_primitives(args):
         output_path=output_path,
         num_puzzles=args.num_puzzles,
         seed=args.seed,
+        tracer=args.tracer,
     )
 
 
@@ -338,6 +339,8 @@ def main():
     p.add_argument("--output", help="Output path (default: artifacts/{task}/primitives.json)")
     p.add_argument("--num-puzzles", type=int, default=None, help="Number of puzzles (omit to use all available)")
     p.add_argument("--seed", type=int, default=42, help="Random seed")
+    p.add_argument("--tracer", choices=["original", "uniform"], default="original",
+                   help="Tracer for hint generation (code_output only): 'original' (top-level) or 'uniform' (execution-uniform)")
     p.set_defaults(func=cmd_create_primitives)
 
     # create_prompts

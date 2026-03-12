@@ -297,7 +297,39 @@ def compute_score_dynamic_abstain(
     data_sources, solution_strs, ground_truths, extra_infos,
     uids=None, r_c=1.0, r_w=0.1, **kwargs,
 ):
-    """Batch reward function with dynamic per-group abstention scoring.
+    """Batch reward function for adaptive abstention (used with AdaptiveRewardManager).
+
+    Classifies each sample as correct, abstained, or wrong. Returns per-sample
+    dicts with 'score', 'correct', 'abstained' fields. The AdaptiveRewardManager
+    overrides the score for abstained samples with the EMA-derived r_a.
+
+    Must be used with reward_manager: adaptive (AdaptiveRewardManager).
+    """
+    results = []
+    for i in range(len(solution_strs)):
+        extra_info = extra_infos[i] if extra_infos[i] is not None else {}
+        result = compute_score(
+            data_source=data_sources[i],
+            solution_str=solution_strs[i],
+            ground_truth=ground_truths[i],
+            extra_info=extra_info,
+            **kwargs,
+        )
+        if not result.get("abstained", False):
+            if not has_malformed_structure(solution_strs[i]) and has_abstain_tag(solution_strs[i]):
+                result["abstained"] = True
+        # Set canonical scores: correct=r_c, wrong=keep original (format_score or 0)
+        if result.get("correct", False):
+            result["score"] = r_c
+        results.append(result)
+    return results
+
+
+def compute_score_damped_abstain(
+    data_sources, solution_strs, ground_truths, extra_infos,
+    uids=None, r_c=1.0, r_w=0.1, **kwargs,
+):
+    """Batch reward function with damped per-group abstention scoring.
 
     Computes per-group abstention reward:
         r_a(x) = r_w + (r_c - r_w) * (1 - p_hat) * (1 - n_a / G)

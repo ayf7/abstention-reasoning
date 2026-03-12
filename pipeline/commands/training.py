@@ -651,7 +651,12 @@ def train_rl(
 
     # Set reward manager type if non-default
     if method is not None and method.reward_manager != "naive":
-        cmd.append(f"+reward_model.reward_manager={method.reward_manager}")
+        cmd.append(f"reward_model.reward_manager={method.reward_manager}")
+        # Also pass reward_kwargs to reward_model.reward_kwargs so the manager
+        # constructor receives them (e.g., AdaptiveRewardManager needs beta, delta, etc.)
+        if reward_kwargs:
+            for key, value in reward_kwargs.items():
+                cmd.append(f"+reward_model.reward_kwargs.{key}={value}")
 
     # Set environment variables
     env = os.environ.copy()
