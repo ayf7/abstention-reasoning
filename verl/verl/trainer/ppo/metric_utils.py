@@ -189,10 +189,12 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         metrics["num_turns/mean"] = num_turns.mean()
 
     # Hint distribution and reward/accuracy breakdown by hint count
+    # Only report when hints are actually used (skip for non-hint methods)
     if num_hints is not None:
         num_hints_arr = np.array(num_hints, dtype=np.int64)
         total_samples = len(num_hints_arr)
 
+    if num_hints is not None and num_hints_arr.max() > 0:
         metrics["rollout/num_hints/mean"] = float(np.mean(num_hints_arr))
         metrics["rollout/num_hints/max"] = int(np.max(num_hints_arr))
         metrics["rollout/num_hints/min"] = int(np.min(num_hints_arr))
@@ -223,8 +225,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
 
         metrics["accuracy/overall"] = float(correct_arr.mean()) if total_samples > 0 else 0
 
-        if num_hints is not None:
-            num_hints_arr = np.array(num_hints, dtype=np.int64)
+        if num_hints is not None and num_hints_arr.max() > 0:
             for i in range(6):
                 mask = (num_hints_arr == i)
                 count = int(mask.sum())
@@ -249,8 +250,10 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
                     metrics["abstention/accuracy_non_abstained"] = float(correct_arr[non_abstained].mean())
 
     # Adaptive abstention metrics (from AdaptiveRewardManager)
-    if "r_a_adaptive" in batch.non_tensor_batch:
-        metrics["reward/r_a"] = float(batch.non_tensor_batch["r_a_adaptive"][0])
+    if "r_a" in batch.non_tensor_batch:
+        metrics["abstention/r_a"] = float(batch.non_tensor_batch["r_a"][0])
+    elif "r_a_adaptive" in batch.non_tensor_batch:
+        metrics["abstention/r_a"] = float(batch.non_tensor_batch["r_a_adaptive"][0])
     if "R_att_ema" in batch.non_tensor_batch:
         metrics["reward/R_att_ema"] = float(batch.non_tensor_batch["R_att_ema"][0])
     if "R_all_batch" in batch.non_tensor_batch:
@@ -267,6 +270,20 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         metrics["abstention/threshold_p"] = float(batch.non_tensor_batch["abstention_threshold_p"][0])
     if "attempted_accuracy" in batch.non_tensor_batch:
         metrics["abstention/attempted_accuracy"] = float(batch.non_tensor_batch["attempted_accuracy"][0])
+
+    # Adaptive hint metrics
+    if "adaptive_final_value" in batch.non_tensor_batch:
+        metrics["hint/adaptive_final"] = float(batch.non_tensor_batch["adaptive_final_value"][0])
+    if "R_ema" in batch.non_tensor_batch:
+        metrics["hint/R_ema"] = float(batch.non_tensor_batch["R_ema"][0])
+    if "R_batch" in batch.non_tensor_batch:
+        metrics["hint/R_batch"] = float(batch.non_tensor_batch["R_batch"][0])
+    if "batch_accuracy" in batch.non_tensor_batch:
+        metrics["hint/batch_accuracy"] = float(batch.non_tensor_batch["batch_accuracy"][0])
+    if "batch_malformed_rate" in batch.non_tensor_batch:
+        metrics["hint/batch_malformed_rate"] = float(batch.non_tensor_batch["batch_malformed_rate"][0])
+    if "batch_avg_hints" in batch.non_tensor_batch:
+        metrics["hint/batch_avg_hints"] = float(batch.non_tensor_batch["batch_avg_hints"][0])
 
     return metrics
 

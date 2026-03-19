@@ -54,6 +54,8 @@ class Method:
     helper_model: str | None = None  # Model for smart hint selection (e.g., "Qwen/Qwen3-14B")
     max_hints: int | None = None  # Maximum number of hints to give during RL rollout (None = unlimited)
     reward_manager: str = "naive"  # Reward manager type: "naive" or "batch"
+    hint_source: str | None = None  # Hint data field in primitives (e.g., "solution_hints", "mcq_hints")
+    stop_strings: list[str] | None = None  # Custom stop strings for generation (None = default)
 
     # Backwards compatibility alias
     @property
@@ -115,6 +117,8 @@ class Method:
             helper_model=data.get("helper_model"),
             max_hints=data.get("max_hints"),
             reward_manager=data.get("reward_manager", "naive"),
+            hint_source=data.get("hint_source"),
+            stop_strings=data.get("stop_strings"),
         )
 
     @staticmethod

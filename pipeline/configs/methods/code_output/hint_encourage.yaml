@@ -2,7 +2,8 @@ name: hint_encourage
 template_variant: hint
 reward_function: compute_score_hint
 multi_turn: true
-max_turns: 6
+max_turns: 3
+max_hints: 3
 mask_response_tokens: true
 rollout_backend: vllm
 rollout_mode: sync

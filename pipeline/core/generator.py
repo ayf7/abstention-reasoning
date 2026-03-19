@@ -29,6 +29,9 @@ HINT_TRANSITION_PHRASES = [
 ]
 
 
+DEFAULT_STOP_STRINGS = ["</answer>", "</think>\n\n<abstain>"]
+
+
 @dataclass
 class GenerationConfig:
     """Configuration for text generation."""
@@ -42,6 +45,7 @@ class GenerationConfig:
     gpu_memory_utilization: float = 0.9
     verbose: bool = False
     seed: int | None = 42  # Set seed for reproducibility
+    stop_strings: list[str] | None = None  # None = use DEFAULT_STOP_STRINGS
 
 
 class Generator:
@@ -77,13 +81,14 @@ class Generator:
         """
         from vllm import SamplingParams
 
+        stop = self.config.stop_strings if self.config.stop_strings is not None else DEFAULT_STOP_STRINGS
         sampling_params = SamplingParams(
             temperature=self.config.temperature,
             top_p=self.config.top_p,
             max_tokens=self.config.max_new_tokens,
             n=self.config.num_samples,
             seed=self.config.seed,
-            stop=["</answer>", "</think>\n\n<abstain>"],
+            stop=stop,
             include_stop_str_in_output=True,
         )
 
@@ -698,13 +703,14 @@ class AsyncGenerator:
         num_prompts = len(prompts)
 
         # Sampling params
+        stop = self.config.stop_strings if self.config.stop_strings is not None else DEFAULT_STOP_STRINGS
         sampling_params = SamplingParams(
             temperature=self.config.temperature,
             top_p=self.config.top_p,
             max_tokens=self.config.max_new_tokens,
             n=num_samples,
             seed=self.config.seed,
-            stop=["</answer>", "</think>\n\n<abstain>"],
+            stop=stop,
             include_stop_str_in_output=True,
         )
 

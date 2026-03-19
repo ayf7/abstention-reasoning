@@ -1,0 +1,19 @@
+Solve this math problem.
+
+{problem}
+
+Think through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and provide your best answer in <answer> </answer> tags.
+
+After your answer, you must either <commit> to your answer or <abstain> if you believe your answer is likely wrong. Only commit if you are confident.
+
+Write your answer in plain text without LaTeX or special characters (e.g., 1/36 not \frac{1}{36}, sqrt(3) not √3, pi not π).
+
+Example format:
+<think>...reasoning...</think>
+<answer>ANSWER</answer>
+<commit>
+
+Or if uncertain:
+<think>...reasoning...</think>
+<answer>ANSWER</answer>
+<abstain>

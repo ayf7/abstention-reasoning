@@ -197,12 +197,19 @@ class vLLMRollout(BaseRollout):
         if config.free_cache_engine:
             self.inference_engine.sleep(level=1)
 
+        # Custom stop strings from method config, or default
+        custom_stop = config.get("stop_strings", None)
+        if custom_stop and isinstance(custom_stop, str):
+            stop = custom_stop.split(",")
+        else:
+            stop = ["</answer>", "</think>\n\n<abstain>"]
+
         kwargs = dict(
                 n=1,
                 logprobs=0,  # can be set to 0 and let actor to recompute
                 max_tokens=config.response_length,
                 include_stop_str_in_output=True,
-                stop=["</answer>", "</think>\n\n<abstain>"]
+                stop=stop,
             )
 
         self.tokenizer = tokenizer
@@ -1148,11 +1155,16 @@ class vLLMAsyncAgenticRollout(BaseRollout):
         else:
             sampling_params = SamplingParams(**self.sampling_params_kwargs)
 
+        # Only return output when a request finishes (not every step)
+        from vllm.sampling_params import RequestOutputKind
+        sampling_params.output_kind = RequestOutputKind.FINAL_ONLY
+
         # Expand prompts by n_samples
         n_samples = self.n
         raw_prompt_ids = _repeat_interleave(non_tensor_batch["raw_prompt_ids"], n_samples)
-        targets = _repeat_interleave(non_tensor_batch["target"], n_samples)
-        numbers = [nos for nos in non_tensor_batch["numbers"] for _ in range(n_samples)]
+        targets = _repeat_interleave(non_tensor_batch.get("target", np.array([None] * batch_size)), n_samples)
+        numbers_raw = non_tensor_batch.get("numbers", [None] * batch_size)
+        numbers = [nos for nos in numbers_raw for _ in range(n_samples)]
         hint_list_expanded = [h for h in hint_list for _ in range(n_samples)]
 
         num_outputs = len(raw_prompt_ids)

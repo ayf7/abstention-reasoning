@@ -7,5 +7,6 @@ mask_response_tokens: true
 rollout_backend: vllm
 rollout_mode: sync
 reward_kwargs:
-  final: 0.5
+  correct_end: 0.55
+  incorrect_end: 0.45
   format_score: 0.1

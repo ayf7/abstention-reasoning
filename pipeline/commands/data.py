@@ -170,6 +170,10 @@ def _create_prompts_single(
     if assistant_prefix is not None:
         task.assistant_prefix = assistant_prefix
 
+    # Set hint_source from method config if provided
+    if method is not None and method.hint_source is not None:
+        task.hint_source = method.hint_source
+
     # Load primitives
     primitives = load_json(primitives_path)
 

@@ -134,11 +134,13 @@ def compute_score(
 
     num_hints = get_num_hints(solution_str)
 
-    # Check for abstention
-    if reward_abstain and has_abstain_tag(solution_str):
+    # Check for abstention (always detect, but only assign
+    # abstention_score when reward_abstain is True)
+    if has_abstain_tag(solution_str):
+        abs_score = abstention_score if reward_abstain else 0
         return {
-            "score": abstention_score,
-            "score_wo_hint_penalty": abstention_score,
+            "score": abs_score,
+            "score_wo_hint_penalty": abs_score,
             "num_hints": num_hints,
             "correct": False,
             "abstained": True,
@@ -156,14 +158,14 @@ def compute_score(
     if is_correct:
         base_score = 1.0
         if penalize_hint:
-            penalized_hints = min(num_hints, 5)
+            penalized_hints = min(num_hints, 2)
             final_score = base_score * (1 - hint_penalty * penalized_hints)
         else:
             final_score = base_score
     else:
         final_score = format_score
         if hint_bonus > 0 and num_hints > 0:
-            penalized_hints = min(num_hints, 5)
+            penalized_hints = min(num_hints, 2)
             final_score = format_score + hint_bonus * penalized_hints
         base_score = final_score
 
@@ -239,14 +241,15 @@ def compute_score_hint_dynamic(
     extra_info,
     format_score=0.1,
     score=1.0,
-    final=0.5,
+    correct_end=0.55,
+    incorrect_end=0.45,
     max_hints=5,
     **kwargs,
 ):
-    """Dynamic hint scoring where correct and incorrect converge toward `final`.
+    """Dynamic hint scoring where correct and incorrect converge to separate endpoints.
 
-    correct(n)  = score - (score - final) * n / max_hints          (inclusive)
-    wrong(n)    = format_score + (final - format_score) * n / (max_hints + 1)  (exclusive)
+    correct(n)  = score - (score - correct_end) * n / max_hints              (inclusive)
+    wrong(n)    = format_score + (incorrect_end - format_score) * n / (max_hints + 1)  (exclusive)
     malformed   = 0
     """
     result = compute_score(
@@ -259,9 +262,9 @@ def compute_score_hint_dynamic(
     if result.get('malformed', False):
         result['score'] = 0.0
     elif result['correct']:
-        result['score'] = score - (score - final) * n / max_hints
+        result['score'] = score - (score - correct_end) * n / max_hints
     else:
-        result['score'] = format_score + (final - format_score) * n / (max_hints + 1)
+        result['score'] = format_score + (incorrect_end - format_score) * n / (max_hints + 1)
 
     return result
 

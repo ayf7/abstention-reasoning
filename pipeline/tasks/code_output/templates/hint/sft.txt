@@ -9,19 +9,19 @@ Input:
 {stdin_input}
 ```
 
-Trace through the code step by step to determine what gets printed. You have access to a hint system that provides snapshots of variable state at key points during execution. If you get stuck or want to verify your tracing, request a hint.
+Reason about what the output will be. You have access to a hint system that provides the state of all variables at a specific line number. You can request up to 2 hints. The first hint corresponds to roughly 50% of the code's execution. If you get stuck or want to verify your reasoning, request a hint.
 
 To request a hint, close your thinking with </think> and then use <request></request>.
-The system will respond with the program state at a checkpoint in <response>...</response> tags (e.g., variable values after a specific line executes).
+The system will respond with variable values at that checkpoint in <response>...</response> tags (e.g., "After line 12: x = 5, y = [1, 2]").
 After receiving a hint, continue reasoning in <think>...</think> tags.
-When you have the answer, close with </think> and put the program's exact output in <answer> </answer> tags. Preserve the output format exactly, including newlines.
+When you have the answer, close with </think> and put the program's exact output in <answer> </answer> tags. Preserve the output format exactly, including newlines. No text between </think> and your answer.
 
 Example format:
-<think>...tracing through the code...</think>
+<think>...reasoning about the code...</think>
 <request></request>
 <response>After line 3: x = 5, y = [1, 2]</response>
-<think>...continue tracing with this info...</think>
+<think>...continue reasoning with this info...</think>
 <request></request>
 <response>After line 7: x = 10, result = 'hello'</response>
-<think>...reasoning to final output...</think>
+<think>...determining the final output...</think>
 <answer>ANSWER</answer>

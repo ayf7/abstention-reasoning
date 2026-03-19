@@ -1,0 +1,6 @@
+name: simple_abstention_025
+template_variant: simple_abstention
+reward_function: compute_score_abstain
+reward_kwargs:
+  abstention_score: 0.15
+  format_score: 0.1

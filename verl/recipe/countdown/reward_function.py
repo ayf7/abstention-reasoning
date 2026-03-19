@@ -166,13 +166,15 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
 
     num_hints = get_num_hints(solution_str)
 
-    # Check for abstention first (before equation extraction check)
-    if reward_abstain and has_abstain_tag(solution_str):
+    # Check for abstention first (always detect, but only assign
+    # abstention_score when reward_abstain is True)
+    if has_abstain_tag(solution_str):
+        abs_score = abstention_score if reward_abstain else 0
         if do_print:
-            print(f"Abstaining (via <abstain> tag) - awarding {abstention_score}")
+            print(f"Abstaining (via <abstain> tag) - awarding {abs_score}")
         return {
-            "score": abstention_score,
-            "score_wo_hint_penalty": abstention_score,
+            "score": abs_score,
+            "score_wo_hint_penalty": abs_score,
             "num_hints": num_hints,
             "abstained": True,
             "malformed": False,
@@ -249,6 +251,81 @@ def compute_score_abstain(data_source, solution_str, ground_truth, extra_info, m
         reward_abstain=True, abstention_score=abstention_score, **kwargs
     )
 
+def compute_score_abstention_commit(
+    data_source, solution_str, ground_truth, extra_info,
+    method='strict', commit_correct=1.0, commit_wrong=0.0,
+    abstain_correct=0.5, abstain_wrong=0.4, format_score=0.1, **kwargs,
+):
+    """Reward function for abstention_commit format.
+
+    Model produces <answer>...</answer> then <commit> or <abstain>.
+    Format score is added for well-formed responses (not malformed).
+
+    Reward matrix (+ format_score for well-formed):
+                    Correct         Wrong
+        <commit>    commit_correct  commit_wrong + format_score
+        <abstain>   abstain_correct + format_score  abstain_wrong + format_score
+        malformed   0               0
+    """
+    target = ground_truth['target']
+    numbers = ground_truth['numbers']
+    do_print = random.randint(1, 64) == 1
+
+    # Check for commit/abstain tags
+    has_commit = bool(re.search(r'</answer>\s*<commit>', solution_str))
+    has_abstain = bool(re.search(r'</answer>\s*<abstain>', solution_str))
+
+    # Validate structure: </think> <answer> </answer> (<commit>|<abstain>)
+    tag_pattern = r'(</think>|<think>|<answer>|</answer>|<commit>|<abstain>)'
+    tags = re.findall(tag_pattern, solution_str)
+    if len(tags) != 4 or tags != ['</think>', '<answer>', '</answer>', tags[3]] or tags[3] not in ('<commit>', '<abstain>'):
+        if do_print:
+            print(f"Malformed commit structure - awarding 0")
+        return {
+            "score": 0, "correct": False, "committed": False,
+            "abstained": False, "malformed": True, "predicted_answer": None,
+        }
+
+    equation = extract_solution(solution_str)
+    if equation is None:
+        return {
+            "score": 0, "correct": False, "committed": False,
+            "abstained": False, "malformed": True, "predicted_answer": None,
+        }
+
+    # Check correctness: valid numbers AND correct result
+    is_correct = False
+    if validate_equation(equation, numbers):
+        result = evaluate_equation(equation)
+        if result is not None and abs(result - target) < 1e-6:
+            is_correct = True
+
+    committed = has_commit
+    abstained = has_abstain
+
+    if committed and is_correct:
+        final_score = commit_correct
+    elif committed and not is_correct:
+        final_score = commit_wrong + format_score
+    elif abstained and is_correct:
+        final_score = abstain_correct + format_score
+    elif abstained and not is_correct:
+        final_score = abstain_wrong + format_score
+    else:
+        final_score = 0
+
+    if do_print:
+        action = "COMMIT" if committed else "ABSTAIN"
+        correctness = "CORRECT" if is_correct else "WRONG"
+        print(f"[{action}+{correctness}] score={final_score} eq={equation} target={target}")
+
+    return {
+        "score": final_score, "correct": is_correct,
+        "committed": committed, "abstained": abstained,
+        "malformed": False, "predicted_answer": equation,
+    }
+
+
 def compute_score_hint(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., hint_penalty=0.1, hint_bonus=0.0, **kwargs):
     """The scoring function for countdown that penalizes hint usage.
 
@@ -267,13 +344,14 @@ def compute_score_hint(data_source, solution_str, ground_truth, extra_info, meth
 
 def compute_score_hint_dynamic(
     data_source, solution_str, ground_truth, extra_info,
-    method='strict', format_score=0.1, score=1.0, final=0.5, max_hints=5,
+    method='strict', format_score=0.1, score=1.0,
+    correct_end=0.55, incorrect_end=0.45, max_hints=5,
     **kwargs,
 ):
-    """Dynamic hint scoring where correct and incorrect converge toward `final`.
+    """Dynamic hint scoring where correct and incorrect converge to separate endpoints.
 
-    correct(n)  = score - (score - final) * n / max_hints          (inclusive)
-    wrong(n)    = format_score + (final - format_score) * n / (max_hints + 1)  (exclusive)
+    correct(n)  = score - (score - correct_end) * n / max_hints              (inclusive)
+    wrong(n)    = format_score + (incorrect_end - format_score) * n / (max_hints + 1)  (exclusive)
     malformed   = 0
     """
     result = compute_score(
@@ -286,9 +364,9 @@ def compute_score_hint_dynamic(
     if result.get('malformed', False):
         result['score'] = 0.0
     elif result['correct']:
-        result['score'] = score - (score - final) * n / max_hints
+        result['score'] = score - (score - correct_end) * n / max_hints
     else:
-        result['score'] = format_score + (final - format_score) * n / (max_hints + 1)
+        result['score'] = format_score + (incorrect_end - format_score) * n / (max_hints + 1)
 
     return result
 
@@ -394,6 +472,8 @@ def compute_score_damped_abstain(
             results[i]["group_size"] = G
 
     return results
+
+
 
 
 def compute_score_hint_exponential(

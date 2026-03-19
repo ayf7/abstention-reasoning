@@ -9,4 +9,7 @@ Input:
 {stdin_input}
 ```
 
-Trace through the code step by step in <think> </think> tags, carefully tracking variable values and control flow as the program executes with the given input. When you are finished thinking, close with </think> and IMMEDIATELY provide your final answer in <answer> </answer> tags with no text in between.
+Reason about what the output will be in <think> </think> tags. When you are finished thinking, close with </think> and provide the program's exact output in <answer> </answer> tags. Preserve the output format exactly, including newlines. No text between </think> and your answer.
+
+For example: <answer> 42 </answer> or <answer> YES
+NO </answer>

@@ -169,20 +169,24 @@ def compute_score(
             "num_hints": 0,
             "abstained": False,
             "correct": False,
+            "malformed": True,
         }
 
     num_hints = get_num_hints(solution_str)
 
-    # Check for abstention first
-    if reward_abstain and has_abstain_tag(solution_str):
+    # Check for abstention first (always detect, but only assign
+    # abstention_score when reward_abstain is True)
+    if has_abstain_tag(solution_str):
+        abs_score = abstention_score if reward_abstain else 0
         if do_print:
-            print(f"Abstaining - awarding {abstention_score}")
+            print(f"Abstaining - awarding {abs_score}")
         return {
-            "score": abstention_score,
-            "score_wo_hint_penalty": abstention_score,
+            "score": abs_score,
+            "score_wo_hint_penalty": abs_score,
             "num_hints": num_hints,
             "abstained": True,
             "correct": False,
+            "malformed": False,
         }
 
     # Extract predicted answer
@@ -197,6 +201,7 @@ def compute_score(
             "num_hints": num_hints,
             "abstained": False,
             "correct": False,
+            "malformed": True,
         }
 
     # Check correctness
@@ -218,6 +223,7 @@ def compute_score(
             "num_hints": num_hints,
             "abstained": False,
             "correct": True,
+            "malformed": False,
         }
     else:
         final_format_score = format_score
@@ -234,7 +240,140 @@ def compute_score(
             "num_hints": num_hints,
             "abstained": False,
             "correct": False,
+            "malformed": False,
         }
+
+
+def has_commit_tag(solution_str: str) -> bool:
+    """Check if the solution ends with <commit> after <answer>...</answer>."""
+    return bool(re.search(r'</answer>\s*<commit>\s*$', solution_str.rstrip()))
+
+
+def has_abstain_after_answer(solution_str: str) -> bool:
+    """Check if the solution ends with <abstain> after <answer>...</answer>."""
+    return bool(re.search(r'</answer>\s*<abstain>\s*$', solution_str.rstrip()))
+
+
+def has_malformed_structure_commit(solution_str: str) -> bool:
+    """Validate tag structure for abstention_commit format.
+
+    Valid structure:
+        [text]</think>\\n\\n<answer>...</answer>\\n<commit>
+        [text]</think>\\n\\n<answer>...</answer>\\n<abstain>
+
+    Returns True if malformed, False if valid.
+    """
+    tag_pattern = r'(</think>|<think>|<answer>|</answer>|<commit>|<abstain>)'
+    tags = re.findall(tag_pattern, solution_str)
+
+    if not tags:
+        return True
+
+    # Expected: </think> <answer> </answer> (<commit> | <abstain>)
+    if len(tags) != 4:
+        return True
+
+    if tags[0] != '</think>':
+        return True
+    if tags[1] != '<answer>':
+        return True
+    if tags[2] != '</answer>':
+        return True
+    if tags[3] not in ('<commit>', '<abstain>'):
+        return True
+
+    return False
+
+
+def compute_score_abstention_commit(
+    data_source,
+    solution_str: str,
+    ground_truth: dict,
+    extra_info: dict,
+    commit_correct: float = 1.0,
+    commit_wrong: float = 0.0,
+    abstain_correct: float = 0.0,
+    abstain_wrong: float = 0.5,
+    format_score: float = 0.0,
+    **kwargs,
+) -> dict:
+    """
+    Reward function for abstention_commit format.
+
+    The model must always produce an answer, then commit or abstain.
+    This enables measuring both precision and recall.
+
+    Reward matrix:
+                    Correct answer    Wrong answer
+        <commit>    commit_correct    commit_wrong + format_score
+        <abstain>   abstain_correct   abstain_wrong + format_score
+        malformed   0                 0
+
+    Default rewards (with format_score=0.1):
+        commit + correct  = 1.0  (best: confident and right)
+        commit + wrong    = 0.1  (wrong but well-formatted)
+        abstain + correct = 0.1  (missed opportunity but well-formatted)
+        abstain + wrong   = 0.6  (good: knew it was wrong, well-formatted)
+        malformed         = 0.0  (bad format)
+    """
+    correct_answer = ground_truth.get("answer", "")
+    do_print = random.randint(1, 64) == 1
+
+    # Structural validation
+    if has_malformed_structure_commit(solution_str):
+        if do_print:
+            print(f"Malformed commit structure - awarding 0")
+        return {
+            "score": 0,
+            "correct": False,
+            "committed": False,
+            "abstained": False,
+            "malformed": True,
+            "predicted_answer": None,
+        }
+
+    # Extract answer (always present in this format)
+    predicted = extract_answer(solution_str)
+    if predicted is None:
+        return {
+            "score": 0,
+            "correct": False,
+            "committed": False,
+            "abstained": False,
+            "malformed": True,
+            "predicted_answer": None,
+        }
+
+    # Check correctness
+    is_correct = check_answer(predicted, correct_answer)
+    committed = has_commit_tag(solution_str)
+    abstained = has_abstain_after_answer(solution_str)
+
+    # Assign reward from the matrix (format_score added for well-formatted responses)
+    if committed and is_correct:
+        final_score = commit_correct
+    elif committed and not is_correct:
+        final_score = commit_wrong + format_score
+    elif abstained and is_correct:
+        final_score = abstain_correct + format_score
+    elif abstained and not is_correct:
+        final_score = abstain_wrong + format_score
+    else:
+        final_score = 0  # shouldn't happen if structure is valid
+
+    if do_print:
+        action = "COMMIT" if committed else "ABSTAIN"
+        correctness = "CORRECT" if is_correct else "WRONG"
+        print(f"[{action}+{correctness}] score={final_score} pred={predicted} gold={correct_answer}")
+
+    return {
+        "score": final_score,
+        "correct": is_correct,
+        "committed": committed,
+        "abstained": abstained,
+        "malformed": False,
+        "predicted_answer": predicted,
+    }
 
 
 def compute_score_abstain(
@@ -301,14 +440,15 @@ def compute_score_hint_dynamic(
     extra_info: dict,
     format_score: float = 0.1,
     score: float = 1.0,
-    final: float = 0.5,
+    correct_end: float = 0.55,
+    incorrect_end: float = 0.45,
     max_hints: int = 5,
     **kwargs,
 ) -> dict:
-    """Dynamic hint scoring where correct and incorrect converge toward `final`.
+    """Dynamic hint scoring where correct and incorrect converge to separate endpoints.
 
-    correct(n)  = score - (score - final) * n / max_hints          (inclusive)
-    wrong(n)    = format_score + (final - format_score) * n / (max_hints + 1)  (exclusive)
+    correct(n)  = score - (score - correct_end) * n / max_hints              (inclusive)
+    wrong(n)    = format_score + (incorrect_end - format_score) * n / (max_hints + 1)  (exclusive)
     malformed   = 0
     """
     result = compute_score(
@@ -321,9 +461,9 @@ def compute_score_hint_dynamic(
     if result.get('malformed', False):
         result['score'] = 0.0
     elif result['correct']:
-        result['score'] = score - (score - final) * n / max_hints
+        result['score'] = score - (score - correct_end) * n / max_hints
     else:
-        result['score'] = format_score + (final - format_score) * n / (max_hints + 1)
+        result['score'] = format_score + (incorrect_end - format_score) * n / (max_hints + 1)
 
     return result
 

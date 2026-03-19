@@ -17,7 +17,7 @@ import sys
 
 from pipeline.tasks.base import BaseTask
 from pipeline.tasks.code_output.tracer import trace_execution
-from pipeline.tasks.code_output.tracer_uniform import trace_execution_uniform
+from pipeline.tasks.code_output.tracer_uniform import trace_execution_uniform, count_true_steps
 
 
 # Regex to extract example I/O blocks from question text.
@@ -174,6 +174,40 @@ def _validate_code(code: str, stdin_input: str, expected_stdout: str, timeout: f
     return _normalize_stdout(result.stdout) == _normalize_stdout(expected_stdout)
 
 
+def _process_one_primitive(item, tracer_name):
+    """Process a single (question, test_case) pair. Runs in worker process."""
+    qid, code, anonymized, variant, tc_idx, stdin_input, expected_stdout = item
+
+    if not _validate_code(code, stdin_input, expected_stdout):
+        return {"status": "original_fail"}
+
+    if not _validate_code(anonymized, stdin_input, expected_stdout):
+        return {"status": "anonymized_fail"}
+
+    if tracer_name == "uniform":
+        hint_exprs = trace_execution_uniform(anonymized, stdin_input)
+    else:
+        hint_exprs = trace_execution(anonymized, stdin_input)
+
+    total_steps = count_true_steps(anonymized, stdin_input)
+
+    return {
+        "status": "ok",
+        "primitive": {
+            "index": -1,
+            "variant": variant,
+            "question_id": qid,
+            "test_case_idx": tc_idx,
+            "code": anonymized,
+            "original_code": code,
+            "stdin_input": stdin_input,
+            "expected_stdout": expected_stdout,
+            "hint_exprs": hint_exprs,
+            "total_steps": total_steps,
+        },
+    }
+
+
 class CodeOutputTask(BaseTask):
     """
     Code Output prediction task (stdin/stdout).
@@ -190,7 +224,7 @@ class CodeOutputTask(BaseTask):
         "reasoning process in the mind and then provides the user with the answer."
     )
 
-    assistant_prefix = "<think>\nLet me trace through this code step by step."
+    assistant_prefix = "<think>\nLet me answer this step by step."
 
     def create_primitives(self, num_puzzles: int | None, seed: int = 42, **kwargs) -> list[dict]:
         """
@@ -260,20 +294,16 @@ class CodeOutputTask(BaseTask):
         print(f"Collected {len(best_per_question)} unique questions with passed solutions")
 
         # Phase 2: Process each question — parse I/O, anonymize, filter, expand
-        primitives = []
+        # Pre-filter (fast, no subprocess) then parallelize the expensive part
+        work_items = []
         skipped = {"no_io": 0, "too_short": 0, "anonymize_fail": 0,
                    "original_fail": 0, "anonymized_fail": 0}
-        no_io_samples = []  # collect failed questions for diagnostics
+        no_io_samples = []
 
-        for q_idx, (qid, entry) in enumerate(best_per_question.items()):
+        for qid, entry in best_per_question.items():
             code = entry["code"]
             question = entry["question"]
 
-            if (q_idx + 1) % 500 == 0:
-                print(f"  [{q_idx + 1}/{len(best_per_question)}] "
-                      f"{len(primitives)} primitives, skipped: {dict(skipped)}")
-
-            # Parse example I/O from question text
             io_pairs = _parse_example_ios(question)
             if not io_pairs:
                 skipped["no_io"] += 1
@@ -281,13 +311,11 @@ class CodeOutputTask(BaseTask):
                     no_io_samples.append((qid, question))
                 continue
 
-            # Filter by code length
             n_lines = _code_line_count(code)
             if n_lines < MIN_CODE_LINES:
                 skipped["too_short"] += 1
                 continue
 
-            # Anonymize (no entry function for stdin/stdout code)
             try:
                 anonymized, _rename_map = anonymize_code(code, fn_name=None)
                 ast.parse(anonymized)
@@ -296,38 +324,53 @@ class CodeOutputTask(BaseTask):
                 continue
 
             variant = _variant_from_lines(n_lines)
-
-            # Filter I/O pairs by length and cap at MAX_TEST_CASES
             valid_pairs = [
                 (inp, out) for inp, out in io_pairs
                 if len(inp) <= MAX_IO_CHARS and len(out) <= MAX_IO_CHARS
             ][:MAX_TEST_CASES]
 
             for tc_idx, (stdin_input, expected_stdout) in enumerate(valid_pairs):
-                # Validate original code produces expected output
-                if not _validate_code(code, stdin_input, expected_stdout):
-                    skipped["original_fail"] += 1
-                    continue
+                work_items.append((qid, code, anonymized, variant, tc_idx,
+                                   stdin_input, expected_stdout))
 
-                # Validate anonymized code still produces correct output
-                if not _validate_code(anonymized, stdin_input, expected_stdout):
-                    skipped["anonymized_fail"] += 1
-                    continue
+        print(f"Pre-filtered to {len(work_items)} work items "
+              f"(skipped so far: {dict(skipped)})")
 
-                # Generate execution trace hints for this test case
-                hint_exprs = _trace_fn(anonymized, stdin_input)
+        # Parallel validation + tracing
+        # Use ProcessPoolExecutor (non-daemonic workers) because the tracer
+        # and count_true_steps spawn their own child processes.
+        from concurrent.futures import ProcessPoolExecutor
+        import os
 
-                primitives.append({
-                    "index": -1,  # re-indexed below
-                    "variant": variant,
-                    "question_id": qid,
-                    "test_case_idx": tc_idx,
-                    "code": anonymized,
-                    "original_code": code,
-                    "stdin_input": stdin_input,
-                    "expected_stdout": expected_stdout,
-                    "hint_exprs": hint_exprs,
-                })
+        num_workers = min(os.cpu_count() or 4, len(work_items))
+        print(f"Processing with {num_workers} workers...")
+
+        trace_name = tracer_name
+
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            futures = [
+                executor.submit(_process_one_primitive, item, trace_name)
+                for item in work_items
+            ]
+            results = []
+            done = 0
+            for future in futures:
+                results.append(future.result())
+                done += 1
+                if done % 500 == 0:
+                    print(f"  [{done}/{len(work_items)}] processed")
+
+        primitives = []
+        for result in results:
+            if result is None:
+                continue
+            status = result.get("status")
+            if status == "original_fail":
+                skipped["original_fail"] += 1
+            elif status == "anonymized_fail":
+                skipped["anonymized_fail"] += 1
+            elif status == "ok":
+                primitives.append(result["primitive"])
 
         print(f"Skipped: {skipped}")
         print(f"Generated {len(primitives)} primitives from {len(best_per_question) - sum(skipped.values())} questions")
@@ -442,11 +485,9 @@ class CodeOutputTask(BaseTask):
         """
         Custom split ratios for code_output.
 
-        - sft: 7%
-        - rl_train: 57%
-        - rl_val: 7%
-        - classifier: 22%
-        - eval: 7%
+        - sft: ~1000 samples (19.2%)
+        - rl_train: ~2500 samples (48.0%)
+        - eval: remaining (~1706 samples, 32.8%)
         """
         import random
 
@@ -455,11 +496,9 @@ class CodeOutputTask(BaseTask):
         rng.shuffle(indices)
 
         splits = {
-            "sft": (0.0, 0.07),
-            "rl_train": (0.07, 0.64),
-            "rl_val": (0.64, 0.71),
-            "classifier": (0.71, 0.93),
-            "eval": (0.93, 1.0),
+            "sft": (0.0, 0.192),
+            "rl_train": (0.192, 0.672),
+            "eval": (0.672, 1.0),
         }
 
         if split not in splits:
@@ -521,7 +560,8 @@ class CodeOutputTask(BaseTask):
         lines.append("-" * 67)
 
         dist_by_variant = metrics.get("distribution_by_variant", {})
-        for variant in sorted(dist_by_variant.keys()):
+        variant_order = ["short", "medium", "long"]
+        for variant in [v for v in variant_order if v in dist_by_variant] + sorted(set(dist_by_variant) - set(variant_order)):
             d = dist_by_variant[variant]
             lines.append(
                 f"{variant:<16} {d['count']:>7} {d['correct']:>10} {d['incomplete']:>12} {d['abstained']:>11} {d['wrong']:>8}"

@@ -10,6 +10,7 @@ outputs*
 logs*
 
 artifacts/
+docs/
 temp_connections/
 
 scripts/

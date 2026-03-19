@@ -2,11 +2,28 @@
 Training commands - SFT, RL, classifier training, and checkpoint conversion.
 """
 
+import re
 from pathlib import Path
 
 from pipeline.core.io import load_json
 from pipeline.core.method import Method
+from pipeline.core.utils import model_short_name as _get_model_short_name
 from pipeline.tasks import get_task
+
+
+def _model_project_tag(model_path: str) -> str:
+    """Extract model family for wandb project names, stripping experiment suffixes.
+
+    Examples:
+        "Qwen/Qwen3-4B"           -> "qwen3-4b"
+        ".../sft/qwen3-4b-up4x/model" -> "qwen3-4b"
+        ".../sft/qwen2.5-1.5b/model"  -> "qwen2.5-1.5b"
+        ".../rl/default/model"         -> "default"
+    """
+    name = _get_model_short_name(model_path)
+    # Truncate after model size indicator (e.g., "qwen3-4b-up4x" -> "qwen3-4b")
+    match = re.match(r'(.*?\d+\.?\d*b)', name, re.IGNORECASE)
+    return match.group(1) if match else name
 
 
 def train_sft(
@@ -22,8 +39,8 @@ def train_sft(
     learning_rate: float = 1e-5,
     warmup_ratio: float = 0.1,
     max_length: int = 4096,
-    eval_split: float = 0.05,
-    save_steps: int = 100,
+    eval_split: float = 0.0,
+    save_steps: int = 0,
     logging_steps: int = 10,
     bf16: bool = True,
     report_to: str = "wandb",
@@ -32,6 +49,9 @@ def train_sft(
     include_abstained: bool = True,
     include_wrong_valid_format: bool = False,
     cleanup_checkpoints: bool = True,
+    upsample_hint: int = 1,
+    max_correct: int | None = None,
+    upsample_abstain: int = 1,
 ) -> Path:
     """
     Train an SFT model on generated dataset.
@@ -104,9 +124,9 @@ def train_sft(
         method.ensure_sft_run_dir(task_name, run_id)
         output_path = method.sft_model_path(task_name, run_id)
 
-    # Generate project name if not provided: {task}-sft
+    # Generate project name if not provided: {task}-sft-{model_short_name}
     if project_name is None:
-        project_name = f"{task_name}-sft"
+        project_name = f"{task_name}-sft-{_model_project_tag(base_model)}"
 
     # Generate experiment name if not provided
     # Format: {method}-{run_id}-{YYYYMMDD}
@@ -169,6 +189,38 @@ def train_sft(
 
     if not filtered_examples:
         raise ValueError("No valid examples found in dataset!")
+
+    # Downsample correct examples if requested
+    if max_correct is not None:
+        import random
+        correct = [ex for ex in filtered_examples if ex.get("correct", False)]
+        non_correct = [ex for ex in filtered_examples if not ex.get("correct", False)]
+        if len(correct) > max_correct:
+            rng = random.Random(42)
+            correct = rng.sample(correct, max_correct)
+            filtered_examples = correct + non_correct
+            rng.shuffle(filtered_examples)
+            print(f"Downsampled correct to {max_correct} → {len(filtered_examples)} total ({max_correct} correct, {len(non_correct)} non-correct)")
+
+    # Upsample abstained examples
+    if upsample_abstain > 1:
+        abstain_examples = [ex for ex in filtered_examples if is_abstained(ex)]
+        if abstain_examples:
+            extra_copies = abstain_examples * (upsample_abstain - 1)
+            filtered_examples = filtered_examples + extra_copies
+            print(f"Upsampled {len(abstain_examples)} abstained examples {upsample_abstain}x → "
+                  f"{len(abstain_examples) * upsample_abstain} copies (total: {len(filtered_examples)})")
+
+    # Upsample hint-containing examples
+    if upsample_hint > 1:
+        hint_examples = [ex for ex in filtered_examples if "<request>" in ex.get("generation", "")]
+        if hint_examples:
+            extra_copies = hint_examples * (upsample_hint - 1)
+            filtered_examples = filtered_examples + extra_copies
+            print(f"Upsampled {len(hint_examples)} hint examples {upsample_hint}x → "
+                  f"{len(hint_examples) * upsample_hint} copies (total: {len(filtered_examples)})")
+        else:
+            print(f"--upsample-hint={upsample_hint} specified but no hint examples found")
 
     # Load tokenizer
     print(f"Loading tokenizer for {base_model}")
@@ -254,13 +306,21 @@ def train_sft(
     dataset = Dataset.from_list(formatted)
 
     # Train/eval split
-    split = dataset.train_test_split(test_size=eval_split, seed=42)
-    print(f"Train: {len(split['train'])}, Eval: {len(split['test'])}")
+    if eval_split > 0:
+        split = dataset.train_test_split(test_size=eval_split, seed=42)
+        train_dataset = split["train"]
+        eval_dataset = split["test"]
+        print(f"Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
+    else:
+        train_dataset = dataset
+        eval_dataset = None
+        print(f"Train: {len(train_dataset)}, Eval: disabled")
 
     # Data collator - standard collator handles completion_mask
     data_collator = None
 
     # Training config
+    save_strategy = "no" if save_steps <= 0 else "steps"
     training_args = SFTConfig(
         output_dir=str(output_path),
         num_train_epochs=epochs,
@@ -270,10 +330,11 @@ def train_sft(
         warmup_ratio=warmup_ratio,
         max_length=max_length,
         logging_steps=logging_steps,
-        save_steps=save_steps,
-        eval_strategy="steps",
-        eval_steps=save_steps,
-        save_total_limit=3,
+        save_strategy=save_strategy,
+        save_steps=save_steps if save_steps > 0 else None,
+        eval_strategy="steps" if eval_dataset is not None else "no",
+        eval_steps=save_steps if eval_dataset is not None and save_steps > 0 else None,
+        save_total_limit=3 if save_strategy == "steps" else None,
         bf16=bf16,
         report_to=report_to,
         run_name=experiment_name,
@@ -289,8 +350,8 @@ def train_sft(
     trainer = SFTTrainer(
         model=base_model,
         args=training_args,
-        train_dataset=split["train"],
-        eval_dataset=split["test"],
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         data_collator=data_collator,
     )
 
@@ -403,7 +464,9 @@ def train_rl(
         if train_prompts_path is None:
             train_prompts_path = method.prompts_path(task_name, "rl_train")
         if val_prompts_path is None:
-            val_prompts_path = method.prompts_path(task_name, "rl_val")
+            candidate = method.prompts_path(task_name, "rl_val")
+            if candidate.exists():
+                val_prompts_path = candidate
 
     # Determine the actor model (base_model or sft_model_path)
     if base_model is not None:
@@ -435,14 +498,14 @@ def train_rl(
     # Validate required paths
     if train_prompts_path is None:
         raise ValueError("--train-prompts is required (or use --method)")
-    if val_prompts_path is None:
-        raise ValueError("--val-prompts is required (or use --method)")
+    # val_prompts_path is optional — training will skip validation if not provided
     if output_path is None or checkpoints_dir is None or rollouts_dir is None:
         raise ValueError("--output is required (or use --method)")
 
     # Convert all paths to absolute paths for Ray workers (they run in different working directories)
     train_prompts_path = Path(train_prompts_path).resolve()
-    val_prompts_path = Path(val_prompts_path).resolve()
+    if val_prompts_path is not None:
+        val_prompts_path = Path(val_prompts_path).resolve()
     checkpoints_dir = Path(checkpoints_dir).resolve()
     rollouts_dir = Path(rollouts_dir).resolve()
     output_path = Path(output_path).resolve()
@@ -501,9 +564,9 @@ def train_rl(
     rollouts_dir.mkdir(parents=True, exist_ok=True)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Generate project name if not provided: {task}-rl
+    # Generate project name if not provided: {task}-rl-{model_short_name}
     if project_name is None:
-        project_name = f"{task_name}-rl"
+        project_name = f"{task_name}-rl-{_model_project_tag(actor_model)}"
 
     # Generate experiment name if not provided
     # Format: {method}-{run_id}-{YYYYMMDD}
@@ -528,7 +591,7 @@ def train_rl(
     print(f"Run ID: {run_id or 'default'}")
     print(f"Actor Model: {actor_model}")
     print(f"Train Prompts: {train_prompts_path}")
-    print(f"Val Prompts: {val_prompts_path}")
+    print(f"Val Prompts: {val_prompts_path or 'None (no validation)'}")
     print(f"Reward Function: {reward_function_path}:{reward_function_name}")
     print(f"Reward Kwargs: {reward_kwargs}")
     print(f"Rollout Backend: {rollout_backend}")
@@ -557,7 +620,7 @@ def train_rl(
         f"hydra.run.dir={checkpoints_dir}",
         "algorithm.adv_estimator=grpo",
         f"data.train_files={train_prompts_path}",
-        f"data.val_files={val_prompts_path}",
+        f"data.val_files={val_prompts_path or train_prompts_path}",
         f"data.train_batch_size={train_batch_size}",
         f"data.val_batch_size={val_batch_size}",
         f"data.max_prompt_length={max_prompt_length}",
@@ -642,6 +705,12 @@ def train_rl(
             cmd.append(f"+actor_rollout_ref.rollout.max_hints={max_hints}")
         # Add max_turns for loop bound (model gets extra turns after hints exhausted)
         cmd.append(f"+actor_rollout_ref.rollout.max_turns={max_turns}")
+
+    # Add custom stop strings for rollout if specified in method config
+    if method is not None and method.stop_strings is not None:
+        # Pass as comma-separated list; verl rollout will parse it
+        stop_strings_str = ",".join(method.stop_strings)
+        cmd.append(f'+actor_rollout_ref.rollout.stop_strings="{stop_strings_str}"')
 
     # Add reward kwargs if specified in method config
     # Use + prefix to add new config keys

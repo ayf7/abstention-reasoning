@@ -1,29 +1,25 @@
-"""Execution-uniform tracing for code_output hint generation.
+"""Strategic execution tracing for code_output hint generation.
 
-Unlike tracer.py which places checkpoints between top-level statements
-(making loops opaque), this tracer distributes checkpoints evenly across
-*execution units* — where each loop iteration counts as a separate unit.
+Produces two strategically-placed hints:
+1. State after the first loop completion past 50% of execution
+2. State right before the final print/output statement
 
 Two-pass approach:
-  1. Counting pass: instrument code with a lightweight global counter
-     to measure total execution units. No state capture.
-  2. Capture pass: knowing the total, compute 5 evenly-spaced checkpoint
-     positions and instrument code to capture state only at those points.
-
-This ensures hints are roughly uniformly distributed across the actual
-computation, even for loop-heavy competitive programming code.
+  1. Counting pass: count execution steps, identify post-loop completion
+     points and print statement locations.
+  2. Capture pass: capture variable state at the two chosen points.
 """
 
 import ast
 import multiprocessing
 import sys
-import textwrap
 from io import StringIO
 
 # Names to exclude from variable snapshots
 _INTERNAL_NAMES = frozenset({
     "_cp_", "_checkpoints_", "_copy_", "_snap_", "_k_", "_v_", "_n_", "_d_",
     "_step_", "_targets_", "_total_steps_",
+    "_post_loop_", "_print_steps_", "_in_loop_",
     "__builtins__", "__name__", "__doc__",
     "__package__", "__loader__", "__spec__", "__file__",
 })
@@ -31,19 +27,79 @@ _INTERNAL_NAMES = frozenset({
 MAX_REPR_LEN = 80
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def count_true_steps(code: str, stdin_input: str, timeout: float = 5) -> int | None:
+    """Count total line executions using sys.settrace.
+
+    Counts every 'line' event including function calls, recursion, etc.
+    Returns the count, or None on failure/timeout.
+    """
+    result_queue = multiprocessing.Queue()
+    proc = multiprocessing.Process(
+        target=_true_steps_worker,
+        args=(code, stdin_input, result_queue),
+    )
+    proc.start()
+    proc.join(timeout=timeout)
+
+    if proc.is_alive():
+        proc.kill()
+        proc.join(timeout=2)
+        return None
+
+    if proc.exitcode != 0:
+        return None
+
+    try:
+        return result_queue.get_nowait()
+    except Exception:
+        return None
+
+
+def _true_steps_worker(
+    code: str,
+    stdin_input: str,
+    result_queue: multiprocessing.Queue,
+):
+    """Subprocess worker: run code with sys.settrace to count line executions."""
+    sys.stdin = StringIO(stdin_input)
+    sys.stdout = StringIO()
+    sys.stderr = StringIO()
+
+    count = 0
+
+    def tracer(frame, event, arg):
+        nonlocal count
+        if event == 'line':
+            count += 1
+        return tracer
+
+    namespace = {"__builtins__": __builtins__, "__name__": "__main__"}
+    try:
+        compiled = compile(code, "<string>", "exec")
+        sys.settrace(tracer)
+        exec(compiled, namespace)
+        sys.settrace(None)
+    except Exception:
+        sys.settrace(None)
+        result_queue.put(None)
+        return
+
+    result_queue.put(count)
+
+
 def trace_execution_uniform(
-    code: str, stdin_input: str, num_hints: int = 5
+    code: str, stdin_input: str, num_hints: int = 2
 ) -> list[str]:
-    """Execute code with stdin, capture variable state at ~num_hints
-    evenly-spaced execution points.
+    """Execute code with stdin, capture variable state at two strategic points.
 
-    Returns list of hint strings like:
-        "After step 42/200 (21%): var_1 = 5, var_2 = [2, 3, 1]"
+    Hint 1: after the first loop completion past 50% of execution.
+    Hint 2: right before the final print() call.
 
-    Returns empty list if tracing fails for any reason.
-
-    Two-pass: first counts execution units, then captures state at
-    evenly-spaced positions.
+    Returns list of hint strings. Returns empty list on failure.
     """
     try:
         tree = ast.parse(code)
@@ -58,16 +114,34 @@ def trace_execution_uniform(
     if len(body) < 2:
         return []
 
-    # --- Pass 1: count total execution units ---
+    # --- Pass 1: count steps + metadata ---
+    metadata = _run_counting_pass(code, body, indent, in_function, stdin_input)
+    if metadata is None:
+        return []
+
+    total_steps = metadata["total_steps"]
+    if total_steps < 2:
+        return []
+
+    choice = _choose_targets(
+        total_steps,
+        sorted(metadata.get("post_loop_steps", [])),
+        sorted(metadata.get("print_steps", [])),
+    )
+    targets = choice["targets"]
+    if not targets:
+        return []
+
+    # --- Pass 2: capture state at targets ---
     try:
-        counting_code = _instrument_counting(code, body, indent, in_function)
+        capture_code = _instrument_capture(code, body, indent, targets, in_function)
     except Exception:
         return []
 
     result_queue = multiprocessing.Queue()
     proc = multiprocessing.Process(
-        target=_counting_worker,
-        args=(counting_code, stdin_input, result_queue),
+        target=_capture_worker,
+        args=(capture_code, stdin_input, result_queue),
     )
     proc.start()
     proc.join(timeout=5)
@@ -81,61 +155,116 @@ def trace_execution_uniform(
         return []
 
     try:
-        total_steps = result_queue.get_nowait()
+        return result_queue.get_nowait()
     except Exception:
         return []
 
-    if not isinstance(total_steps, int) or total_steps < 2:
-        return []
 
-    # Compute evenly-spaced checkpoint positions (1-indexed)
-    targets = set()
-    for i in range(1, num_hints + 1):
-        pos = i * total_steps // (num_hints + 1)
-        targets.add(pos)
-    # Always include the final step
-    targets.add(total_steps)
-    # Cap at num_hints targets (keep the evenly-spaced ones + final)
-    targets = sorted(targets)
-    if len(targets) > num_hints:
-        # Keep evenly spaced subset
-        step = len(targets) / num_hints
-        targets = [targets[int(i * step)] for i in range(num_hints)]
-        targets = sorted(set(targets))
+def profile_execution(code: str, stdin_input: str) -> dict | None:
+    """Run counting pass only, return execution metadata for profiling.
 
-    # --- Pass 2: capture state at target positions ---
+    Returns dict with hint placement info, loop dominance stats, etc.
+    Returns None on failure.
+    """
     try:
-        capture_code = _instrument_capture(code, body, indent, targets, in_function)
-    except Exception:
-        return []
-
-    result_queue2 = multiprocessing.Queue()
-    proc2 = multiprocessing.Process(
-        target=_capture_worker,
-        args=(capture_code, stdin_input, result_queue2),
-    )
-    proc2.start()
-    proc2.join(timeout=5)
-
-    if proc2.is_alive():
-        proc2.kill()
-        proc2.join(timeout=2)
-        return []
-
-    if proc2.exitcode != 0:
-        return []
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
 
     try:
-        return result_queue2.get_nowait()
-    except Exception:
-        return []
+        body, indent, in_function = _find_entry_body(tree, code)
+    except ValueError:
+        return None
+
+    if len(body) < 2:
+        return None
+
+    num_top_loops = sum(1 for s in body if isinstance(s, (ast.For, ast.While)))
+
+    metadata = _run_counting_pass(code, body, indent, in_function, stdin_input)
+    if metadata is None:
+        return None
+
+    total_steps = metadata["total_steps"]
+    if total_steps < 2:
+        return None
+
+    post_loop_steps = sorted(metadata.get("post_loop_steps", []))
+    print_steps = sorted(metadata.get("print_steps", []))
+    in_loop_steps = metadata.get("in_loop_steps", 0)
+
+    choice = _choose_targets(total_steps, post_loop_steps, print_steps)
+
+    return {
+        "total_steps": total_steps,
+        "in_loop_steps": in_loop_steps,
+        "loop_fraction": 100 * in_loop_steps / total_steps,
+        "num_top_loops": num_top_loops,
+        "num_post_loop_points": len(set(post_loop_steps)),
+        "num_print_steps": len(set(print_steps)),
+        **choice,
+    }
 
 
 # ---------------------------------------------------------------------------
-# AST helpers (shared with tracer.py, duplicated to keep modules independent)
+# Target selection
 # ---------------------------------------------------------------------------
 
-def _find_entry_body(tree: ast.Module, source: str) -> tuple[list[ast.stmt], str, bool]:
+def _choose_targets(
+    total_steps: int,
+    post_loop_steps: list[int],
+    print_steps: list[int],
+) -> dict:
+    """Choose the two hint target step numbers.
+
+    Hint 1: first post-loop-completion step >= 50% of total execution.
+             Falls back to ceil(50%) if no qualifying post-loop step exists.
+    Hint 2: step of the last print() execution (state captured before it runs).
+             Falls back to total_steps if no print detected.
+
+    Returns dict with targets list and metadata for profiling.
+    """
+    midpoint = total_steps * 0.5
+
+    # Hint 1: first post-loop step >= 50%
+    hint1 = None
+    hint1_is_post_loop = False
+    for s in post_loop_steps:
+        if s >= midpoint:
+            hint1 = s
+            hint1_is_post_loop = True
+            break
+    if hint1 is None:
+        hint1 = min(int(midpoint) + 1, total_steps)
+
+    # Hint 2: last print execution
+    hint2_is_print = False
+    if print_steps:
+        hint2 = print_steps[-1]
+        hint2_is_print = True
+    else:
+        hint2 = total_steps
+
+    targets = sorted(set([hint1, hint2]))
+
+    return {
+        "targets": targets,
+        "hint1_step": hint1,
+        "hint1_pct": 100 * hint1 / total_steps,
+        "hint1_is_post_loop": hint1_is_post_loop,
+        "hint2_step": hint2,
+        "hint2_pct": 100 * hint2 / total_steps,
+        "hint2_is_print": hint2_is_print,
+    }
+
+
+# ---------------------------------------------------------------------------
+# AST helpers
+# ---------------------------------------------------------------------------
+
+def _find_entry_body(
+    tree: ast.Module, source: str
+) -> tuple[list[ast.stmt], str, bool]:
     """Find the main body of statements to trace.
 
     Strategy:
@@ -211,32 +340,96 @@ def _get_indent(source: str, node: ast.stmt) -> str:
     return ""
 
 
+def _is_print_call(stmt: ast.stmt) -> bool:
+    """Check if a statement is a bare print() call."""
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+        func = stmt.value.func
+        if isinstance(func, ast.Name) and func.id == "print":
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Pass 1: counting instrumentation
 # ---------------------------------------------------------------------------
 
-def _instrument_counting(source: str, body: list[ast.stmt], indent: str, in_function: bool) -> str:
-    """Insert lightweight step counters into the code.
+def _run_counting_pass(
+    code: str,
+    body: list[ast.stmt],
+    indent: str,
+    in_function: bool,
+    stdin_input: str,
+) -> dict | None:
+    """Run the counting pass in a subprocess, return metadata dict or None."""
+    try:
+        counting_code = _instrument_counting(code, body, indent, in_function)
+    except Exception:
+        return None
 
-    Inserts `_step_ += 1` after each non-loop statement and at the end of
-    each loop body (so each iteration counts as one step). Recurses into
-    nested loops.
+    result_queue = multiprocessing.Queue()
+    proc = multiprocessing.Process(
+        target=_counting_worker,
+        args=(counting_code, stdin_input, result_queue),
+    )
+    proc.start()
+    proc.join(timeout=5)
+
+    if proc.is_alive():
+        proc.kill()
+        proc.join(timeout=2)
+        return None
+
+    if proc.exitcode != 0:
+        return None
+
+    try:
+        metadata = result_queue.get_nowait()
+    except Exception:
+        return None
+
+    if not isinstance(metadata, dict) or "total_steps" not in metadata:
+        return None
+
+    return metadata
+
+
+def _instrument_counting(
+    source: str,
+    body: list[ast.stmt],
+    indent: str,
+    in_function: bool,
+) -> str:
+    """Insert step counters + metadata trackers into the code.
+
+    Tracks:
+    - _step_: total execution steps
+    - _post_loop_: set of step numbers immediately after a loop completes
+                   (entry-body level only)
+    - _print_steps_: set of step numbers that are print() calls
+    - _in_loop_: count of steps executed inside any loop body
     """
     lines = source.splitlines()
-    insertions: list[tuple[int, str, str]] = []  # (line_no, code, indent)
+    insertions: list[tuple[int, str, str]] = []
 
-    _collect_counter_insertions(body, indent, insertions)
+    _collect_counter_insertions(body, indent, insertions, in_loop=False)
 
-    # If entry body is inside a function, inject global declaration
     if in_function:
-        first_line = body[0].lineno  # 1-indexed
-        insertions.append((first_line - 1, "global _step_", indent))
+        first_line = body[0].lineno
+        insertions.append((
+            first_line - 1,
+            "global _step_, _post_loop_, _print_steps_, _in_loop_",
+            indent,
+        ))
 
-    # Insert from bottom to top
     for line_no, code, ind in sorted(insertions, key=lambda x: x[0], reverse=True):
         lines.insert(line_no, ind + code)
 
-    infra = ["_step_ = 0"]
+    infra = [
+        "_step_ = 0",
+        "_post_loop_ = set()",
+        "_print_steps_ = set()",
+        "_in_loop_ = 0",
+    ]
     return "\n".join(infra + lines)
 
 
@@ -244,30 +437,35 @@ def _collect_counter_insertions(
     stmts: list[ast.stmt],
     indent: str,
     insertions: list[tuple[int, str, str]],
+    in_loop: bool = False,
 ):
-    """Recursively collect counter insertion points for a block of statements.
+    """Recursively collect counter + metadata insertion points.
 
-    Inserts `_step_ += 1` as the first statement in each loop body (counting
-    each iteration as one execution unit) and after each non-loop top-level
-    statement. Recurses into nested loops only.
-
-    Inserting at the *start* of loop bodies (before the first statement)
-    avoids indentation ambiguity at block boundaries.
+    Each non-loop statement gets `_step_ += 1`. Additionally:
+    - Inside loops: also increments `_in_loop_`
+    - After a loop at entry-body level (in_loop=False): records post-loop step
+    - Print calls: records print step
     """
+    prev_was_loop = False
     for stmt in stmts:
         if isinstance(stmt, (ast.For, ast.While)):
             loop_body = stmt.body
             if loop_body:
                 loop_indent = " " * loop_body[0].col_offset
-                # Insert counter at start of loop body (before first stmt)
-                first_line = loop_body[0].lineno  # 1-indexed
-                insertions.append((first_line - 1, "_step_ += 1", loop_indent))
-                # Recurse into nested loops
-                _collect_counter_insertions(loop_body, loop_indent, insertions)
+                _collect_counter_insertions(
+                    loop_body, loop_indent, insertions, in_loop=True,
+                )
+            prev_was_loop = True
         else:
-            # Non-loop statement: count it by inserting before the next line
-            # Use the statement's own start line to insert before it
-            insertions.append((stmt.lineno - 1, "_step_ += 1", indent))
+            code = "_step_ += 1"
+            if in_loop:
+                code += f"\n{indent}_in_loop_ += 1"
+            if prev_was_loop and not in_loop:
+                code += f"\n{indent}_post_loop_.add(_step_)"
+            if _is_print_call(stmt):
+                code += f"\n{indent}_print_steps_.add(_step_)"
+            insertions.append((stmt.lineno - 1, code, indent))
+            prev_was_loop = False
 
 
 def _counting_worker(
@@ -275,7 +473,7 @@ def _counting_worker(
     stdin_input: str,
     result_queue: multiprocessing.Queue,
 ):
-    """Subprocess worker: execute instrumented code, return total step count."""
+    """Subprocess worker: execute instrumented code, return metadata dict."""
     sys.stdin = StringIO(stdin_input)
     sys.stdout = StringIO()
     sys.stderr = StringIO()
@@ -284,10 +482,15 @@ def _counting_worker(
     try:
         exec(modified_code, namespace)
     except Exception:
-        result_queue.put(0)
+        result_queue.put({})
         return
 
-    result_queue.put(namespace.get("_step_", 0))
+    result_queue.put({
+        "total_steps": namespace.get("_step_", 0),
+        "post_loop_steps": sorted(namespace.get("_post_loop_", set())),
+        "print_steps": sorted(namespace.get("_print_steps_", set())),
+        "in_loop_steps": namespace.get("_in_loop_", 0),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -303,39 +506,37 @@ def _instrument_capture(
 ) -> str:
     """Insert checkpoint captures at target step positions.
 
-    Same step-counting logic as pass 1, but instead of just incrementing,
-    checks if the current step is a target and captures state if so.
+    Same step-counting logic as pass 1 (recurse into loops, count non-loop
+    statements), but checks if the current step is a target and captures
+    state if so.
     """
     lines = source.splitlines()
-    insertions: list[tuple[int, str, str]] = []  # (line_no, code, indent)
+    insertions: list[tuple[int, str, str]] = []
 
     _collect_capture_insertions(body, indent, insertions)
 
-    # If entry body is inside a function, inject global declarations
     if in_function:
-        first_line = body[0].lineno  # 1-indexed
+        first_line = body[0].lineno
         insertions.append((
             first_line - 1,
             "global _step_, _targets_, _checkpoints_, _cp_",
             indent,
         ))
 
-    # Insert from bottom to top
     for line_no, code, ind in sorted(insertions, key=lambda x: x[0], reverse=True):
         lines.insert(line_no, ind + code)
 
-    # Prepend infrastructure
     infra = [
         "import copy as _copy_",
         "_step_ = 0",
         f"_targets_ = set({targets!r})",
         "_checkpoints_ = []",
-        "def _cp_(_d_):",
+        "def _cp_(_d_, _line_):",
         "    _snap_ = {}",
         "    for _k_, _v_ in _d_.items():",
         "        try: _snap_[_k_] = _copy_.deepcopy(_v_)",
         "        except Exception: _snap_[_k_] = _v_",
-        "    _checkpoints_.append((_step_, _snap_))",
+        "    _checkpoints_.append((_step_, _line_, _snap_))",
     ]
 
     return "\n".join(infra + lines)
@@ -346,27 +547,21 @@ def _collect_capture_insertions(
     indent: str,
     insertions: list[tuple[int, str, str]],
 ):
-    """Recursively collect capture insertion points for a block of statements.
+    """Recursively collect capture insertion points.
 
-    Same strategy as _collect_counter_insertions: insert at start of loop
-    bodies and before non-loop statements to avoid indentation issues.
+    Must match the same recursion/counting pattern as _collect_counter_insertions
+    so that step numbers are identical between the two passes.
     """
     for stmt in stmts:
         if isinstance(stmt, (ast.For, ast.While)):
             loop_body = stmt.body
             if loop_body:
                 loop_indent = " " * loop_body[0].col_offset
-                first_line = loop_body[0].lineno
-                capture_line = (
-                    "_step_ += 1\n"
-                    f"{loop_indent}if _step_ in _targets_: _cp_(dict(locals()))"
-                )
-                insertions.append((first_line - 1, capture_line, loop_indent))
                 _collect_capture_insertions(loop_body, loop_indent, insertions)
         else:
             capture_line = (
                 "_step_ += 1\n"
-                f"{indent}if _step_ in _targets_: _cp_(dict(locals()))"
+                f"{indent}if _step_ in _targets_: _cp_(dict(locals()), {stmt.lineno})"
             )
             insertions.append((stmt.lineno - 1, capture_line, indent))
 
@@ -403,20 +598,19 @@ def _capture_worker(
 # ---------------------------------------------------------------------------
 
 def _format_hints(
-    checkpoints: list[tuple[int, dict]],
+    checkpoints: list[tuple[int, int, dict]],
     total_steps: int,
 ) -> list[str]:
     """Format checkpoint data into human-readable hint strings.
 
-    Each hint shows the variable state at that execution point.
-    Format: "After step 42/200: var_1 = 5, var_2 = [2, 3, 1]"
+    Format: "After step 42/200 (21%, line 15): var_1 = 5, var_2 = [2, 3, 1]"
     """
     import types
     excluded_types = (type, types.ModuleType, types.FunctionType)
 
     hints = []
 
-    for step_num, variables in checkpoints:
+    for step_num, line_num, variables in checkpoints:
         filtered = {}
         for name, value in sorted(variables.items()):
             if name.startswith("_") and (name.endswith("_") or name in _INTERNAL_NAMES):
@@ -443,6 +637,6 @@ def _format_hints(
 
         vars_str = ", ".join(f"{name} = {val}" for name, val in filtered.items())
         pct = int(100 * step_num / total_steps) if total_steps > 0 else 0
-        hints.append(f"After step {step_num}/{total_steps} ({pct}%): {vars_str}")
+        hints.append(f"After step {step_num}/{total_steps} ({pct}%, line {line_num}): {vars_str}")
 
     return hints

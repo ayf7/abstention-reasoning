@@ -237,6 +237,9 @@ def cmd_train_sft(args):
         include_abstained=not args.no_abstained,
         include_wrong_valid_format=args.include_wrong_valid_format,
         cleanup_checkpoints=not args.keep_checkpoints,
+        upsample_hint=args.upsample_hint,
+        max_correct=args.max_correct,
+        upsample_abstain=args.upsample_abstain,
     )
 
 
@@ -405,7 +408,7 @@ def main():
     p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/results/{split}_{model}.json)")
     p.add_argument("--batch-size", type=int, default=16, help="Batch size")
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
-    p.add_argument("--temperature", type=float, default=0.0, help="Temperature (0 for greedy)")
+    p.add_argument("--temperature", type=float, default=1.0, help="Temperature")
     p.add_argument("--top-p", type=float, default=1.0, help="Top-p")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
@@ -452,8 +455,8 @@ def main():
     p.add_argument("--learning-rate", type=float, default=1e-5, help="Learning rate")
     p.add_argument("--warmup-ratio", type=float, default=0.1, help="Warmup ratio")
     p.add_argument("--max-length", type=int, default=4096, help="Maximum sequence length")
-    p.add_argument("--eval-split", type=float, default=0.05, help="Fraction of data for evaluation")
-    p.add_argument("--save-steps", type=int, default=100, help="Save checkpoint every N steps")
+    p.add_argument("--eval-split", type=float, default=0.0, help="Fraction of data for evaluation (0 = disabled)")
+    p.add_argument("--save-steps", type=int, default=0, help="Save checkpoint every N steps (0 = final only)")
     p.add_argument("--logging-steps", type=int, default=10, help="Log every N steps")
     p.add_argument("--no-bf16", action="store_true", help="Disable bfloat16 training")
     p.add_argument("--report-to", default="wandb", help="Reporting integration (wandb, none)")
@@ -462,6 +465,9 @@ def main():
     p.add_argument("--no-abstained", action="store_true", help="Exclude abstained examples (by default they're included)")
     p.add_argument("--include-wrong-valid-format", action="store_true", help="Include wrong answers with valid format (task-specific, e.g., valid UCI but wrong move for chess)")
     p.add_argument("--keep-checkpoints", action="store_true", help="Keep intermediate checkpoints after training (by default they are deleted)")
+    p.add_argument("--upsample-hint", type=int, default=1, help="Upsample hint-containing examples by this factor (e.g., 4 = 4x copies)")
+    p.add_argument("--max-correct", type=int, default=None, help="Downsample correct examples to at most this many (random subset, seed=42)")
+    p.add_argument("--upsample-abstain", type=int, default=1, help="Upsample abstained examples by this factor (e.g., 2 = 2x copies)")
     p.set_defaults(func=cmd_train_sft)
 
     # train_rl

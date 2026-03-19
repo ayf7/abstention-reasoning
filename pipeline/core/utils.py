@@ -95,11 +95,17 @@ def model_short_name(model_path: str) -> str:
 
     Examples:
         "Qwen/Qwen3-14B" -> "qwen3-14b"
+        "artifacts/countdown/simple/models/sft/qwen3-4b/model" -> "qwen3-4b"
         "artifacts/countdown/models/sft" -> "sft"
         "/path/to/my-model" -> "my-model"
     """
-    # Get last component of path
-    name = model_path.rstrip("/").split("/")[-1]
+    # Get last component of path, skipping trailing "model" directory
+    parts = model_path.rstrip("/").split("/")
+    name = parts[-1]
+    if name == "model" and len(parts) > 1:
+        name = parts[-2]
+    if name == "default":
+        name = "qwen2.5-1.5b"
     # Lowercase and clean up
     name = name.lower().replace(" ", "-")
     return name

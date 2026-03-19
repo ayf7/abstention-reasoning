@@ -11,4 +11,7 @@ Input:
 
 If you believe you cannot determine the correct output, output <abstain> instead of guessing.
 
-Trace through the code step by step in <think> </think> tags, carefully tracking variable values and control flow as the program executes with the given input. When you are finished thinking, close with </think> and IMMEDIATELY provide your final answer in <answer> </answer> tags, or <abstain> if you choose not to answer. No text between </think> and your answer.
+Reason about what the output will be in <think> </think> tags. When you are finished thinking, close with </think> and provide the program's exact output in <answer> </answer> tags, or <abstain> if you choose not to answer. Preserve the output format exactly, including newlines. No text between </think> and your answer.
+
+For example: <answer> 42 </answer> or <answer> YES
+NO </answer>

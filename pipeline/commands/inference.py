@@ -104,6 +104,7 @@ def _format_hint_tables(
     max_hints: int,
     row_header: str,
     section_title: str,
+    actual_max_hints: int | None = None,
 ) -> list[str]:
     """Format counts and accuracy tables for a set of row labels.
 
@@ -111,13 +112,27 @@ def _format_hint_tables(
         row_labels: Sorted list of row label strings (variants or levels).
         counts_map: {num_hints: {label: count}} dict.
         correct_map: {num_hints: {label: correct_count}} dict.
-        max_hints: Maximum hint count to display columns for.
+        max_hints: Maximum hint count to display columns for. The last column
+            becomes a "N+" bucket if actual_max_hints > max_hints.
         row_header: Column header for the row label (e.g. "Type", "Level").
         section_title: Title prefix (e.g. "TYPE", "DIFFICULTY").
+        actual_max_hints: True maximum hint count in the data (for folding overflow).
     """
+    if actual_max_hints is None:
+        actual_max_hints = max_hints
+    has_overflow = actual_max_hints > max_hints
 
     def get_val(mapping, h, label):
         return mapping.get(str(h), {}).get(label, mapping.get(h, {}).get(label, 0))
+
+    def get_val_with_overflow(mapping, h, label):
+        """Get value, folding overflow hints into the last displayed column."""
+        if h == max_hints and has_overflow:
+            total = 0
+            for oh in range(max_hints, actual_max_hints + 1):
+                total += get_val(mapping, oh, label)
+            return total
+        return get_val(mapping, h, label)
 
     # Compute label column width from longest label
     label_w = max(len(row_header), max((len(l) for l in row_labels), default=8)) + 2
@@ -136,7 +151,8 @@ def _format_hint_tables(
 
     header = f"{row_header:<{label_w}}"
     for h in range(max_hints + 1):
-        header += f"{h:>{num_col_w}}"
+        col_label = f"{h}+" if (h == max_hints and has_overflow) else str(h)
+        header += f"{col_label:>{num_col_w}}"
     header += f"{'Total':>{num_col_w}}{'Hints':>{num_col_w}}"
     lines.append(header)
     lines.append("-" * total_w)
@@ -150,11 +166,13 @@ def _format_hint_tables(
         row_total = 0
         row_hints = 0
         for h in range(max_hints + 1):
-            c = get_val(counts_map, h, label)
+            c = get_val_with_overflow(counts_map, h, label)
             row_total += c
-            row_hints += h * c
             col_totals[h] += c
             row += f"{c:>{num_col_w}}"
+        # Compute true hint count from all data (not capped)
+        for h in range(actual_max_hints + 1):
+            row_hints += h * get_val(counts_map, h, label)
         grand_total += row_total
         grand_hints += row_hints
         row += f"{row_total:>{num_col_w}}{row_hints:>{num_col_w}}"
@@ -178,7 +196,8 @@ def _format_hint_tables(
 
     header = f"{row_header:<{label_w}}"
     for h in range(max_hints + 1):
-        header += f"{h:>{acc_col_w}}"
+        col_label = f"{h}+" if (h == max_hints and has_overflow) else str(h)
+        header += f"{col_label:>{acc_col_w}}"
     header += f"{'Total':>{acc_col_w}}"
     lines.append(header)
     lines.append("-" * acc_total_w)
@@ -193,8 +212,8 @@ def _format_hint_tables(
         row_correct = 0
         row_total = 0
         for h in range(max_hints + 1):
-            c = get_val(counts_map, h, label)
-            corr = get_val(correct_map, h, label)
+            c = get_val_with_overflow(counts_map, h, label)
+            corr = get_val_with_overflow(correct_map, h, label)
             row_correct += corr
             row_total += c
             col_correct_totals[h] += corr
@@ -237,10 +256,19 @@ def format_hint_metrics(hint_metrics: dict, details: list[dict]) -> str:
     Prints tables grouped by variant (problem type) and, if level data is
     available, by difficulty level.
     """
-    max_hints = hint_metrics["max_hints"]
+    actual_max_hints = hint_metrics["max_hints"]
+    max_hints = min(actual_max_hints, 5)
 
     variants = sorted(set(d.get("variant", "unknown") for d in details))
     levels = sorted(set(d.get("level", "unknown") for d in details) - {"unknown"})
+
+    # Aggregate totals across all variants for a single "All" row
+    totals_counts: dict[int | str, dict[str, int]] = {}
+    totals_correct: dict[int | str, dict[str, int]] = {}
+    for h, variant_map in hint_metrics["counts_by_hints_and_variant"].items():
+        totals_counts.setdefault(h, {})["All"] = sum(variant_map.values())
+    for h, variant_map in hint_metrics["correct_by_hints_and_variant"].items():
+        totals_correct.setdefault(h, {})["All"] = sum(variant_map.values())
 
     lines = [
         "",
@@ -249,14 +277,15 @@ def format_hint_metrics(hint_metrics: dict, details: list[dict]) -> str:
         "=" * 90,
     ]
 
-    # Tables by variant (problem type)
+    # Single aggregated table (no variant breakdown)
     lines.extend(_format_hint_tables(
-        row_labels=variants,
-        counts_map=hint_metrics["counts_by_hints_and_variant"],
-        correct_map=hint_metrics["correct_by_hints_and_variant"],
+        row_labels=["All"],
+        counts_map=totals_counts,
+        correct_map=totals_correct,
         max_hints=max_hints,
         row_header="Type",
-        section_title="TYPE",
+        section_title="HINTS",
+        actual_max_hints=actual_max_hints,
     ))
 
     # Tables by difficulty level (if available)
@@ -269,6 +298,7 @@ def format_hint_metrics(hint_metrics: dict, details: list[dict]) -> str:
             max_hints=max_hints,
             row_header="Level",
             section_title="DIFFICULTY",
+            actual_max_hints=actual_max_hints,
         ))
 
     return "\n".join(lines)
@@ -513,6 +543,7 @@ def generate(
     print(f"Generating {len(remaining_prompts)} remaining prompts...")
 
     # Initialize generator
+    stop_strings = method.stop_strings if method else None
     config = GenerationConfig(
         model_name=actual_model_name,
         batch_size=batch_size,
@@ -523,6 +554,7 @@ def generate(
         tensor_parallel_size=tensor_parallel_size,
         gpu_memory_utilization=gpu_memory_utilization,
         verbose=verbose,
+        stop_strings=stop_strings,
     )
     generator = Generator(config)
 
@@ -828,7 +860,7 @@ def evaluate(
     output_path: Path | None = None,
     batch_size: int = 16,
     max_new_tokens: int = 2048,
-    temperature: float = 0.0,  # Greedy for eval
+    temperature: float = 1.0,
     top_p: float = 1.0,
     tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.9,
@@ -926,6 +958,7 @@ def evaluate(
     print(f"Loaded {len(prompts_data)} prompts from {prompts_path}")
 
     # Initialize generator
+    stop_strings = method.stop_strings if method else None
     config = GenerationConfig(
         model_name=actual_model_name,
         batch_size=batch_size,
@@ -935,6 +968,7 @@ def evaluate(
         tensor_parallel_size=tensor_parallel_size,
         gpu_memory_utilization=gpu_memory_utilization,
         verbose=verbose,
+        stop_strings=stop_strings,
     )
     generator = Generator(config)
 
