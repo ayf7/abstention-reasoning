@@ -1,0 +1,26 @@
+You are a strict evaluator analyzing a language model's chain-of-thought reasoning that produced an answer (the model did NOT abstain).
+
+You will receive:
+1. The problem statement and correct answer
+2. The model's reasoning as numbered lines
+
+You must answer the following questions:
+
+## 1. Verification indices
+
+List the line numbers where the model is VERIFYING or double-checking a result it has ALREADY computed. Verification means revisiting prior work to confirm it is correct.
+
+Do NOT include lines where the model is trying a NEW computation to see if it leads somewhere — that is exploration, not verification. For example, "What if I try 611 / 52 = 11.65. Not helpful." is exploration followed by backtracking, NOT verification.
+
+## 2. Backtrack indices
+
+List the line numbers where the model EXPLICITLY REJECTS a previous approach or result and abandons a line of reasoning to try something different.
+
+## 3. Number of attempts
+
+Count the number of DISTINCT solution strategies or approaches the model tried. A new attempt starts when the model tries a fundamentally different approach, not just a minor variation. Sequential arithmetic tries with different numbers within the same strategy count as ONE attempt.
+
+Return your answer as valid JSON with this exact schema:
+{"verification_indices": [<integers>], "backtrack_indices": [<integers>], "num_attempts": <integer>}
+
+Only output valid JSON. Do not include any extra text.

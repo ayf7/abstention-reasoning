@@ -228,7 +228,8 @@ class CompetitionMathTask(BaseTask):
         """
         Check if the generated answer matches the correct answer.
 
-        Handles three formats:
+        Handles four formats:
+        - abstention_verify: <answer>...</answer><verify>...</verify> followed by <commit> or <abstain>
         - abstention_commit: <answer>...</answer> followed by <commit> or <abstain>
         - simple_abstention: ends with </think>\\n\\n<abstain>
         - standard: <answer>...</answer>
@@ -236,6 +237,57 @@ class CompetitionMathTask(BaseTask):
         Uses math-verify for robust symbolic equivalence checking.
         Gold answers are parsed as LaTeX, predicted answers as plain expressions.
         """
+        # Detect cross-verification format: </verify><answer>correct/incorrect</answer>
+        # Note: opening <verify> is the assistant prefix and not in generation text
+        # Distinguished from abstention_verify by: no <commit>/<abstain> tags
+        verify_verdict = re.search(
+            r'</verify>\s*<answer>\s*(correct|incorrect)\s*</answer>',
+            generation, re.DOTALL | re.IGNORECASE,
+        )
+        if verify_verdict and not re.search(r'<commit>|<abstain>', generation):
+            verdict = verify_verdict.group(1).lower()
+            generation_correct = primitive.get("generation_correct", False)
+            is_correct = (verdict == "correct") == generation_correct
+            return is_correct, {
+                "verdict": verdict,
+                "generation_correct": generation_correct,
+                "verify_format": True,
+            }
+
+        # Detect abstention_verify format: <answer>...</answer><verify>...</verify><commit>/<abstain>
+        has_verify_commit = bool(re.search(r'</verify>\s*<commit>', generation))
+        has_verify_abstain = bool(re.search(r'</verify>\s*<abstain>', generation))
+        has_verify_tag = bool(re.search(r'<verify>', generation))
+
+        if has_verify_commit or has_verify_abstain or has_verify_tag:
+            predicted = self.extract_answer(generation)
+            if predicted is None:
+                return False, {
+                    "predicted_answer": None,
+                    "committed": has_verify_commit,
+                    "abstained": has_verify_abstain,
+                    "error": "no_answer_tag",
+                }
+
+            predicted = predicted.strip()
+            correct_answer = primitive.get("answer", "")
+
+            if correct_answer is None:
+                return False, {
+                    "predicted_answer": predicted,
+                    "committed": has_verify_commit,
+                    "abstained": has_verify_abstain,
+                    "error": "no_ground_truth",
+                }
+
+            is_correct = self._verify_answer(predicted, correct_answer)
+            return is_correct, {
+                "predicted_answer": predicted,
+                "correct_answer": correct_answer,
+                "committed": has_verify_commit,
+                "abstained": has_verify_abstain,
+            }
+
         # Detect abstention_commit format: <answer>...</answer>\n<commit> or <abstain>
         has_commit = bool(re.search(r'</answer>\s*<commit>', generation))
         has_abstain_after = bool(re.search(r'</answer>\s*<abstain>', generation))
@@ -423,17 +475,27 @@ class CompetitionMathTask(BaseTask):
     def _categorize_result(self, r: dict) -> str:
         """Categorize a result into: correct, abstained, incomplete, wrong.
 
-        For abstention_commit format, committed results are correct/wrong
-        (never incomplete), and abstained results are always "abstained".
+        For commit/abstain formats, committed results are correct/wrong,
+        abstained results are always "abstained", and anything else is "incomplete".
+        For standard format (no commit/abstain fields), uses correctness directly.
         """
         metadata = r.get("metadata", {})
 
-        # abstention_commit format: committed overrides other categorization
-        if r.get("committed", False) or metadata.get("committed", False):
+        has_committed = r.get("committed", False) or metadata.get("committed", False)
+        has_abstained = r.get("abstained", False) or metadata.get("abstained", False)
+
+        if has_committed:
             return "correct" if r.get("correct", False) else "wrong"
-        if r.get("abstained", False) or metadata.get("abstained", False):
+        if has_abstained:
             return "abstained"
 
+        # If this is a commit/abstain format result (other results in the batch
+        # have committed/abstained), then neither committed nor abstained = incomplete
+        # We detect this by checking if committed/abstained keys exist at all
+        if "committed" in r or "committed" in metadata:
+            return "incomplete"
+
+        # Standard format (no commit/abstain fields)
         if r.get("correct", False):
             return "correct"
         elif r.get("finish_reason") == "length" or r.get("error") == "no_answer_tag":
@@ -503,6 +565,10 @@ class CompetitionMathTask(BaseTask):
             total_correct = committed_correct + abstained_correct
             recall = committed_correct / total_correct if total_correct > 0 else 0.0
             f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+            # Accuracy = committed_correct / total (not raw correctness)
+            metrics["accuracy"] = committed_correct / len(results) if results else 0.0
+            metrics["correct"] = committed_correct
 
             metrics["commit_stats"] = {
                 "total": len(results),
@@ -580,10 +646,20 @@ class CompetitionMathTask(BaseTask):
         # Summary
         lines.append("")
         d = metrics.get("distribution", {})
-        lines.append(f"Total: {d.get('count', 0)} | Correct: {d.get('correct', 0)} | Accuracy: {metrics.get('accuracy', 0):.1%}")
-
-        # Commit/abstain stats (abstention_commit format)
+        total_count = d.get("count", 0)
         commit_stats = metrics.get("commit_stats")
+
+        if commit_stats:
+            answeracc = (commit_stats["committed_correct"] + commit_stats["abstained_correct"]) / total_count if total_count else 0
+            abstention = commit_stats["abstained"] / total_count if total_count else 0
+            non_abstained = total_count - commit_stats["abstained"]
+            precision = commit_stats["committed_correct"] / non_abstained if non_abstained else 0
+            raw_correct = d.get("correct", 0)
+            raw_acc = raw_correct / total_count if total_count else 0
+            lines.append(f"Total: {total_count} | RawAcc: {raw_acc:.2%} ({raw_correct}/{total_count})  AnswerAcc: {answeracc:.2%}  Abstention: {abstention:.2%}  Precision: {precision:.2%}")
+        else:
+            lines.append(f"Total: {total_count} | Correct: {d.get('correct', 0)} | Accuracy: {metrics.get('accuracy', 0):.2%}")
+
         if commit_stats:
             lines.extend([
                 "",
