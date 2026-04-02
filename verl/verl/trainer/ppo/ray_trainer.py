@@ -1219,6 +1219,13 @@ class RayPPOTrainer:
 
                     batch = batch.union(gen_batch_output)
 
+                    # [abstention_verify] Warm swap: randomly swap <commit>↔<abstain>
+                    # tokens in responses for first N steps. Controlled by config flag.
+                    _ws = self.config.get("warm_swap", {})
+                    _ws_steps = _ws.get("steps", 0)
+                    if _ws_steps > 0 and self.global_steps < _ws_steps:
+                        from verl.trainer.ppo.warm_swap import warm_swap_commit_abstain
+                        batch = warm_swap_commit_abstain(batch, self.tokenizer, self.global_steps, rate=_ws.get("rate", 0.5))
 
                     if "response_mask" not in batch.batch:
                         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -1351,6 +1358,9 @@ class RayPPOTrainer:
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
                         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
+                            # Include warm_swapped flag in dump if present
+                            if "warm_swapped" in batch.non_tensor_batch:
+                                reward_extra_infos_dict["warm_swapped"] = batch.non_tensor_batch["warm_swapped"].tolist()
                             print(batch.batch.keys())
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)

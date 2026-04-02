@@ -122,7 +122,7 @@ def compute_score(
     solution_str: str,
     ground_truth: dict,
     extra_info: dict,
-    format_score: float = 0.0,
+    format_score: float = 0.1,
     score: float = 1.0,
     reward_abstain: bool = False,
     abstention_score: float = 0.5,
@@ -294,7 +294,7 @@ def compute_score_abstention_commit(
     commit_wrong: float = 0.0,
     abstain_correct: float = 0.0,
     abstain_wrong: float = 0.5,
-    format_score: float = 0.0,
+    format_score: float = 0.1,
     **kwargs,
 ) -> dict:
     """
@@ -365,6 +365,117 @@ def compute_score_abstention_commit(
         action = "COMMIT" if committed else "ABSTAIN"
         correctness = "CORRECT" if is_correct else "WRONG"
         print(f"[{action}+{correctness}] score={final_score} pred={predicted} gold={correct_answer}")
+
+    return {
+        "score": final_score,
+        "correct": is_correct,
+        "committed": committed,
+        "abstained": abstained,
+        "malformed": False,
+        "predicted_answer": predicted,
+    }
+
+
+def has_malformed_structure_verify(solution_str: str) -> bool:
+    """Validate tag structure for abstention_verify format.
+
+    Valid structure:
+        [text]</think>\n\n<answer>...</answer>\n\n<verify>...</verify>\n<commit>
+        [text]</think>\n\n<answer>...</answer>\n\n<verify>...</verify>\n<abstain>
+
+    Returns True if malformed, False if valid.
+    """
+    tag_pattern = r'(</think>|<think>|<answer>|</answer>|<verify>|</verify>|<commit>|<abstain>)'
+    tags = re.findall(tag_pattern, solution_str)
+
+    if not tags:
+        return True
+
+    # Expected: </think> <answer> </answer> <verify> </verify> (<commit> | <abstain>)
+    if len(tags) != 6:
+        return True
+
+    expected = ['</think>', '<answer>', '</answer>', '<verify>', '</verify>']
+    if tags[:5] != expected:
+        return True
+    if tags[5] not in ('<commit>', '<abstain>'):
+        return True
+
+    return False
+
+
+def compute_score_abstention_verify(
+    data_source,
+    solution_str: str,
+    ground_truth: dict,
+    extra_info: dict,
+    commit_correct: float = 1.0,
+    commit_wrong: float = 0.0,
+    abstain_correct: float = 0.5,
+    abstain_wrong: float = 0.4,
+    format_score: float = 0.1,
+    **kwargs,
+) -> dict:
+    """
+    Reward function for abstention_verify format.
+
+    The model produces <answer>, then <verify> to check its work, then <commit>/<abstain>.
+
+    Reward matrix:
+                    Correct answer    Wrong answer
+        <commit>    commit_correct    commit_wrong + format_score
+        <abstain>   abstain_correct   abstain_wrong + format_score
+        malformed   0                 0
+    """
+    correct_answer = ground_truth.get("answer", "")
+    do_print = random.randint(1, 64) == 1
+
+    # Structural validation
+    if has_malformed_structure_verify(solution_str):
+        if do_print:
+            print(f"Malformed verify structure - awarding 0")
+        return {
+            "score": 0,
+            "correct": False,
+            "committed": False,
+            "abstained": False,
+            "malformed": True,
+            "predicted_answer": None,
+        }
+
+    # Extract answer
+    predicted = extract_answer(solution_str)
+    if predicted is None:
+        return {
+            "score": 0,
+            "correct": False,
+            "committed": False,
+            "abstained": False,
+            "malformed": True,
+            "predicted_answer": None,
+        }
+
+    # Check correctness
+    is_correct = check_answer(predicted, correct_answer)
+    committed = bool(re.search(r'</verify>\s*<commit>', solution_str))
+    abstained = bool(re.search(r'</verify>\s*<abstain>', solution_str))
+
+    # Assign reward
+    if committed and is_correct:
+        final_score = commit_correct
+    elif committed and not is_correct:
+        final_score = commit_wrong + format_score
+    elif abstained and is_correct:
+        final_score = abstain_correct + format_score
+    elif abstained and not is_correct:
+        final_score = abstain_wrong + format_score
+    else:
+        final_score = 0
+
+    if do_print:
+        action = "COMMIT" if committed else "ABSTAIN"
+        correctness = "CORRECT" if is_correct else "WRONG"
+        print(f"[VERIFY {action}+{correctness}] score={final_score} pred={predicted} gold={correct_answer}")
 
     return {
         "score": final_score,
@@ -610,3 +721,54 @@ def compute_score_hint_exponential(
         result['score'] = format_score + (final - format_score) * factor
 
     return result
+
+
+def compute_score_verify(
+    data_source, solution_str, ground_truth, extra_info,
+    verdict_correct=1.0, verdict_wrong=0.1, format_score=0.0, **kwargs,
+):
+    """Reward function for cross-model verification.
+
+    The model receives another model's generation and judges whether it is correct.
+    Expected output format: <verify>...</verify><answer>correct/incorrect</answer>
+
+    Rewards:
+        verdict matches actual correctness:  verdict_correct (1.0)
+        verdict wrong but format valid:      verdict_wrong (0.1)
+        malformed output:                    format_score (0.0)
+    """
+    do_print = random.randint(1, 64) == 1
+    generation_correct = ground_truth.get("generation_correct", False)
+
+    # Validate tag structure: expect </verify>, <answer>, </answer>
+    # Note: opening <verify> is the assistant prefix and not in the model's output
+    tag_pattern = r'(</verify>|<answer>|</answer>)'
+    tags = re.findall(tag_pattern, solution_str)
+    expected_tags = ['</verify>', '<answer>', '</answer>']
+
+    if tags != expected_tags:
+        if do_print:
+            print(f"[VERIFY] Malformed structure: tags={tags}, expected={expected_tags} -> {format_score}")
+        return {"score": format_score, "correct": False, "malformed": True, "verdict": None, "generation_correct": generation_correct}
+
+    # Extract verdict
+    answer_match = re.search(r'<answer>\s*(correct|incorrect)\s*</answer>', solution_str, re.IGNORECASE)
+    if answer_match is None:
+        if do_print:
+            print(f"[VERIFY] Invalid verdict (not 'correct'/'incorrect') -> {format_score}")
+        return {"score": format_score, "correct": False, "malformed": True, "verdict": None, "generation_correct": generation_correct}
+
+    verdict = answer_match.group(1).lower()
+    verdict_is_correct = (verdict == "correct") == generation_correct
+    final_score = verdict_correct if verdict_is_correct else verdict_wrong
+
+    if do_print:
+        print(f"[VERIFY] verdict={verdict} actual={generation_correct} match={verdict_is_correct} -> {final_score}")
+
+    return {
+        "score": final_score,
+        "correct": verdict_is_correct,
+        "malformed": False,
+        "verdict": verdict,
+        "generation_correct": generation_correct,
+    }

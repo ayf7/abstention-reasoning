@@ -95,6 +95,45 @@ class CountdownTask(BaseTask):
         # Count hint requests
         num_hints = generation.count("<request>")
 
+        # Detect cross-verification format: </verify><answer>correct/incorrect</answer>
+        # Note: opening <verify> is the assistant prefix and not in generation text
+        # Distinguished from abstention_verify by: no <commit>/<abstain> tags
+        verify_verdict = re.search(
+            r'</verify>\s*<answer>\s*(correct|incorrect)\s*</answer>',
+            generation, re.DOTALL | re.IGNORECASE,
+        )
+        if verify_verdict and not re.search(r'<commit>|<abstain>', generation):
+            verdict = verify_verdict.group(1).lower()
+            generation_correct = primitive.get("generation_correct", False)
+            is_correct = (verdict == "correct") == generation_correct
+            return is_correct, {
+                "verdict": verdict,
+                "generation_correct": generation_correct,
+                "verify_format": True,
+                "num_hints": num_hints,
+            }
+
+        # Detect abstention_verify format: </verify>\s*<commit> or <abstain>
+        has_verify_commit = bool(re.search(r'</verify>\s*<commit>', generation))
+        has_verify_abstain = bool(re.search(r'</verify>\s*<abstain>', generation))
+        has_verify_tag = bool(re.search(r'<verify>', generation))
+
+        if has_verify_commit or has_verify_abstain or has_verify_tag:
+            answer = self.extract_answer(generation)
+            if answer is None:
+                return False, {
+                    "predicted_answer": None,
+                    "committed": has_verify_commit,
+                    "abstained": has_verify_abstain,
+                    "error": "no_answer_tag",
+                    "num_hints": num_hints,
+                }
+            is_correct, meta = self._check_expression(primitive, answer)
+            meta["committed"] = has_verify_commit
+            meta["abstained"] = has_verify_abstain
+            meta["num_hints"] = num_hints
+            return is_correct, meta
+
         # Detect abstention_commit format: <answer>...</answer>\n<commit> or <abstain>
         has_commit = bool(re.search(r'</answer>\s*<commit>', generation))
         has_abstain_after = bool(re.search(r'</answer>\s*<abstain>', generation))
@@ -153,6 +192,13 @@ class CountdownTask(BaseTask):
                     }
                 available.remove(num)
 
+            if available:
+                return False, {
+                    "predicted_answer": answer,
+                    "error": "unused_numbers",
+                    "unused_numbers": available,
+                }
+
             result = safe_eval(answer)
             is_correct = (result == primitive["target"])
 
@@ -186,16 +232,25 @@ class CountdownTask(BaseTask):
     def _categorize_result(self, r: dict) -> str:
         """Categorize a single result into one of: correct, abstained, incomplete, wrong.
 
-        For abstention_commit format, committed results are correct/wrong
-        (never incomplete), and abstained results are always "abstained".
+        For commit/abstain formats, committed results are correct/wrong,
+        abstained results are always "abstained", and anything else is "incomplete".
+        For standard format (no commit/abstain fields), uses correctness directly.
         """
         metadata = r.get("metadata", {})
 
-        if r.get("committed", False) or metadata.get("committed", False):
+        has_committed = r.get("committed", False) or metadata.get("committed", False)
+        has_abstained = r.get("abstained", False) or metadata.get("abstained", False)
+
+        if has_committed:
             return "correct" if r.get("correct", False) else "wrong"
-        if r.get("abstained", False) or metadata.get("abstained", False):
+        if has_abstained:
             return "abstained"
 
+        # If commit/abstain format (committed key exists) but neither committed nor abstained → incomplete
+        if "committed" in r or "committed" in metadata:
+            return "incomplete"
+
+        # Standard format (no commit/abstain fields)
         if r.get("correct", False):
             return "correct"
         elif r.get("finish_reason") == "length" or r.get("error") == "no_answer_tag":
@@ -255,6 +310,10 @@ class CountdownTask(BaseTask):
             total_correct = committed_correct + abstained_correct
             recall = committed_correct / total_correct if total_correct > 0 else 0.0
             f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+            # Accuracy = committed_correct / total (not raw correctness)
+            metrics["accuracy"] = committed_correct / len(results) if results else 0.0
+            metrics["correct"] = committed_correct
 
             metrics["commit_stats"] = {
                 "total": len(results),
@@ -331,12 +390,23 @@ class CountdownTask(BaseTask):
             f"{'Total':<14} {d.get('count', 0):>7} {d.get('correct', 0):>10} {d.get('incomplete', 0):>12} {d.get('abstained', 0):>11} {d.get('wrong', 0):>8}"
         )
 
-        # Accuracy summary
-        lines.append("")
-        lines.append(f"Accuracy: {metrics.get('accuracy', 0):.1%}")
-
-        # Commit/abstain stats (abstention_commit format)
+        # Summary line
+        total_count = metrics.get("total", 0)
         commit_stats = metrics.get("commit_stats")
+
+        if commit_stats:
+            raw_correct = commit_stats["committed_correct"] + commit_stats["abstained_correct"]
+            answeracc = raw_correct / total_count if total_count else 0
+            abstention = commit_stats["abstained"] / total_count if total_count else 0
+            non_abstained = total_count - commit_stats["abstained"]
+            precision = commit_stats["committed_correct"] / non_abstained if non_abstained else 0
+            raw_acc = raw_correct / total_count if total_count else 0
+            lines.append("")
+            lines.append(f"RawAcc: {raw_acc:.2%} ({raw_correct}/{total_count})  AnswerAcc: {answeracc:.2%}  Abstention: {abstention:.2%}  Precision: {precision:.2%}")
+        else:
+            lines.append("")
+            lines.append(f"Accuracy: {metrics.get('accuracy', 0):.2%}")
+
         if commit_stats:
             lines.extend([
                 "",

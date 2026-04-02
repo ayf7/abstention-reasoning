@@ -108,12 +108,18 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     num_hints = None
     correct = None
     abstained = None
+    committed = None
+    malformed = None
     if "num_hints" in batch.non_tensor_batch:
         num_hints = batch.non_tensor_batch["num_hints"]
     if "correct" in batch.non_tensor_batch:
         correct = batch.non_tensor_batch["correct"]
     if "abstained" in batch.non_tensor_batch:
         abstained = batch.non_tensor_batch["abstained"]
+    if "committed" in batch.non_tensor_batch:
+        committed = batch.non_tensor_batch["committed"]
+    if "malformed" in batch.non_tensor_batch:
+        malformed = batch.non_tensor_batch["malformed"]
 
     advantages = batch.batch["advantages"]
     returns = batch.batch["returns"]
@@ -248,6 +254,73 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
                 non_abstained = ~abstained_arr
                 if non_abstained.sum() > 0:
                     metrics["abstention/accuracy_non_abstained"] = float(correct_arr[non_abstained].mean())
+
+    # Abstention-verify metrics (commit/abstain/malformed breakdown)
+    if committed is not None and correct is not None:
+        committed_arr = np.array(committed, dtype=bool)
+        correct_arr_av = np.array(correct, dtype=bool)
+        abstained_arr_av = np.array(abstained, dtype=bool) if abstained is not None else ~committed_arr
+        n = len(committed_arr)
+
+        if n > 0:
+            n_committed = int(committed_arr.sum())
+            n_abstained = int(abstained_arr_av.sum())
+
+            metrics["av/commit_pct"] = n_committed / n
+            metrics["av/abstain_pct"] = n_abstained / n
+
+            # 4-way breakdown
+            commit_correct = int((committed_arr & correct_arr_av).sum())
+            commit_wrong = int((committed_arr & ~correct_arr_av).sum())
+            abstain_correct = int((abstained_arr_av & correct_arr_av).sum())
+            abstain_wrong = int((abstained_arr_av & ~correct_arr_av).sum())
+
+            metrics["av/commit_correct"] = commit_correct / n
+            metrics["av/commit_wrong"] = commit_wrong / n
+            metrics["av/abstain_correct"] = abstain_correct / n
+            metrics["av/abstain_wrong"] = abstain_wrong / n
+
+            # Precision / recall
+            if n_committed > 0:
+                metrics["av/precision"] = commit_correct / n_committed
+            total_correct = commit_correct + abstain_correct
+            if total_correct > 0:
+                metrics["av/recall"] = commit_correct / total_correct
+
+            if malformed is not None:
+                malformed_arr = np.array(malformed, dtype=bool)
+                metrics["av/malformed_pct"] = float(malformed_arr.mean())
+
+    # Verify metrics (cross-model verification)
+    if "verdict" in batch.non_tensor_batch and "generation_correct" in batch.non_tensor_batch:
+        verdict_arr = batch.non_tensor_batch["verdict"]
+        gen_correct_arr = np.array(batch.non_tensor_batch["generation_correct"], dtype=bool)
+        n = len(verdict_arr)
+
+        if n > 0:
+            # Verdict said "correct"
+            said_correct = np.array([v == "correct" for v in verdict_arr], dtype=bool)
+            said_incorrect = np.array([v == "incorrect" for v in verdict_arr], dtype=bool)
+            has_verdict = said_correct | said_incorrect
+
+            if has_verdict.sum() > 0:
+                # Accuracy: verdict matches ground truth
+                verdict_matches = (said_correct & gen_correct_arr) | (said_incorrect & ~gen_correct_arr)
+                metrics["verify/accuracy"] = float(verdict_matches[has_verdict].mean())
+
+                # Precision: of those labeled correct, how many are actually correct
+                if said_correct.sum() > 0:
+                    metrics["verify/precision"] = float(gen_correct_arr[said_correct].mean())
+
+                # Recall: of actually correct, how many did we label correct
+                if gen_correct_arr.sum() > 0:
+                    metrics["verify/recall"] = float(said_correct[gen_correct_arr].mean())
+
+                metrics["verify/commit_rate"] = float(said_correct.mean())
+
+            if malformed is not None:
+                malformed_arr = np.array(malformed, dtype=bool)
+                metrics["verify/malformed_pct"] = float(malformed_arr.mean())
 
     # Adaptive abstention metrics (from AdaptiveRewardManager)
     if "r_a" in batch.non_tensor_batch:
