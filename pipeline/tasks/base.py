@@ -171,7 +171,7 @@ class BaseTask:
             lines.append(f"Model: {model_name}")
         lines.append(f"Total: {metrics.get('total', 0)}")
         lines.append(f"Correct: {metrics.get('correct', 0)}")
-        lines.append(f"Accuracy: {metrics.get('accuracy', 0):.1%}")
+        lines.append(f"Accuracy: {metrics.get('accuracy', 0):.2%}")
 
         # Print by variant if available
         by_variant = metrics.get("counts_by_variant") or metrics.get("by_variant", {})

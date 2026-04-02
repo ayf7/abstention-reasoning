@@ -9,12 +9,14 @@ Commands:
     list_methods                List available methods for a task
     create_primitives           Generate raw puzzle data
     create_prompts              Create prompts from primitives
+    create_ood_prompts          Create eval prompts from an OOD math benchmark
     generate                    Run model on prompts to create dataset
     train_sft                   Train SFT model on generated dataset
     train_rl                    Train RL model using verl (GRPO)
     train_classifier            Train binary classifier for correctness prediction
     convert_checkpoint          Convert FSDP/Megatron checkpoint to HuggingFace format
     evaluate                    Evaluate model and compute metrics
+    analyze_abstention          Judge abstained examples with LLM (regret analysis)
     evaluate_classifier         Evaluate binary classifier (confusion matrix, precision/recall/F1)
 
 Examples:
@@ -98,6 +100,38 @@ def cmd_create_prompts(args):
         seed=args.seed,
         include_assistant_prefix=not args.no_assistant_prefix,
         num_hints=args.num_hints,
+        force_json=args.json,
+    )
+
+
+def cmd_create_verify_prompts(args):
+    """Create verification prompts from source model generations."""
+    source_dataset = Path(args.source_dataset)
+    primitives_path = Path(args.primitives) if args.primitives else None
+    output_dir = Path(args.output) if args.output else None
+    commands.create_verify_prompts(
+        task_name=args.task,
+        source_dataset_path=source_dataset,
+        method_name=args.method,
+        primitives_path=primitives_path,
+        output_dir=output_dir,
+        split_name=args.split,
+        seed=args.seed,
+        include_assistant_prefix=not args.no_assistant_prefix,
+    )
+
+
+def cmd_create_ood_prompts(args):
+    """Create OOD evaluation prompts."""
+    output_path = Path(args.output) if args.output else None
+    commands.create_ood_prompts(
+        task_name=args.task,
+        dataset_name=args.dataset,
+        method_name=args.method,
+        output_path=output_path,
+        num_problems=args.num_problems,
+        seed=args.seed,
+        include_assistant_prefix=not args.no_assistant_prefix,
     )
 
 
@@ -143,6 +177,9 @@ def cmd_generate(args):
         gpu_memory_utilization=args.gpu_memory_utilization,
         verbose=args.verbose,
         retry_incorrect=args.retry_incorrect,
+        retry_truncated=getattr(args, "retry_truncated", False),
+        max_retries=getattr(args, "max_retries", 10),
+        seed=getattr(args, "seed", 42),
         multi_turn=args.multi_turn,  # None = use method config
         max_turns=args.max_turns,  # None = use method config
         use_async=getattr(args, "use_async", False),
@@ -172,12 +209,14 @@ def cmd_evaluate(args):
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_p=args.top_p,
+        num_samples=args.num_samples,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         verbose=args.verbose,
         multi_turn=args.multi_turn,  # None = use method config
         max_turns=args.max_turns,  # None = use method config
         use_async=getattr(args, "use_async", False),
+        seed=args.seed,
         hint_selection=getattr(args, "hint_selection", None),
         helper_model=getattr(args, "helper_model", None),
         helper_gpu_memory_utilization=getattr(args, "helper_gpu_memory_utilization", None),
@@ -189,6 +228,112 @@ def cmd_analyze(args):
     commands.analyze(
         dataset_path=Path(args.dataset),
         task_name=getattr(args, "task", None),
+    )
+
+
+def cmd_analyze_abstention(args):
+    """Analyze abstained examples with LLM judge."""
+    output_path = Path(args.output) if args.output else None
+    commands.analyze_abstention(
+        results_path=Path(args.results),
+        task_name=args.task,
+        output_path=output_path,
+        method_name=args.method,
+        model=args.model,
+        poll_interval=args.poll_interval,
+        max_samples=args.max_samples,
+        group_by=args.group_by,
+    )
+
+
+def cmd_preprocess_for_judge(args):
+    """Preprocess eval results into enumerated lines for LLM judge."""
+    output_path = Path(args.output) if args.output else None
+    commands.preprocess_for_judge(
+        results_path=Path(args.results),
+        task_name=args.task,
+        output_path=output_path,
+        tokenizer_name=args.tokenizer,
+    )
+
+
+def cmd_judge_generations(args):
+    """Judge preprocessed generations with LLM."""
+    output_path = Path(args.output) if args.output else None
+    commands.judge_generations(
+        preprocessed_path=Path(args.preprocessed),
+        output_path=output_path,
+        model=args.model,
+        poll_interval=args.poll_interval,
+        max_samples=args.max_samples,
+    )
+
+
+def cmd_preprocess_for_verify_judge(args):
+    """Preprocess eval results into indexed sentences for verify judge."""
+    output_path = Path(args.output) if args.output else None
+    commands.preprocess_for_verify_judge(
+        results_path=Path(args.results),
+        task_name=args.task,
+        output_path=output_path,
+    )
+
+
+def cmd_judge_verify(args):
+    """Judge preprocessed verify generations for confidence and verification coverage."""
+    output_path = Path(args.output) if args.output else None
+    commands.judge_verify(
+        preprocessed_path=Path(args.preprocessed),
+        output_path=output_path,
+        model=args.model,
+        poll_interval=args.poll_interval,
+        max_samples=args.max_samples,
+        sync=args.sync,
+        max_concurrent=args.max_concurrent,
+    )
+
+
+def cmd_judge_correctness(args):
+    """Judge correctness of model answers using LLM."""
+    output_path = Path(args.output) if args.output else None
+    commands.judge_correctness(
+        results_path=Path(args.results),
+        task_name=args.task,
+        output_path=output_path,
+        model=args.model,
+        poll_interval=args.poll_interval,
+        stall_timeout=args.stall_timeout,
+        sync=args.sync,
+        max_concurrent=args.max_concurrent,
+    )
+
+
+def cmd_compare_sampling(args):
+    """Compare per-problem accuracy vs abstention rate across multiple samples."""
+    output_path = Path(args.output) if args.output else None
+    simple_prompts = Path(args.simple_prompts) if args.simple_prompts else (Path(args.prompts) if args.prompts else None)
+    abstention_prompts = Path(args.abstention_prompts) if args.abstention_prompts else (Path(args.prompts) if args.prompts else None)
+    if simple_prompts is None or abstention_prompts is None:
+        print("Error: must provide --prompts or both --simple-prompts and --abstention-prompts")
+        return
+    commands.compare_sampling(
+        task_name=args.task,
+        simple_model=args.simple_model,
+        abstention_model=args.abstention_model,
+        simple_prompts_path=simple_prompts,
+        abstention_prompts_path=abstention_prompts,
+        output_path=output_path,
+        simple_method=args.simple_method,
+        abstention_method=args.abstention_method,
+        simple_run_id=args.simple_run_id,
+        abstention_run_id=args.abstention_run_id,
+        num_samples=args.num_samples,
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        tensor_parallel_size=args.tensor_parallel_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        group_by=args.group_by,
     )
 
 
@@ -252,6 +397,20 @@ def cmd_train_rl(args):
     reward_function_path = Path(args.reward_function) if args.reward_function else None
     resume_path = Path(args.resume) if args.resume else None
 
+    # Parse reward kwargs overrides (KEY=VALUE pairs)
+    reward_kwargs_overrides = {}
+    if args.reward_kwargs:
+        for item in args.reward_kwargs:
+            key, _, value = item.partition("=")
+            # Try to parse as float, then int, then keep as string
+            try:
+                value = float(value)
+                if value == int(value):
+                    value = int(value)
+            except ValueError:
+                pass
+            reward_kwargs_overrides[key] = value
+
     commands.train_rl(
         task_name=args.task,
         method_name=args.method,
@@ -281,6 +440,8 @@ def cmd_train_rl(args):
         resume_path=resume_path,
         cleanup_checkpoints=not args.keep_checkpoints,
         keep_state=args.keep_state,
+        reward_kwargs_overrides=reward_kwargs_overrides,
+        shuffle_seed=args.shuffle_seed,
     )
 
 
@@ -357,7 +518,32 @@ def main():
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
     p.add_argument("--num-hints", type=int, default=None,
         help="Number of hints to include from prefix_hints (0-6). Populates 'hints' field on each primitive.")
+    p.add_argument("--json", action="store_true", help="Force JSON output for all splits (instead of parquet for RL)")
     p.set_defaults(func=cmd_create_prompts)
+
+    # create_verify_prompts
+    p = subparsers.add_parser("create_verify_prompts", help="Create verification prompts from source model generations")
+    p.add_argument("--task", required=True, help="Task name (e.g., countdown)")
+    p.add_argument("--source-dataset", required=True, help="Path to source model's generation JSON")
+    p.add_argument("--method", default="verify", help="Method name (default: verify)")
+    p.add_argument("--primitives", help="Path to primitives.json (default: auto)")
+    p.add_argument("--output", help="Output directory (default: artifacts/{task}/{method}/prompts/)")
+    p.add_argument("--split", default="all", help="Split name or 'all' (default: all)")
+    p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
+    p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
+    p.set_defaults(func=cmd_create_verify_prompts)
+
+    # create_ood_prompts
+    ood_names = ", ".join(sorted(commands.OOD_DATASETS.keys()))
+    p = subparsers.add_parser("create_ood_prompts", help="Create eval prompts from an OOD math benchmark")
+    p.add_argument("--task", required=True, help="Task whose templates to use (e.g., competition_math)")
+    p.add_argument("--dataset", required=True, help=f"OOD dataset name ({ood_names})")
+    p.add_argument("--method", help="Method name for template selection and output path")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/prompts/ood_{dataset}.json)")
+    p.add_argument("--num-problems", type=int, default=None, help="Limit number of problems (omit for all)")
+    p.add_argument("--seed", type=int, default=42, help="Random seed for shuffling")
+    p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
+    p.set_defaults(func=cmd_create_ood_prompts)
 
     # generate
     p = subparsers.add_parser("generate", help="Run model on prompts to create dataset")
@@ -379,6 +565,9 @@ def main():
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
     p.add_argument("--retry-incorrect", action="store_true", help="Re-run incorrect examples from existing output")
+    p.add_argument("--retry-truncated", action="store_true", help="Re-run truncated examples (finish_reason=length) with different seeds until all complete")
+    p.add_argument("--max-retries", type=int, default=10, help="Max retry iterations for --retry-truncated (default: 10)")
+    p.add_argument("--seed", type=int, default=42, help="Starting seed for generation (default: 42)")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
     p.add_argument("--max-turns", type=int, default=None, help="Maximum turns for multi-turn generation (default: from method config or 6)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput, processes all prompts concurrently)")
@@ -410,12 +599,14 @@ def main():
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
     p.add_argument("--temperature", type=float, default=1.0, help="Temperature")
     p.add_argument("--top-p", type=float, default=1.0, help="Top-p")
+    p.add_argument("--num-samples", type=int, default=1, help="Samples per problem (default: 1)")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
     p.add_argument("--max-turns", type=int, default=None, help="Maximum turns for multi-turn generation (default: from method config or 6)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput)")
+    p.add_argument("--seed", type=int, default=42, help="Random seed for generation (default: 42)")
     p.add_argument("--hint-selection", default=None, choices=["sequential", "smart"],
         help="Hint selection strategy (default: from method config or 'sequential')")
     p.add_argument("--helper-model", default=None,
@@ -429,6 +620,87 @@ def main():
     p.add_argument("--dataset", required=True, help="Path to dataset or eval results")
     p.add_argument("--task", help="Task name (for task-specific metrics on raw datasets)")
     p.set_defaults(func=cmd_analyze)
+
+    # analyze_abstention
+    p = subparsers.add_parser("analyze_abstention", help="Judge abstained examples with LLM (did model have the right answer?)")
+    p.add_argument("--results", required=True, help="Path to evaluation results JSON")
+    p.add_argument("--task", required=True, help="Task name (countdown, competition_math, code_output)")
+    p.add_argument("--method", help="Method name (for auto-derived output path)")
+    p.add_argument("--output", help="Output path (default: {results_stem}_abstention_analysis.json)")
+    p.add_argument("--model", default="gpt-5.4-nano", help="OpenAI model for judging (default: gpt-5.4-nano)")
+    p.add_argument("--poll-interval", type=int, default=30, help="Seconds between batch status checks (default: 30)")
+    p.add_argument("--max-samples", type=int, default=None, help="Limit number of abstained examples to judge (for testing)")
+    p.add_argument("--group-by", default="variant", help="Field to group results by (default: variant, e.g. 'level' for difficulty)")
+    p.set_defaults(func=cmd_analyze_abstention)
+
+    # preprocess_for_judge
+    p = subparsers.add_parser("preprocess_for_judge", help="Preprocess eval results into enumerated lines for LLM judge")
+    p.add_argument("--results", required=True, help="Path to evaluation results JSON")
+    p.add_argument("--task", required=True, help="Task name (countdown, competition_math, code_output)")
+    p.add_argument("--output", help="Output path (default: analysis/{stem}_preprocessed.json)")
+    p.add_argument("--tokenizer", default="Qwen/Qwen2.5-1.5B", help="HuggingFace tokenizer for per-line token counts (default: Qwen/Qwen2.5-1.5B)")
+    p.set_defaults(func=cmd_preprocess_for_judge)
+
+    # judge_generations
+    p = subparsers.add_parser("judge_generations", help="Judge preprocessed generations with LLM (verification, backtracking, abstention reason)")
+    p.add_argument("--preprocessed", required=True, help="Path to preprocessed JSON from preprocess_for_judge")
+    p.add_argument("--output", help="Output path (default: analysis/{stem}_judged.json)")
+    p.add_argument("--model", default="gpt-5.4-nano", help="OpenAI model for judging (default: gpt-5.4-nano)")
+    p.add_argument("--poll-interval", type=int, default=30, help="Seconds between batch status checks (default: 30)")
+    p.add_argument("--max-samples", type=int, default=None, help="Limit number of examples to judge (for testing)")
+    p.set_defaults(func=cmd_judge_generations)
+
+    # preprocess_for_verify_judge
+    p = subparsers.add_parser("preprocess_for_verify_judge", help="Preprocess eval results into indexed sentences for verify judge")
+    p.add_argument("--results", required=True, help="Path to evaluation results JSON")
+    p.add_argument("--task", required=True, help="Task name (countdown, competition_math, code_output)")
+    p.add_argument("--output", help="Output path (default: analysis/{stem}_verify_preprocessed.json)")
+    p.set_defaults(func=cmd_preprocess_for_verify_judge)
+
+    # judge_verify
+    p = subparsers.add_parser("judge_verify", help="Judge preprocessed verify generations for confidence and verification sentence coverage")
+    p.add_argument("--preprocessed", required=True, help="Path to preprocessed JSON from preprocess_for_verify_judge")
+    p.add_argument("--output", help="Output path (default: analysis/{stem}_verify_judged.json)")
+    p.add_argument("--model", default="gpt-5.4-nano", help="OpenAI model for judging (default: gpt-5.4-nano)")
+    p.add_argument("--poll-interval", type=int, default=30, help="Seconds between batch status checks (default: 30)")
+    p.add_argument("--max-samples", type=int, default=None, help="Limit number of examples to judge (for testing)")
+    p.add_argument("--sync", action="store_true", help="Use synchronous API calls instead of Batch API")
+    p.add_argument("--max-concurrent", type=int, default=20, help="Max concurrent requests in sync mode (default: 20)")
+    p.set_defaults(func=cmd_judge_verify)
+
+    # judge_correctness
+    p = subparsers.add_parser("judge_correctness", help="Judge answer correctness using LLM (OpenAI Batch API)")
+    p.add_argument("--results", required=True, help="Path to eval results JSON")
+    p.add_argument("--task", required=True, help="Task name (competition_math, countdown, code_output)")
+    p.add_argument("--output", help="Output path (default: {results_stem}_correctness_judged.json)")
+    p.add_argument("--model", default="gpt-5.4-mini", help="OpenAI model for judging (default: gpt-5.4-mini)")
+    p.add_argument("--poll-interval", type=int, default=30, help="Seconds between batch status checks (default: 30)")
+    p.add_argument("--stall-timeout", type=int, default=600, help="Cancel batch if stalled for N seconds (default: 600)")
+    p.add_argument("--sync", action="store_true", help="Use synchronous concurrent API calls instead of Batch API")
+    p.add_argument("--max-concurrent", type=int, default=20, help="Max concurrent requests in sync mode (default: 20)")
+    p.set_defaults(func=cmd_judge_correctness)
+
+    # compare_sampling
+    p = subparsers.add_parser("compare_sampling", help="Sample N times from two models, compare accuracy vs abstention rate")
+    p.add_argument("--task", required=True, help="Task name")
+    p.add_argument("--simple-model", required=True, help="Simple/baseline model name or path (or 'sft'/'rl')")
+    p.add_argument("--abstention-model", required=True, help="Abstention model name or path (or 'sft'/'rl')")
+    p.add_argument("--prompts", help="Path to shared eval prompts (used for both models if --simple-prompts/--abstention-prompts not set)")
+    p.add_argument("--simple-prompts", help="Prompts for simple model (overrides --prompts)")
+    p.add_argument("--abstention-prompts", help="Prompts for abstention model (overrides --prompts)")
+    p.add_argument("--simple-method", help="Method name for resolving simple model path")
+    p.add_argument("--abstention-method", help="Method name for resolving abstention model path")
+    p.add_argument("--simple-run-id", help="Run ID for simple model")
+    p.add_argument("--abstention-run-id", help="Run ID for abstention model")
+    p.add_argument("--output", help="Output base path (.json and .pdf)")
+    p.add_argument("--num-samples", type=int, default=16, help="Samples per problem (default: 16)")
+    p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
+    p.add_argument("--temperature", type=float, default=1.0, help="Temperature (default: 1.0)")
+    p.add_argument("--top-p", type=float, default=1.0, help="Top-p (default: 1.0)")
+    p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
+    p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
+    p.add_argument("--group-by", default="variant", help="Field to group/color scatter points by (default: variant)")
+    p.set_defaults(func=cmd_compare_sampling)
 
     # evaluate_classifier
     p = subparsers.add_parser("evaluate_classifier", help="Evaluate binary classifier on a dataset")
@@ -500,6 +772,8 @@ def main():
     p.add_argument("--resume", help="Path to resume from existing run")
     p.add_argument("--keep-checkpoints", action="store_true", help="Keep checkpoints and rollouts after training (by default they are deleted)")
     p.add_argument("--keep-state", action="store_true", help="Keep the last optimizer state checkpoint after training")
+    p.add_argument("--reward-kwargs", nargs="*", metavar="KEY=VALUE", help="Override reward kwargs (e.g., --reward-kwargs hint_penalty=0.05 hint_bonus=0.1)")
+    p.add_argument("--shuffle-seed", type=int, default=None, help="Seed for shuffling training data (default: 1, set to randomize order across runs)")
     p.set_defaults(func=cmd_train_rl)
 
     # train_classifier

@@ -7,34 +7,34 @@ from typing import Any
 def tokenize_with_response_mask(
     text: str,
     tokenizer,
-    response_start: str = "\n<response>",
-    response_end: str = "</response>\n",
 ) -> tuple[list[int], list[int]]:
     """
-    Tokenize text with clean boundaries around response segments.
+    Tokenize text with segment boundaries matching RL rollout token splicing.
 
-    Splits text at response boundaries and tokenizes each segment independently,
-    avoiding tokenization artifacts where characters merge across boundaries.
+    During RL rollouts, hint injections are tokenized independently as:
+        "\\n<response>hint</response>\\n<think>\\n"
+    This function splits text at those same boundaries and tokenizes each
+    segment independently, so SFT training sees the same token sequences
+    the model will encounter during RL.
 
     Args:
-        text: The full text to tokenize
+        text: The full text to tokenize (completion portion, not prompt)
         tokenizer: HuggingFace tokenizer
-        response_start: Start pattern for response (default: "\\n<response>")
-        response_end: End pattern for response (default: "</response>\\n")
 
     Returns:
         Tuple of (token_ids, response_mask) where:
         - token_ids: List of token IDs
-        - response_mask: List of 0/1 where 0 = response token (mask), 1 = other (train)
+        - response_mask: List of 0/1 where 0 = injected hint token (mask), 1 = model token (train)
 
     Example:
-        >>> text = "thinking...\\n<response>hint</response>\\nmore thinking"
+        >>> text = "reasoning...</think>\\n<request></request>\\n<response>hint</response>\\n<think>\\nmore reasoning"
         >>> tokens, mask = tokenize_with_response_mask(text, tokenizer)
-        >>> # Response segment tokens have mask=0, others have mask=1
+        >>> # "\\n<response>hint</response>\\n<think>\\n" tokens have mask=0, others have mask=1
     """
-    # Build pattern that captures the full response including boundaries
+    # Match the exact RL injection boundary: \n<response>...</response>\n<think>\n
+    # The <think>\n suffix is optional for robustness (e.g., "No more hints" edge case)
     pattern = re.compile(
-        f'({re.escape(response_start)}.*?{re.escape(response_end)})',
+        r'(\n<response>.*?</response>\n(?:<think>\n)?)',
         re.DOTALL
     )
 

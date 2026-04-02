@@ -14,6 +14,46 @@ from pipeline.core.utils import model_short_name
 from pipeline.tasks import get_task
 
 
+def _get_verify_field(record, field):
+    """Get verify field from either top-level (evaluate) or metadata (generate)."""
+    if field in record:
+        return record[field]
+    return record.get("metadata", {}).get(field)
+
+
+def _compute_verify_metrics(records):
+    """Compute verify confusion matrix from records. Returns dict or None."""
+    fmt = [r for r in records if _get_verify_field(r, "verify_format")]
+    if not fmt:
+        return None
+    n = len(fmt)
+    tp = sum(1 for r in fmt if _get_verify_field(r, "verdict") == "correct" and _get_verify_field(r, "generation_correct"))
+    fp = sum(1 for r in fmt if _get_verify_field(r, "verdict") == "correct" and not _get_verify_field(r, "generation_correct"))
+    fn = sum(1 for r in fmt if _get_verify_field(r, "verdict") == "incorrect" and _get_verify_field(r, "generation_correct"))
+    tn = sum(1 for r in fmt if _get_verify_field(r, "verdict") == "incorrect" and not _get_verify_field(r, "generation_correct"))
+    no_fmt = len(records) - n
+
+    return {
+        "accuracy": (tp + tn) / n if n else 0,
+        "precision": tp / (tp + fp) if (tp + fp) else 0,
+        "recall": tp / (tp + fn) if (tp + fn) else 0,
+        "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+        "with_format": n, "malformed": no_fmt,
+        "said_correct": tp + fp, "actually_correct": tp + fn,
+    }
+
+
+def _print_verify_metrics(records):
+    """Print verify confusion matrix if records contain verify metadata."""
+    vm = _compute_verify_metrics(records)
+    if not vm:
+        return None
+    print(f"  Verify ({vm['with_format']} with format, {vm['malformed']} malformed):")
+    print(f"    Accuracy: {vm['accuracy']:.1%}  Precision: {vm['precision']:.1%}  Recall: {vm['recall']:.1%}")
+    print(f"    TP={vm['tp']} FP={vm['fp']} FN={vm['fn']} TN={vm['tn']}  (said correct: {vm['said_correct']}, actually correct: {vm['actually_correct']})")
+    return vm
+
+
 def extract_generation_hints(text: str) -> list[str]:
     """Extract '(using the <category> of <name>)' hints from generated text.
 
@@ -259,7 +299,9 @@ def format_hint_metrics(hint_metrics: dict, details: list[dict]) -> str:
     actual_max_hints = hint_metrics["max_hints"]
     max_hints = min(actual_max_hints, 5)
 
-    variants = sorted(set(d.get("variant", "unknown") for d in details))
+    _variant_order = {"short": 0, "medium": 1, "long": 2}
+    variants = sorted(set(d.get("variant", "unknown") for d in details),
+                      key=lambda v: _variant_order.get(v, 999))
     levels = sorted(set(d.get("level", "unknown") for d in details) - {"unknown"})
 
     # Aggregate totals across all variants for a single "All" row
@@ -277,16 +319,28 @@ def format_hint_metrics(hint_metrics: dict, details: list[dict]) -> str:
         "=" * 90,
     ]
 
-    # Single aggregated table (no variant breakdown)
-    lines.extend(_format_hint_tables(
-        row_labels=["All"],
-        counts_map=totals_counts,
-        correct_map=totals_correct,
-        max_hints=max_hints,
-        row_header="Type",
-        section_title="HINTS",
-        actual_max_hints=actual_max_hints,
-    ))
+    # Per-variant table (short/medium/long) if more than one variant
+    if len(variants) > 1:
+        lines.extend(_format_hint_tables(
+            row_labels=variants,
+            counts_map=hint_metrics["counts_by_hints_and_variant"],
+            correct_map=hint_metrics["correct_by_hints_and_variant"],
+            max_hints=max_hints,
+            row_header="Variant",
+            section_title="VARIANT",
+            actual_max_hints=actual_max_hints,
+        ))
+    else:
+        # Single variant — just show aggregated "All" row
+        lines.extend(_format_hint_tables(
+            row_labels=["All"],
+            counts_map=totals_counts,
+            correct_map=totals_correct,
+            max_hints=max_hints,
+            row_header="Type",
+            section_title="HINTS",
+            actual_max_hints=actual_max_hints,
+        ))
 
     # Tables by difficulty level (if available)
     if levels:
@@ -405,6 +459,9 @@ def generate(
     gpu_memory_utilization: float = 0.9,
     verbose: bool = False,
     retry_incorrect: bool = False,
+    retry_truncated: bool = False,
+    max_retries: int = 10,
+    seed: int | None = 42,
     multi_turn: bool | None = None,
     max_turns: int | None = None,
     use_async: bool = False,
@@ -509,40 +566,7 @@ def generate(
     prompts_data = load_json(prompts_path)
     print(f"Loaded {len(prompts_data)} prompts from {prompts_path}")
 
-    # Check for existing output (for resumption)
-    records_by_index = {}
-    if output_path.exists():
-        existing_records = load_json(output_path)
-        records_by_index = {r["index"]: r for r in existing_records}
-
-        if retry_incorrect:
-            # Identify incorrect indices to retry (but keep all records)
-            # Preserve abstained examples — they are intentional non-answers
-            def _is_done(r):
-                if r.get("correct", False):
-                    return True
-                if r.get("metadata", {}).get("abstained", False):
-                    return True
-                return False
-            incorrect_indices = {r["index"] for r in existing_records if not _is_done(r)}
-            done_count = len(existing_records) - len(incorrect_indices)
-            print(f"Retry mode: {done_count} done (correct + abstained), retrying {len(incorrect_indices)} incorrect")
-            completed_indices = {r["index"] for r in existing_records if _is_done(r)}
-        else:
-            completed_indices = set(records_by_index.keys())
-            print(f"Resuming: found {len(completed_indices)} completed examples")
-    else:
-        completed_indices = set()
-
-    # Filter to remaining prompts
-    remaining_prompts = [p for p in prompts_data if p["index"] not in completed_indices]
-    if not remaining_prompts:
-        print("All prompts already completed!")
-        return output_path
-
-    print(f"Generating {len(remaining_prompts)} remaining prompts...")
-
-    # Initialize generator
+    # Initialize generator (once, reused across retry iterations)
     stop_strings = method.stop_strings if method else None
     config = GenerationConfig(
         model_name=actual_model_name,
@@ -555,299 +579,441 @@ def generate(
         gpu_memory_utilization=gpu_memory_utilization,
         verbose=verbose,
         stop_strings=stop_strings,
+        seed=seed,
     )
     generator = Generator(config)
-
-    # Process in batches with incremental saving
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    total_batches = (len(remaining_prompts) + batch_size - 1) // batch_size
 
-    print(f"Generating with {actual_model_name}...")
-    if use_async:
-        print("Async mode enabled (optimal throughput)")
-    if multi_turn:
-        print(f"Multi-turn mode enabled: max_turns={max_turns}")
-    # Compute per-prompt force_hints based on distribution and policy
-    if force_hints_distribution:
-        import random
-        rng = random.Random(42)
+    total_attempts = (max_retries + 1) if retry_truncated else 1
+    for attempt in range(total_attempts):
+        if attempt > 0:
+            config.seed = seed + attempt * 1000
+            print(f"\n=== Retry truncated attempt {attempt}/{max_retries} (seed={config.seed}) ===")
 
-        # Build cumulative distribution for sampling hint counts
-        hint_counts = sorted(force_hints_distribution.keys())
-        hint_probs = [force_hints_distribution[k] for k in hint_counts]
-        cum_probs = []
-        cumsum = 0.0
-        for p in hint_probs:
-            cumsum += p
-            cum_probs.append(cumsum)
+        # Check for existing output (for resumption)
+        records_by_index = {}
+        if output_path.exists():
+            existing_records = load_json(output_path)
+            records_by_index = {r["index"]: r for r in existing_records}
 
-        def sample_hint_count():
-            r = rng.random()
-            for count, cp in zip(hint_counts, cum_probs):
-                if r < cp:
-                    return count
-            return hint_counts[-1]
-
-        dist_str = ", ".join(f"{k}: {v:.0%}" for k, v in sorted(force_hints_distribution.items()))
-
-        if force_hints_policy:
-            # Per-level gating: only force for selected examples
-            force_hints_list = []
-            level_counts = {}
-            for p in remaining_prompts:
-                level_str = p.get("ground_truth", {}).get("level", "")
-                level_num = level_str.replace("Level ", "") if level_str else ""
-                rate = force_hints_policy.get(level_num, 0.0)
-                if rng.random() < rate:
-                    n = sample_hint_count()
-                    force_hints_list.append(n)
-                    level_counts[level_str] = level_counts.get(level_str, 0) + 1
-                else:
-                    force_hints_list.append(0)
-            forced_total = sum(1 for f in force_hints_list if f > 0)
-            print(f"Force hints policy: {forced_total}/{len(remaining_prompts)} examples will get forced hints")
-            print(f"  Distribution: {dist_str}")
-            for level in sorted(level_counts.keys()):
-                print(f"  {level}: {level_counts[level]} forced")
+            if retry_incorrect:
+                def _is_done(r):
+                    if r.get("correct", False):
+                        return True
+                    if r.get("metadata", {}).get("abstained", False):
+                        return True
+                    return False
+                incorrect_indices = {r["index"] for r in existing_records if not _is_done(r)}
+                done_count = len(existing_records) - len(incorrect_indices)
+                print(f"Retry mode: {done_count} done (correct + abstained), retrying {len(incorrect_indices)} incorrect")
+                completed_indices = {r["index"] for r in existing_records if _is_done(r)}
+            elif retry_truncated:
+                truncated_indices = {r["index"] for r in existing_records if r.get("finish_reason") == "length"}
+                done_count = len(existing_records) - len(truncated_indices)
+                print(f"Retry truncated: {done_count} done, retrying {len(truncated_indices)} truncated")
+                completed_indices = {r["index"] for r in existing_records if r.get("finish_reason") != "length"}
+            else:
+                completed_indices = set(records_by_index.keys())
+                print(f"Resuming: found {len(completed_indices)} completed examples")
         else:
-            # All examples get forced hints sampled from distribution
-            force_hints_list = [sample_hint_count() for _ in remaining_prompts]
-            print(f"Force hints enabled for all {len(remaining_prompts)} examples")
-            print(f"  Distribution: {dist_str}")
-    else:
-        force_hints_list = [0] * len(remaining_prompts)
+            completed_indices = set()
 
-    # For async multi-turn, process all remaining prompts at once
-    if multi_turn and use_async:
-        import asyncio
+        # Filter to remaining prompts
+        remaining_prompts = [p for p in prompts_data if p["index"] not in completed_indices]
+        if not remaining_prompts:
+            print("All prompts already completed!")
+            return output_path
 
-        all_prompts = [p["prompt"] for p in remaining_prompts]
-        all_ground_truths = [p["ground_truth"] for p in remaining_prompts]
+        print(f"Generating {len(remaining_prompts)} remaining prompts...")
 
-        print(f"Running async generation on {len(all_prompts)} prompts...")
-        async_generator = AsyncGenerator(config)
-        all_results = asyncio.run(
-            async_generator.generate_with_hints_async(
-                all_prompts,
-                all_ground_truths,
-                max_turns=max_turns,
-                force_hints=force_hints_list,
-                hint_selector=hint_selector,
+        total_batches = (len(remaining_prompts) + batch_size - 1) // batch_size
+
+        if attempt == 0:
+            print(f"Generating with {actual_model_name}...")
+            if use_async:
+                print("Async mode enabled (optimal throughput)")
+            if multi_turn:
+                print(f"Multi-turn mode enabled: max_turns={max_turns}")
+
+        # Compute per-prompt force_hints based on distribution and policy
+        if force_hints_distribution:
+            import random
+            rng = random.Random(42)
+
+            hint_counts = sorted(force_hints_distribution.keys())
+            hint_probs = [force_hints_distribution[k] for k in hint_counts]
+            cum_probs = []
+            cumsum = 0.0
+            for p in hint_probs:
+                cumsum += p
+                cum_probs.append(cumsum)
+
+            def sample_hint_count():
+                r = rng.random()
+                for count, cp in zip(hint_counts, cum_probs):
+                    if r < cp:
+                        return count
+                return hint_counts[-1]
+
+            dist_str = ", ".join(f"{k}: {v:.0%}" for k, v in sorted(force_hints_distribution.items()))
+
+            if force_hints_policy:
+                force_hints_list = []
+                level_counts = {}
+                for p in remaining_prompts:
+                    level_str = p.get("ground_truth", {}).get("level", "")
+                    level_num = level_str.replace("Level ", "") if level_str else ""
+                    rate = force_hints_policy.get(level_num, 0.0)
+                    if rng.random() < rate:
+                        n = sample_hint_count()
+                        force_hints_list.append(n)
+                        level_counts[level_str] = level_counts.get(level_str, 0) + 1
+                    else:
+                        force_hints_list.append(0)
+                forced_total = sum(1 for f in force_hints_list if f > 0)
+                print(f"Force hints policy: {forced_total}/{len(remaining_prompts)} examples will get forced hints")
+                print(f"  Distribution: {dist_str}")
+                for level in sorted(level_counts.keys()):
+                    print(f"  {level}: {level_counts[level]} forced")
+            else:
+                force_hints_list = [sample_hint_count() for _ in remaining_prompts]
+                print(f"Force hints enabled for all {len(remaining_prompts)} examples")
+                print(f"  Distribution: {dist_str}")
+        else:
+            force_hints_list = [0] * len(remaining_prompts)
+
+        # For async multi-turn, process all remaining prompts at once
+        if multi_turn and use_async:
+            import asyncio
+
+            all_prompts = [p["prompt"] for p in remaining_prompts]
+            all_ground_truths = [p["ground_truth"] for p in remaining_prompts]
+
+            print(f"Running async generation on {len(all_prompts)} prompts...")
+            async_generator = AsyncGenerator(config)
+            all_results = asyncio.run(
+                async_generator.generate_with_hints_async(
+                    all_prompts,
+                    all_ground_truths,
+                    max_turns=max_turns,
+                    force_hints=force_hints_list,
+                    hint_selector=hint_selector,
+                )
             )
-        )
 
-        # Process all results
-        sample_strategy = sample_strategy or ("most_hints" if multi_turn else "shortest_cot")
-        for prompt_data, gen_samples in zip(remaining_prompts, all_results):
-            primitive = {
-                "index": prompt_data["index"],
-                **prompt_data["ground_truth"],
-                "variant": prompt_data.get("variant", "unknown"),
-            }
-
-            if num_samples > 1:
-                best_sample = select_best_sample(gen_samples, task, primitive, strategy=sample_strategy)
-            else:
-                sample = gen_samples[0]
-                is_correct, meta = task.check_correctness(primitive, sample["text"])
-                best_sample = {
-                    **sample,
-                    "correct": is_correct,
-                    "metadata": meta,
+            sample_strategy = sample_strategy or ("most_hints" if multi_turn else "shortest_cot")
+            for prompt_data, gen_samples in zip(remaining_prompts, all_results):
+                primitive = {
+                    "index": prompt_data["index"],
+                    **prompt_data["ground_truth"],
+                    "variant": prompt_data.get("variant", "unknown"),
                 }
 
-            record = {
-                "index": prompt_data["index"],
-                "variant": prompt_data.get("variant", "unknown"),
-                "prompt": prompt_data["prompt"],
-                "generation": best_sample["text"],
-                "correct": best_sample["correct"],
-                "finish_reason": best_sample["finish_reason"],
-                "token_count": best_sample["token_count"],
-                "metadata": best_sample["metadata"],
-                "extracted_hints": extract_generation_hints(best_sample["text"]),
-            }
+                if num_samples > 1:
+                    best_sample = select_best_sample(gen_samples, task, primitive, strategy=sample_strategy)
+                else:
+                    sample = gen_samples[0]
+                    is_correct, meta = task.check_correctness(primitive, sample["text"])
+                    best_sample = {
+                        **sample,
+                        "correct": is_correct,
+                        "metadata": meta,
+                    }
 
-            if "num_hints" in best_sample:
-                record["num_hints"] = best_sample["num_hints"]
-            if "turns" in best_sample:
-                record["turns"] = best_sample["turns"]
-            if "total_token_count" in best_sample:
-                record["total_token_count"] = best_sample["total_token_count"]
+                record = {
+                    "index": prompt_data["index"],
+                    "variant": prompt_data.get("variant", "unknown"),
+                    "prompt": prompt_data["prompt"],
+                    "generation": best_sample["text"],
+                    "correct": best_sample["correct"],
+                    "finish_reason": best_sample["finish_reason"],
+                    "token_count": best_sample["token_count"],
+                    "metadata": best_sample["metadata"],
+                    "extracted_hints": extract_generation_hints(best_sample["text"]),
+                }
 
-            records_by_index[prompt_data["index"]] = record
+                if "num_hints" in best_sample:
+                    record["num_hints"] = best_sample["num_hints"]
+                if "turns" in best_sample:
+                    record["turns"] = best_sample["turns"]
+                if "total_token_count" in best_sample:
+                    record["total_token_count"] = best_sample["total_token_count"]
 
-        # Save final results
+                records_by_index[prompt_data["index"]] = record
+
+            records = sorted(records_by_index.values(), key=lambda r: r["index"])
+            save_json(output_path, records)
+
+            correct = sum(1 for r in records if r["correct"])
+            print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%)")
+            _print_verify_metrics(records)
+            print(f"Saved dataset to {output_path}")
+            if hint_selector is not None:
+                hint_selector.shutdown()
+
+            if not retry_truncated:
+                return output_path
+            truncated = sum(1 for r in records if r.get("finish_reason") == "length")
+            if truncated == 0:
+                print(f"All records complete after {attempt + 1} attempt(s).")
+                return output_path
+            print(f"{truncated} truncated records remaining.")
+            continue
+
+        # Async regular generation (non-multi-turn)
+        if use_async and not multi_turn:
+            import asyncio
+
+            async def _async_generate_with_retries():
+                async_generator = AsyncGenerator(config)
+                current_prompts = remaining_prompts
+
+                for retry_attempt in range(max_retries + 1 if retry_truncated else 1):
+                    if retry_attempt > 0:
+                        config.seed = seed + retry_attempt * 1000
+                        # Filter to truncated only
+                        truncated_indices = {idx for idx, r in records_by_index.items() if r.get("finish_reason") == "length"}
+                        current_prompts = [p for p in prompts_data if p["index"] in truncated_indices]
+                        if not current_prompts:
+                            break
+                        print(f"\n=== Retry truncated attempt {retry_attempt}/{max_retries} (seed={config.seed}, {len(current_prompts)} prompts) ===")
+
+                    all_prompts = [p["prompt"] for p in current_prompts]
+                    print(f"Running async generation on {len(all_prompts)} prompts...")
+                    all_results = await async_generator.generate_async(all_prompts, num_samples=num_samples)
+
+                    for prompt_data, gen_samples in zip(current_prompts, all_results):
+                        primitive = {
+                            "index": prompt_data["index"],
+                            **prompt_data["ground_truth"],
+                            "variant": prompt_data.get("variant", "unknown"),
+                        }
+
+                        if num_samples > 1:
+                            best_sample = select_best_sample(gen_samples, task, primitive)
+                        else:
+                            sample = gen_samples[0]
+                            is_correct, meta = task.check_correctness(primitive, sample["text"])
+                            best_sample = {
+                                **sample,
+                                "correct": is_correct,
+                                "metadata": meta,
+                            }
+
+                        record = {
+                            "index": prompt_data["index"],
+                            "variant": prompt_data.get("variant", "unknown"),
+                            "prompt": prompt_data["prompt"],
+                            "generation": best_sample["text"],
+                            "correct": best_sample["correct"],
+                            "finish_reason": best_sample["finish_reason"],
+                            "token_count": best_sample["token_count"],
+                            "metadata": best_sample["metadata"],
+                            "extracted_hints": extract_generation_hints(best_sample["text"]),
+                        }
+
+                        records_by_index[prompt_data["index"]] = record
+
+                    records = sorted(records_by_index.values(), key=lambda r: r["index"])
+                    save_json(output_path, records)
+
+                    correct = sum(1 for r in records if r["correct"])
+                    truncated_count = sum(1 for r in records if r.get("finish_reason") == "length")
+                    print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%), {truncated_count} truncated")
+                    _print_verify_metrics(records)
+                    print(f"Saved dataset to {output_path}")
+
+                    if truncated_count == 0 or not retry_truncated:
+                        if truncated_count == 0 and retry_attempt > 0:
+                            print(f"All records complete after {retry_attempt + 1} attempt(s).")
+                        break
+
+            asyncio.run(_async_generate_with_retries())
+            return output_path
+
+        # Standard batch processing (sync)
+        for batch_idx in range(0, len(remaining_prompts), batch_size):
+            batch_prompts_data = remaining_prompts[batch_idx:batch_idx + batch_size]
+            batch_prompts = [p["prompt"] for p in batch_prompts_data]
+
+            # Generate batch
+            if multi_turn:
+                if num_samples > 1:
+                    expanded_prompts = [p for p in batch_prompts for _ in range(num_samples)]
+                    expanded_gts = [p["ground_truth"] for p in batch_prompts_data for _ in range(num_samples)]
+                    expanded_force = [fh for fh in force_hints_list[batch_idx:batch_idx + batch_size] for _ in range(num_samples)]
+                    expanded_results = generator.generate_with_hints(
+                        expanded_prompts,
+                        expanded_gts,
+                        max_turns=max_turns,
+                        force_hints=expanded_force,
+                        hint_selector=hint_selector,
+                    )
+                    batch_results = [
+                        [r[0] for r in expanded_results[i * num_samples:(i + 1) * num_samples]]
+                        for i in range(len(batch_prompts_data))
+                    ]
+                else:
+                    batch_ground_truths = [p["ground_truth"] for p in batch_prompts_data]
+                    batch_force_hints = force_hints_list[batch_idx:batch_idx + batch_size]
+                    batch_results = generator.generate_with_hints(
+                        batch_prompts,
+                        batch_ground_truths,
+                        max_turns=max_turns,
+                        force_hints=batch_force_hints,
+                        hint_selector=hint_selector,
+                    )
+            else:
+                batch_results = generator.generate(batch_prompts)
+
+            # Process results
+            sample_strategy = sample_strategy or ("most_hints" if multi_turn else "shortest_cot")
+            batch_correct = 0
+            for prompt_data, gen_samples in zip(batch_prompts_data, batch_results):
+                primitive = {
+                    "index": prompt_data["index"],
+                    **prompt_data["ground_truth"],
+                    "variant": prompt_data.get("variant", "unknown"),
+                }
+
+                if num_samples > 1:
+                    best_sample = select_best_sample(gen_samples, task, primitive, strategy=sample_strategy)
+                else:
+                    sample = gen_samples[0]
+                    is_correct, meta = task.check_correctness(primitive, sample["text"])
+                    best_sample = {
+                        **sample,
+                        "correct": is_correct,
+                        "metadata": meta,
+                    }
+
+                if best_sample["correct"]:
+                    batch_correct += 1
+
+                record = {
+                    "index": prompt_data["index"],
+                    "variant": prompt_data.get("variant", "unknown"),
+                    "prompt": prompt_data["prompt"],
+                    "generation": best_sample["text"],
+                    "correct": best_sample["correct"],
+                    "finish_reason": best_sample["finish_reason"],
+                    "token_count": best_sample["token_count"],
+                    "metadata": best_sample["metadata"],
+                    "extracted_hints": extract_generation_hints(best_sample["text"]),
+                }
+
+                if "num_hints" in best_sample:
+                    record["num_hints"] = best_sample["num_hints"]
+                if "turns" in best_sample:
+                    record["turns"] = best_sample["turns"]
+                if "total_token_count" in best_sample:
+                    record["total_token_count"] = best_sample["total_token_count"]
+
+                records_by_index[prompt_data["index"]] = record
+
+            records = sorted(records_by_index.values(), key=lambda r: r["index"])
+            save_json(output_path, records)
+
+            batch_num = batch_idx // batch_size + 1
+            print(f"Batch {batch_num}/{total_batches}: {batch_correct}/{len(batch_results)} correct (saved)")
+
+        # Final stats for this attempt
         records = sorted(records_by_index.values(), key=lambda r: r["index"])
-        save_json(output_path, records)
-
         correct = sum(1 for r in records if r["correct"])
-        print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%)")
-        print(f"Saved dataset to {output_path}")
-        if hint_selector is not None:
-            hint_selector.shutdown()
-        return output_path
-
-    # Async regular generation (non-multi-turn)
-    if use_async and not multi_turn:
-        import asyncio
-
-        all_prompts = [p["prompt"] for p in remaining_prompts]
-
-        print(f"Running async generation on {len(all_prompts)} prompts...")
-        async_generator = AsyncGenerator(config)
-        all_results = asyncio.run(
-            async_generator.generate_async(all_prompts, num_samples=num_samples)
-        )
-
-        # Process all results
-        for prompt_data, gen_samples in zip(remaining_prompts, all_results):
-            primitive = {
-                "index": prompt_data["index"],
-                **prompt_data["ground_truth"],
-                "variant": prompt_data.get("variant", "unknown"),
-            }
-
-            if num_samples > 1:
-                best_sample = select_best_sample(gen_samples, task, primitive)
-            else:
-                sample = gen_samples[0]
-                is_correct, meta = task.check_correctness(primitive, sample["text"])
-                best_sample = {
-                    **sample,
-                    "correct": is_correct,
-                    "metadata": meta,
-                }
-
-            record = {
-                "index": prompt_data["index"],
-                "variant": prompt_data.get("variant", "unknown"),
-                "prompt": prompt_data["prompt"],
-                "generation": best_sample["text"],
-                "correct": best_sample["correct"],
-                "finish_reason": best_sample["finish_reason"],
-                "token_count": best_sample["token_count"],
-                "metadata": best_sample["metadata"],
-                "extracted_hints": extract_generation_hints(best_sample["text"]),
-            }
-
-            records_by_index[prompt_data["index"]] = record
-
-        # Save final results
-        records = sorted(records_by_index.values(), key=lambda r: r["index"])
+        print(f"Generated {len(records)} examples: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%)")
+        _print_verify_metrics(records)
         save_json(output_path, records)
-
-        correct = sum(1 for r in records if r["correct"])
-        print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%)")
         print(f"Saved dataset to {output_path}")
-        return output_path
 
-    # Standard batch processing (sync)
-    for batch_idx in range(0, len(remaining_prompts), batch_size):
-        batch_prompts_data = remaining_prompts[batch_idx:batch_idx + batch_size]
-        batch_prompts = [p["prompt"] for p in batch_prompts_data]
-
-        # Generate batch
-        if multi_turn:
-            # Multi-turn generation with hint injection (sync)
-            # Duplicate prompts for num_samples > 1 (generate_with_hints produces 1 trajectory each)
-            if num_samples > 1:
-                expanded_prompts = [p for p in batch_prompts for _ in range(num_samples)]
-                expanded_gts = [p["ground_truth"] for p in batch_prompts_data for _ in range(num_samples)]
-                expanded_force = [fh for fh in force_hints_list[batch_idx:batch_idx + batch_size] for _ in range(num_samples)]
-                expanded_results = generator.generate_with_hints(
-                    expanded_prompts,
-                    expanded_gts,
-                    max_turns=max_turns,
-                    force_hints=expanded_force,
-                    hint_selector=hint_selector,
-                )
-                # Group back: every num_samples consecutive results belong to the same prompt
-                batch_results = [
-                    [r[0] for r in expanded_results[i * num_samples:(i + 1) * num_samples]]
-                    for i in range(len(batch_prompts_data))
-                ]
-            else:
-                batch_ground_truths = [p["ground_truth"] for p in batch_prompts_data]
-                batch_force_hints = force_hints_list[batch_idx:batch_idx + batch_size]
-                batch_results = generator.generate_with_hints(
-                    batch_prompts,
-                    batch_ground_truths,
-                    max_turns=max_turns,
-                    force_hints=batch_force_hints,
-                    hint_selector=hint_selector,
-                )
-        else:
-            batch_results = generator.generate(batch_prompts)
-
-        # Process results
-        sample_strategy = sample_strategy or ("most_hints" if multi_turn else "shortest_cot")
-        batch_correct = 0
-        for prompt_data, gen_samples in zip(batch_prompts_data, batch_results):
-            primitive = {
-                "index": prompt_data["index"],
-                **prompt_data["ground_truth"],
-                "variant": prompt_data.get("variant", "unknown"),
-            }
-
-            # If num_samples > 1, select best sample; otherwise use single sample
-            if num_samples > 1:
-                best_sample = select_best_sample(gen_samples, task, primitive, strategy=sample_strategy)
-            else:
-                # Single sample case - evaluate it
-                sample = gen_samples[0]
-                is_correct, meta = task.check_correctness(primitive, sample["text"])
-                best_sample = {
-                    **sample,
-                    "correct": is_correct,
-                    "metadata": meta,
-                }
-
-            if best_sample["correct"]:
-                batch_correct += 1
-
-            record = {
-                "index": prompt_data["index"],
-                "variant": prompt_data.get("variant", "unknown"),
-                "prompt": prompt_data["prompt"],
-                "generation": best_sample["text"],
-                "correct": best_sample["correct"],
-                "finish_reason": best_sample["finish_reason"],
-                "token_count": best_sample["token_count"],
-                "metadata": best_sample["metadata"],
-                "extracted_hints": extract_generation_hints(best_sample["text"]),
-            }
-
-            # Add multi-turn metadata if available
-            if "num_hints" in best_sample:
-                record["num_hints"] = best_sample["num_hints"]
-            if "turns" in best_sample:
-                record["turns"] = best_sample["turns"]
-            if "total_token_count" in best_sample:
-                record["total_token_count"] = best_sample["total_token_count"]
-
-            # Update in-place (replaces old record if retrying)
-            records_by_index[prompt_data["index"]] = record
-
-        # Save after each batch (convert dict values to list, sorted by index)
-        records = sorted(records_by_index.values(), key=lambda r: r["index"])
-        save_json(output_path, records)
-
-        batch_num = batch_idx // batch_size + 1
-        print(f"Batch {batch_num}/{total_batches}: {batch_correct}/{len(batch_results)} correct (saved)")
-
-    # Final stats
-    correct = sum(1 for r in records if r["correct"])
-    print(f"Generated {len(records)} examples: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%)")
-
-    # Save
-    save_json(output_path, records)
-    print(f"Saved dataset to {output_path}")
+        if not retry_truncated:
+            break
+        truncated = sum(1 for r in records if r.get("finish_reason") == "length")
+        if truncated == 0:
+            print(f"All records complete after {attempt + 1} attempt(s).")
+            break
+        print(f"{truncated} truncated records remaining.")
 
     if hint_selector is not None:
         hint_selector.shutdown()
 
     return output_path
+
+
+def _compute_multisample_metrics(details: list[dict]) -> dict:
+    """Compute metrics for multi-sample evaluation.
+
+    Each detail has n_samples, n_correct, n_abstained.
+    Returns avg@k accuracy and raw counts, overall and by variant/level.
+    """
+    from collections import defaultdict
+
+    def _group_metrics(records):
+        n_problems = len(records)
+        total_correct = sum(r["n_correct"] for r in records)
+        total_samples = sum(r["n_samples"] for r in records)
+        total_abstained = sum(r["n_abstained"] for r in records)
+        avg_accuracy = (
+            sum(r["n_correct"] / r["n_samples"] for r in records) / n_problems
+            if n_problems > 0 else 0
+        )
+        return {
+            "n_problems": n_problems,
+            "total_correct": total_correct,
+            "total_samples": total_samples,
+            "total_abstained": total_abstained,
+            "avg_accuracy": avg_accuracy,
+        }
+
+    by_variant = defaultdict(list)
+    by_level = defaultdict(list)
+    for d in details:
+        by_variant[d.get("variant", "unknown")].append(d)
+        level = d.get("level", "unknown")
+        if level != "unknown":
+            by_level[level].append(d)
+
+    metrics = _group_metrics(details)
+    metrics["by_variant"] = {v: _group_metrics(recs) for v, recs in sorted(by_variant.items())}
+    if by_level:
+        metrics["by_level"] = {l: _group_metrics(recs) for l, recs in sorted(by_level.items())}
+
+    return metrics
+
+
+def _format_multisample_metrics(metrics: dict, model_name: str | None, num_samples: int) -> str:
+    """Format multi-sample metrics as a table."""
+    lines = [
+        "",
+        f"=== Multi-Sample Evaluation ({num_samples} samples) ===",
+    ]
+    if model_name:
+        lines.append(f"Model: {model_name}")
+
+    def _row(label, m):
+        avg = f"{m['avg_accuracy']:.1%}"
+        raw = f"{m['total_correct']}/{m['total_samples']}"
+        abst = f"{m['total_abstained']}/{m['total_samples']}" if m['total_abstained'] > 0 else "--"
+        return f"  {label:<20s}  {m['n_problems']:>5d}  {avg:>8s}  {raw:>14s}  {abst:>14s}"
+
+    lines.append(f"  {'':20s}  {'N':>5s}  {'Avg@'+str(num_samples):>8s}  {'Correct/Total':>14s}  {'Abstain/Total':>14s}")
+    lines.append("  " + "-" * 67)
+
+    for variant, vm in sorted(metrics.get("by_variant", {}).items()):
+        lines.append(_row(variant, vm))
+
+    lines.append("  " + "-" * 67)
+    lines.append(_row("Total", metrics))
+
+    if "by_level" in metrics:
+        lines.append("")
+        lines.append(f"  {'':20s}  {'N':>5s}  {'Avg@'+str(num_samples):>8s}  {'Correct/Total':>14s}  {'Abstain/Total':>14s}")
+        lines.append("  " + "-" * 67)
+        for level, lm in sorted(metrics["by_level"].items()):
+            lines.append(_row(level, lm))
+        lines.append("  " + "-" * 67)
+        lines.append(_row("Total", metrics))
+
+    return "\n".join(lines)
 
 
 def evaluate(
@@ -862,12 +1028,14 @@ def evaluate(
     max_new_tokens: int = 2048,
     temperature: float = 1.0,
     top_p: float = 1.0,
+    num_samples: int = 1,
     tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.9,
     verbose: bool = False,
     multi_turn: bool | None = None,
     max_turns: int | None = None,
     use_async: bool = False,
+    seed: int | None = 42,
     hint_selection: str | None = None,
     helper_model: str | None = None,
     helper_gpu_memory_utilization: float | None = None,
@@ -951,7 +1119,8 @@ def evaluate(
             output_model_name = f"{model_name}_{run_id}"
         from pipeline.core.method import model_short_name
         model_slug = model_short_name(output_model_name)
-        output_path = method.results_dir(task_name) / f"{split}_{model_slug}.json"
+        samples_suffix = f"_{num_samples}s" if num_samples > 1 else ""
+        output_path = method.results_dir(task_name) / f"{split}_{model_slug}{samples_suffix}.json"
 
     # Load prompts
     prompts_data = load_json(prompts_path)
@@ -965,9 +1134,11 @@ def evaluate(
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         top_p=top_p,
+        num_samples=num_samples,
         tensor_parallel_size=tensor_parallel_size,
         gpu_memory_utilization=gpu_memory_utilization,
         verbose=verbose,
+        seed=seed,
         stop_strings=stop_strings,
     )
     generator = Generator(config)
@@ -976,6 +1147,8 @@ def evaluate(
     prompts = [p["prompt"] for p in prompts_data]
 
     print(f"Evaluating {actual_model_name}...")
+    if num_samples > 1:
+        print(f"Multi-sample mode: {num_samples} samples per problem")
     if use_async:
         print("Async mode enabled (optimal throughput)")
     if multi_turn:
@@ -987,16 +1160,37 @@ def evaluate(
 
         ground_truths = [p["ground_truth"] for p in prompts_data]
 
-        print(f"Running async multi-turn generation on {len(prompts)} prompts...")
-        async_generator = AsyncGenerator(config)
-        generations = asyncio.run(
-            async_generator.generate_with_hints_async(
-                prompts,
-                ground_truths,
-                max_turns=max_turns,
-                hint_selector=hint_selector,
+        # generate_with_hints_async produces 1 trajectory per prompt,
+        # so duplicate prompts for num_samples > 1
+        if num_samples > 1:
+            expanded_prompts = [p for p in prompts for _ in range(num_samples)]
+            expanded_gts = [gt for gt in ground_truths for _ in range(num_samples)]
+            print(f"Running async multi-turn generation on {len(prompts)} prompts x {num_samples} samples...")
+            async_generator = AsyncGenerator(config)
+            expanded_results = asyncio.run(
+                async_generator.generate_with_hints_async(
+                    expanded_prompts,
+                    expanded_gts,
+                    max_turns=max_turns,
+                    hint_selector=hint_selector,
+                )
             )
-        )
+            # Group back: every num_samples consecutive results belong to the same prompt
+            generations = [
+                [r[0] for r in expanded_results[i * num_samples:(i + 1) * num_samples]]
+                for i in range(len(prompts))
+            ]
+        else:
+            print(f"Running async multi-turn generation on {len(prompts)} prompts...")
+            async_generator = AsyncGenerator(config)
+            generations = asyncio.run(
+                async_generator.generate_with_hints_async(
+                    prompts,
+                    ground_truths,
+                    max_turns=max_turns,
+                    hint_selector=hint_selector,
+                )
+            )
 
     # Async regular generation
     elif use_async and not multi_turn:
@@ -1005,18 +1199,32 @@ def evaluate(
         print(f"Running async generation on {len(prompts)} prompts...")
         async_generator = AsyncGenerator(config)
         generations = asyncio.run(
-            async_generator.generate_async(prompts, num_samples=1)
+            async_generator.generate_async(prompts, num_samples=num_samples)
         )
 
     # Sync multi-turn generation
     elif multi_turn:
         ground_truths = [p["ground_truth"] for p in prompts_data]
-        generations = generator.generate_with_hints_batched(
-            prompts,
-            ground_truths,
-            max_turns=max_turns,
-            hint_selector=hint_selector,
-        )
+        if num_samples > 1:
+            expanded_prompts = [p for p in prompts for _ in range(num_samples)]
+            expanded_gts = [gt for gt in ground_truths for _ in range(num_samples)]
+            expanded_results = generator.generate_with_hints_batched(
+                expanded_prompts,
+                expanded_gts,
+                max_turns=max_turns,
+                hint_selector=hint_selector,
+            )
+            generations = [
+                [r[0] for r in expanded_results[i * num_samples:(i + 1) * num_samples]]
+                for i in range(len(prompts))
+            ]
+        else:
+            generations = generator.generate_with_hints_batched(
+                prompts,
+                ground_truths,
+                max_turns=max_turns,
+                hint_selector=hint_selector,
+            )
 
     # Sync regular generation
     else:
@@ -1026,7 +1234,74 @@ def evaluate(
 
         generations = generator.generate_batched(prompts, callback=progress_callback)
 
-    # Create result records
+    # --- Multi-sample path (num_samples > 1) ---
+    if num_samples > 1:
+        details = []
+        for prompt_data, gen_samples in zip(prompts_data, generations):
+            primitive = {
+                "index": prompt_data["index"],
+                **prompt_data["ground_truth"],
+                "variant": prompt_data.get("variant", "unknown"),
+            }
+
+            samples = []
+            for s in gen_samples:
+                is_correct, meta = task.check_correctness(primitive, s["text"])
+                samples.append({
+                    "generation": s["text"],
+                    "correct": is_correct,
+                    "abstained": meta.get("abstained", False) if isinstance(meta, dict) else False,
+                    "predicted_answer": meta.get("predicted_answer") if isinstance(meta, dict) else None,
+                    "finish_reason": s.get("finish_reason", "unknown"),
+                    "token_count": s.get("token_count", 0),
+                })
+
+            n_correct = sum(1 for s in samples if s["correct"])
+            n_abstained = sum(1 for s in samples if s["abstained"])
+
+            details.append({
+                "index": prompt_data["index"],
+                "variant": prompt_data.get("variant", "unknown"),
+                "level": prompt_data.get("ground_truth", {}).get("level", "unknown"),
+                "ground_truth": prompt_data["ground_truth"],
+                "n_samples": len(samples),
+                "n_correct": n_correct,
+                "n_abstained": n_abstained,
+                "samples": samples,
+            })
+
+        # Compute multi-sample metrics
+        metrics = _compute_multisample_metrics(details)
+
+        results = {
+            "model": actual_model_name,
+            "model_alias": model_name,
+            "prompts": str(prompts_path),
+            "timestamp": datetime.now().isoformat(),
+            "config": {
+                "temperature": temperature,
+                "max_new_tokens": max_new_tokens,
+                "top_p": top_p,
+                "num_samples": num_samples,
+                "multi_turn": multi_turn,
+                "max_turns": max_turns if multi_turn else None,
+            },
+            "metrics": metrics,
+            "details": details,
+        }
+
+        print(_format_multisample_metrics(metrics, model_name, num_samples))
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        save_json(output_path, results)
+        print(f"\nSaved results to {output_path}")
+
+        if hint_selector is not None:
+            hint_selector.shutdown()
+
+        return output_path
+
+    # --- Single-sample path (num_samples == 1) ---
     details = []
     for prompt_data, gen_samples in zip(prompts_data, generations):
         # gen_samples is a list of samples (even if num_samples=1)
@@ -1087,6 +1362,7 @@ def evaluate(
             "temperature": temperature,
             "max_new_tokens": max_new_tokens,
             "top_p": top_p,
+            "num_samples": 1,
             "multi_turn": multi_turn,
             "max_turns": max_turns if multi_turn else None,
         },
@@ -1119,6 +1395,11 @@ def evaluate(
                     for s in sels
                 ]
                 print(f"  [{idx}] level={level} correct={correct} hints={d.get('num_hints', 0)} | {', '.join(sel_strs)}")
+
+    # Print and save verify metrics if applicable
+    verify_metrics = _print_verify_metrics(details)
+    if verify_metrics:
+        results["verify_metrics"] = verify_metrics
 
     # Save
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1459,6 +1740,6 @@ def evaluate_classifier(
     # Save
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_json(output_path, results)
-    print(f"\nSaved results to {output_path}")
+    print(f"\nSaved classifier eval results to {output_path}")
 
     return output_path

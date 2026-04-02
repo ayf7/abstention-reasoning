@@ -404,6 +404,8 @@ def train_rl(
     resume_path: Path | None = None,
     cleanup_checkpoints: bool = True,
     keep_state: bool = False,
+    reward_kwargs_overrides: dict | None = None,
+    shuffle_seed: int | None = None,
 ) -> Path:
     """
     Train RL model using verl (GRPO algorithm).
@@ -525,7 +527,7 @@ def train_rl(
     max_hints = None
     if method is not None:
         reward_function_name = method.reward_function
-        reward_kwargs = method.reward_kwargs
+        reward_kwargs = {**method.reward_kwargs}
         allow_hint = method.allow_hint
         rollout_backend = method.rollout_backend
         rollout_mode = method.rollout_mode
@@ -533,6 +535,10 @@ def train_rl(
         max_turns = method.max_turns
         max_hints = method.max_hints
         template_content = method.load_template(task_name, "rl")
+
+    # Apply CLI overrides to reward kwargs
+    if reward_kwargs_overrides:
+        reward_kwargs.update(reward_kwargs_overrides)
 
     # Handle resume path
     if resume_path is not None:
@@ -656,6 +662,10 @@ def train_rl(
         f"trainer.rollout_data_dir={rollouts_dir}",
     ]
 
+    # Shuffle seed for training data ordering
+    if shuffle_seed is not None:
+        cmd.append(f"+data.seed={shuffle_seed}")
+
     # Add runtime template config if method is specified
     if template_content is not None:
         # Escape the template for shell/hydra (replace newlines, quotes)
@@ -717,6 +727,13 @@ def train_rl(
     if reward_kwargs:
         for key, value in reward_kwargs.items():
             cmd.append(f"+custom_reward_function.reward_kwargs.{key}={value}")
+
+    # Warm swap config (for abstention_verify warm start)
+    if reward_kwargs and "warm_diversity_steps" in reward_kwargs:
+        ws_steps = int(reward_kwargs["warm_diversity_steps"])
+        if ws_steps > 0:
+            cmd.append(f"+warm_swap.steps={ws_steps}")
+            cmd.append(f"+warm_swap.rate=0.5")
 
     # Set reward manager type if non-default
     if method is not None and method.reward_manager != "naive":

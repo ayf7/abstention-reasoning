@@ -178,10 +178,13 @@ class Generator:
         """
         Multi-turn generation with hint injection using turn-synchronized batching.
 
-        All prompts are processed together in synchronized turns:
-        1. Batch generate for all incomplete prompts until stop token
-        2. Post-process: detect patterns, append hints where needed
-        3. Repeat until all complete or max_turns reached
+        Uses token-based accumulation (splicing) to match RL rollout behavior:
+        each segment (model generation, hint injection) is tokenized independently
+        and concatenated as raw token IDs. This avoids tokenization boundary
+        mismatches between eval and RL.
+
+        When force_hints is active, falls back to text-based accumulation for
+        compatibility with the text manipulation required by forced hint injection.
 
         Args:
             prompts: List of chat message lists
@@ -200,29 +203,18 @@ class Generator:
             List of lists of dicts with 'text', 'finish_reason', 'token_count', 'num_hints'
         """
         import ast
-        from vllm import SamplingParams
 
+        # Normalize force_hints to per-prompt list
         num_prompts = len(prompts)
-        tokenizer = self.model.get_tokenizer()
+        if isinstance(force_hints, int):
+            force_hints_per = [force_hints] * num_prompts
+        else:
+            force_hints_per = force_hints
+        any_forcing = any(f > 0 for f in force_hints_per)
 
-        # Initialize per-prompt state
-        # Deep copy messages to avoid mutating the original prompts
-        import copy
-        state = {
-            "accumulated_text": [""] * num_prompts,
-            "current_messages": [copy.deepcopy(m) for m in prompts],  # Deep copy to avoid mutation
-            "last_given_index": [-1] * num_prompts,
-            "num_hints_used": [0] * num_prompts,
-            "turns": [0] * num_prompts,
-            "finish_reason": ["length"] * num_prompts,
-            "completed": [False] * num_prompts,
-            "hint_selections": [[] for _ in range(num_prompts)],
-        }
-
-        # Parse hint expressions for each prompt
+        # Parse hint expressions
         hints_list = []
         for ground_truth in ground_truths:
-            # Support both hint_exprs (new) and hints_expr (legacy)
             hints_expr = ground_truth.get("hint_exprs", ground_truth.get("hints_expr", []))
             if isinstance(hints_expr, str):
                 try:
@@ -231,27 +223,247 @@ class Generator:
                     hints_expr = []
             hints_list.append(hints_expr)
 
-        # Normalize force_hints to per-prompt list
-        if isinstance(force_hints, int):
-            force_hints_per = [force_hints] * num_prompts
+        if any_forcing:
+            # Forced hints require text manipulation — use legacy text-based path
+            return self._generate_with_hints_text_based(
+                prompts, hints_list, force_hints_per, max_turns,
+                request_tag, answer_tag, force_hint_token_range, hint_selector,
+            )
         else:
-            force_hints_per = force_hints
-        any_forcing = any(f > 0 for f in force_hints_per)
+            # Token-based path matching RL rollout splicing
+            return self._generate_with_hints_token_spliced(
+                prompts, hints_list, max_turns,
+                request_tag, answer_tag, hint_selector,
+            )
+
+    def _generate_with_hints_token_spliced(
+        self,
+        prompts: list[list[dict]],
+        hints_list: list[list[str]],
+        max_turns: int,
+        request_tag: str,
+        answer_tag: str,
+        hint_selector,
+    ) -> list[list[dict]]:
+        """Token-spliced multi-turn generation matching RL rollout behavior.
+
+        Accumulates raw token IDs from each segment (generation, hint injection)
+        and concatenates them, exactly like the RL rollout's agentic_loop.
+        """
+        from vllm import SamplingParams
+
+        num_prompts = len(prompts)
+        tokenizer = self.model.get_tokenizer()
+        base_seed = self.config.seed
+
+        # Tokenize initial prompts (once, stored as first token segment)
+        initial_token_ids = []
+        for messages in prompts:
+            if messages and messages[-1]["role"] == "assistant":
+                conversation = messages[:-1]
+                assistant_prefix = messages[-1]["content"]
+            else:
+                conversation = messages
+                assistant_prefix = ""
+
+            formatted = tokenizer.apply_chat_template(
+                conversation, tokenize=False, add_generation_prompt=True,
+            )
+            formatted += assistant_prefix
+            tokens = tokenizer.encode(formatted, add_special_tokens=False)
+            initial_token_ids.append(tokens)
+
+        # Per-prompt state
+        # accumulated_tokens: list of token segments (first is prompt, rest are gen/hint)
+        # model_token_count: count of model-generated tokens only (for budget)
+        state = {
+            "accumulated_tokens": [[ids] for ids in initial_token_ids],
+            "accumulated_text": [""] * num_prompts,
+            "model_token_count": [0] * num_prompts,
+            "last_given_index": [-1] * num_prompts,
+            "num_hints_used": [0] * num_prompts,
+            "turns": [0] * num_prompts,
+            "finish_reason": ["length"] * num_prompts,
+            "completed": [False] * num_prompts,
+            "hint_selections": [[] for _ in range(num_prompts)],
+        }
+
+        max_budget = self.config.max_new_tokens
+        turn = 0
+
+        while True:
+            # Find incomplete prompts with remaining budget
+            incomplete_indices = []
+            for i in range(num_prompts):
+                if state["completed"][i]:
+                    continue
+                if state["model_token_count"][i] >= max_budget:
+                    state["completed"][i] = True
+                    state["finish_reason"][i] = "length"
+                    continue
+                incomplete_indices.append(i)
+
+            if not incomplete_indices:
+                break
+
+            # Build prompts and per-prompt sampling params (different seed per prompt)
+            formatted_prompts = []
+            params_list = []
+            for idx in incomplete_indices:
+                all_tokens = []
+                for segment in state["accumulated_tokens"][idx]:
+                    all_tokens.extend(segment)
+                formatted_prompts.append({"prompt_token_ids": all_tokens})
+                remaining = max(max_budget - state["model_token_count"][idx], 1)
+                params_list.append(SamplingParams(
+                    temperature=self.config.temperature,
+                    top_p=self.config.top_p,
+                    max_tokens=remaining,
+                    n=1,
+                    stop=[request_tag, answer_tag],
+                    include_stop_str_in_output=True,
+                    seed=(base_seed + idx) if base_seed is not None else None,
+                ))
+
+            # Batch generate
+            outputs = self.model.generate(formatted_prompts, params_list)
+
+            # Process outputs
+            for batch_idx, idx in enumerate(incomplete_indices):
+                output = outputs[batch_idx].outputs[0]
+                generated_text = output.text
+                gen_tokens = list(output.token_ids)
+
+                state["turns"][idx] += 1
+                state["accumulated_text"][idx] += generated_text
+                state["accumulated_tokens"][idx].append(gen_tokens)
+                state["model_token_count"][idx] += len(gen_tokens)
+
+                # Check if answer tag found
+                if answer_tag in state["accumulated_text"][idx]:
+                    state["finish_reason"][idx] = "stop"
+                    state["completed"][idx] = True
+                    continue
+
+                # Check if hint was requested
+                if request_tag in generated_text:
+                    hints = hints_list[idx]
+                    last_given = state["last_given_index"][idx]
+
+                    if last_given + 1 < len(hints):
+                        if hint_selector is not None:
+                            hint_text, new_last = hint_selector.select_hint_sync(
+                                state["accumulated_text"][idx], hints, last_given,
+                            )
+                        else:
+                            next_idx = last_given + 1
+                            hint_text, new_last = hints[next_idx], next_idx
+
+                        if hint_text is not None:
+                            state["hint_selections"][idx].append({
+                                "turn": state["turns"][idx],
+                                "type": "smart" if hint_selector is not None else "sequential",
+                                "prev_last_given": last_given,
+                                "new_last_given": new_last,
+                            })
+                            state["last_given_index"][idx] = new_last
+                            state["num_hints_used"][idx] += 1
+
+                            # Inject hint — tokenize independently (matches RL splicing)
+                            hint_response = f"\n<response>{hint_text}</response>\n<think>\n"
+                            hint_tokens = tokenizer.encode(hint_response, add_special_tokens=False)
+                            state["accumulated_text"][idx] += hint_response
+                            state["accumulated_tokens"][idx].append(hint_tokens)
+                        else:
+                            warning = "\n<response>No more hints available.</response>\n<think>\n"
+                            warning_tokens = tokenizer.encode(warning, add_special_tokens=False)
+                            state["accumulated_text"][idx] += warning
+                            state["accumulated_tokens"][idx].append(warning_tokens)
+                            state["num_hints_used"][idx] += 1
+                    else:
+                        warning = "\n<response>No more hints available.</response>\n<think>\n"
+                        warning_tokens = tokenizer.encode(warning, add_special_tokens=False)
+                        state["accumulated_text"][idx] += warning
+                        state["accumulated_tokens"][idx].append(warning_tokens)
+                        state["num_hints_used"][idx] += 1
+                else:
+                    # No hint requested and no answer
+                    if output.finish_reason == "stop" and answer_tag not in state["accumulated_text"][idx]:
+                        # Model generated EOS without <answer> — append </think> and continue
+                        close_text = "</think>\n"
+                        close_tokens = tokenizer.encode(close_text, add_special_tokens=False)
+                        state["accumulated_text"][idx] += close_text
+                        state["accumulated_tokens"][idx].append(close_tokens)
+                    else:
+                        state["finish_reason"][idx] = output.finish_reason or "length"
+                        state["completed"][idx] = True
+
+            if self.config.verbose:
+                completed_count = sum(state["completed"])
+                print(f"Turn {turn + 1}: {completed_count}/{num_prompts} completed")
+
+            turn += 1
+
+        # Build results
+        all_results = []
+        for idx in range(num_prompts):
+            text = state["accumulated_text"][idx]
+            result = {
+                "text": text,
+                "finish_reason": state["finish_reason"][idx],
+                "token_count": state["model_token_count"][idx],
+                "total_token_count": sum(len(seg) for seg in state["accumulated_tokens"][idx][1:]),
+                "num_hints": state["num_hints_used"][idx],
+                "turns": state["turns"][idx],
+                "hint_selections": state["hint_selections"][idx],
+            }
+            all_results.append([result])
+
+            if self.config.verbose:
+                print(f"Prompt {idx + 1}: {result['turns']} turns, {result['num_hints']} hints, {result['finish_reason']}")
+
+        return all_results
+
+    def _generate_with_hints_text_based(
+        self,
+        prompts: list[list[dict]],
+        hints_list: list[list[str]],
+        force_hints_per: list[int],
+        max_turns: int,
+        request_tag: str,
+        answer_tag: str,
+        force_hint_token_range: tuple[int, int],
+        hint_selector,
+    ) -> list[list[dict]]:
+        """Text-based multi-turn generation for forced hint injection.
+
+        Uses chat template re-application each turn. This path is only used
+        when force_hints is active (SFT data generation), not during eval.
+        """
+        import copy
+        import random as _random
+        from vllm import SamplingParams
+
+        num_prompts = len(prompts)
+        tokenizer = self.model.get_tokenizer()
+        force_rng = _random.Random(42)
+
+        state = {
+            "accumulated_text": [""] * num_prompts,
+            "current_messages": [copy.deepcopy(m) for m in prompts],
+            "last_given_index": [-1] * num_prompts,
+            "num_hints_used": [0] * num_prompts,
+            "turns": [0] * num_prompts,
+            "finish_reason": ["length"] * num_prompts,
+            "completed": [False] * num_prompts,
+            "hint_selections": [[] for _ in range(num_prompts)],
+        }
 
         think_tag = "</think>"
-
-        # Total token budget for model-generated tokens (excludes injected hint/response text)
         max_budget = self.config.max_new_tokens
 
-        # RNG for sampling per-turn token caps during forced hint turns
-        if any_forcing:
-            import random as _random
-            force_rng = _random.Random(42)
-
-        # Turn-synchronized loop (no hard cap on turns — token budget is the limit)
         turn = 0
         while True:
-            # Find incomplete prompts (check remaining budget using tokenized model text)
             incomplete_indices = []
             for i in range(num_prompts):
                 if state["completed"][i]:
@@ -264,9 +476,8 @@ class Generator:
                 incomplete_indices.append(i)
 
             if not incomplete_indices:
-                break  # All done
+                break
 
-            # Split into two groups: those still needing forced hints vs those done forcing
             forcing_indices = []
             normal_indices = []
             for idx in incomplete_indices:
@@ -275,7 +486,6 @@ class Generator:
                 else:
                     normal_indices.append(idx)
 
-            # Create forcing params with per-turn token cap, bounded by remaining budget
             if forcing_indices:
                 cap = force_rng.randint(force_hint_token_range[0], force_hint_token_range[1])
                 min_remaining = min(
@@ -294,7 +504,6 @@ class Generator:
             else:
                 forcing_params = None
 
-            # Create normal params bounded by remaining budget
             if normal_indices:
                 min_remaining = min(
                     max_budget - _count_model_tokens(state["accumulated_text"][idx], tokenizer)
@@ -312,12 +521,10 @@ class Generator:
             else:
                 normal_params = None
 
-            # Process each group with appropriate sampling params
             for group_indices, params in [(forcing_indices, forcing_params), (normal_indices, normal_params)]:
                 if not group_indices:
                     continue
 
-                # Format prompts
                 formatted_prompts = []
                 for idx in group_indices:
                     messages = state["current_messages"][idx]
@@ -329,17 +536,13 @@ class Generator:
                         assistant_content = ""
 
                     formatted = tokenizer.apply_chat_template(
-                        conversation,
-                        tokenize=False,
-                        add_generation_prompt=True,
+                        conversation, tokenize=False, add_generation_prompt=True,
                     )
                     formatted += assistant_content
                     formatted_prompts.append(formatted)
 
-                # Batch generate
                 outputs = self.model.generate(formatted_prompts, params)
 
-                # Process each output
                 for batch_idx, idx in enumerate(group_indices):
                     output = outputs[batch_idx].outputs[0]
                     generated_text = output.text
@@ -347,25 +550,18 @@ class Generator:
                     state["turns"][idx] += 1
                     state["accumulated_text"][idx] += generated_text
 
-                    # Check if answer tag found (complete)
                     if answer_tag in state["accumulated_text"][idx]:
-                        # If forcing hints and we haven't hit the minimum yet,
-                        # strip the answer and inject a hint instead
                         if force_hints_per[idx] > 0 and state["num_hints_used"][idx] < force_hints_per[idx] and state["last_given_index"][idx] + 1 < len(hints_list[idx]):
-                            # Remove everything from the answer tag onward
                             ans_pos = state["accumulated_text"][idx].rfind("<answer>")
                             if ans_pos >= 0:
                                 state["accumulated_text"][idx] = state["accumulated_text"][idx][:ans_pos]
-                            # Inject forced hint request (forced hints always use sequential)
                             self._inject_forced_hint(state, idx, hints_list[idx], rng=force_rng)
-                            # Rebuild messages from scratch for next turn
                             self._rebuild_messages(state, idx, prompts[idx])
                             continue
                         state["finish_reason"][idx] = "stop"
                         state["completed"][idx] = True
                         continue
 
-                    # Check if model stopped at </think> (force-hint interception)
                     if force_hints_per[idx] > 0 and think_tag in generated_text and request_tag not in generated_text:
                         hints = hints_list[idx]
                         if state["num_hints_used"][idx] < force_hints_per[idx] and state["last_given_index"][idx] + 1 < len(hints):
@@ -373,10 +569,8 @@ class Generator:
                             self._rebuild_messages(state, idx, prompts[idx])
                             continue
 
-                    # Check if token limit hit during forced-hint turn (model cut off mid-reasoning)
                     if force_hints_per[idx] > 0 and output.finish_reason == "length":
                         if state["num_hints_used"][idx] < force_hints_per[idx] and state["last_given_index"][idx] + 1 < len(hints_list[idx]):
-                            # Trim to last sentence boundary (". " or "\n\n")
                             text = state["accumulated_text"][idx]
                             period_cut = text.rfind('. ')
                             newline_cut = text.rfind('\n\n')
@@ -389,22 +583,16 @@ class Generator:
                             self._rebuild_messages(state, idx, prompts[idx])
                             continue
 
-                    # Check if hint was requested (naturally by the model)
                     if request_tag in generated_text:
                         hints = hints_list[idx]
                         last_given = state["last_given_index"][idx]
 
                         if last_given + 1 < len(hints):
-                            # Select hint (smart or sequential)
                             if hint_selector is not None:
-                                # Collect for batch selection later
                                 hint_text, new_last = hint_selector.select_hint_sync(
-                                    state["accumulated_text"][idx],
-                                    hints,
-                                    last_given,
+                                    state["accumulated_text"][idx], hints, last_given,
                                 )
                             else:
-                                # Sequential fallback
                                 next_idx = last_given + 1
                                 hint_text, new_last = hints[next_idx], next_idx
 
@@ -418,11 +606,9 @@ class Generator:
                                 state["last_given_index"][idx] = new_last
                                 state["num_hints_used"][idx] += 1
 
-                                # Include <think> after response to guide model to continue thinking
                                 hint_response = f"\n<response>{hint_text}</response>\n<think>\n"
                                 state["accumulated_text"][idx] += hint_response
 
-                                # Update messages for next turn
                                 messages = state["current_messages"][idx]
                                 if messages and messages[-1]["role"] == "assistant":
                                     messages[-1]["content"] += generated_text + hint_response
@@ -432,7 +618,6 @@ class Generator:
                                         "content": generated_text + hint_response,
                                     })
                             else:
-                                # No hint returned (shouldn't happen, but handle gracefully)
                                 warning = "\n<response>No more hints available.</response>\n<think>\n"
                                 state["accumulated_text"][idx] += warning
                                 state["num_hints_used"][idx] += 1
@@ -446,7 +631,6 @@ class Generator:
                                         "content": generated_text + warning,
                                     })
                         else:
-                            # No more hints - still guide model to continue thinking
                             warning = "\n<response>No more hints available.</response>\n<think>\n"
                             state["accumulated_text"][idx] += warning
                             state["num_hints_used"][idx] += 1
@@ -460,11 +644,7 @@ class Generator:
                                     "content": generated_text + warning,
                                 })
                     else:
-                        # No hint requested and no answer - hit max tokens or other stop
                         if output.finish_reason == "stop" and answer_tag not in state["accumulated_text"][idx]:
-                            # Model generated EOS without producing <answer> tags.
-                            # Append </think> to close the thinking block and continue,
-                            # giving the model a chance to emit <answer>.
                             state["accumulated_text"][idx] += "</think>\n"
                             self._rebuild_messages(state, idx, prompts[idx])
                         else:
@@ -477,7 +657,7 @@ class Generator:
 
             turn += 1
 
-        # Build results (token_count excludes <response> segments)
+        # Build results
         all_results = []
         for idx in range(num_prompts):
             text = state["accumulated_text"][idx]
@@ -722,25 +902,19 @@ class AsyncGenerator:
             formatted = self._format_prompt(prompts[idx], tokenizer)
             request_id = f"req_{idx}_{uuid.uuid4().hex[:8]}"
 
-            # Generate
-            final_output = None
+            # Generate — collect all outputs (v1 engine streams one per sample)
+            samples = []
             async for output in engine.generate(formatted, sampling_params, request_id):
-                if output.finished:
-                    final_output = output
-                    break
-
-            if final_output is None:
+                for completion in output.outputs:
+                    if completion.finish_reason is not None:
+                        samples.append({
+                            "text": completion.text,
+                            "finish_reason": completion.finish_reason,
+                            "token_count": len(completion.token_ids),
+                        })
+            if not samples:
                 results[idx] = [{"text": "", "finish_reason": "error", "token_count": 0}]
                 return
-
-            # Extract all samples
-            samples = []
-            for completion in final_output.outputs:
-                samples.append({
-                    "text": completion.text,
-                    "finish_reason": completion.finish_reason,
-                    "token_count": len(completion.token_ids),
-                })
             results[idx] = samples
 
         # Run all prompts concurrently
@@ -805,8 +979,8 @@ class AsyncGenerator:
         """
         Async multi-turn generation with hint injection.
 
-        Each prompt is handled by its own async task. When a prompt needs a hint,
-        it immediately continues without waiting for other prompts.
+        Uses token-based accumulation (splicing) to match RL rollout behavior.
+        When force_hints is active, falls back to text-based accumulation.
 
         Args:
             prompts: List of chat message lists
@@ -817,24 +991,16 @@ class AsyncGenerator:
             force_hints: Force at least this many hints per example by intercepting
                 </think> tags and injecting hint requests (default: 0, disabled)
             force_hint_token_range: (min, max) token cap for forced-hint turns.
-                On forced turns, max_tokens is sampled from this range so the model
-                is cut off mid-reasoning before it can complete. (default: (100, 500))
             hint_selector: Optional HintSelector instance for smart hint selection
 
         Returns:
             List of lists of dicts with 'text', 'finish_reason', 'token_count', 'num_hints'
         """
         import ast
-        import uuid
-        from vllm import SamplingParams
-
-        engine = await self._get_engine()
-        tokenizer = await self._get_tokenizer()
 
         num_prompts = len(prompts)
-        think_tag = "</think>"
 
-        # Parse hint expressions for each prompt
+        # Parse hint expressions
         hints_list = []
         for ground_truth in ground_truths:
             hints_expr = ground_truth.get("hint_exprs", ground_truth.get("hints_expr", []))
@@ -845,26 +1011,226 @@ class AsyncGenerator:
                     hints_expr = []
             hints_list.append(hints_expr)
 
-        # Normalize force_hints to per-prompt list
+        # Normalize force_hints
         if isinstance(force_hints, int):
             force_hints_per = [force_hints] * num_prompts
         else:
             force_hints_per = force_hints
         any_forcing = any(f > 0 for f in force_hints_per)
 
-        # Total token budget for model-generated tokens (excludes injected hint/response text)
-        max_budget = self.config.max_new_tokens
+        if any_forcing:
+            return await self._generate_with_hints_async_text_based(
+                prompts, hints_list, force_hints_per, max_turns,
+                request_tag, answer_tag, force_hint_token_range, hint_selector,
+            )
+        else:
+            return await self._generate_with_hints_async_token_spliced(
+                prompts, hints_list, max_turns,
+                request_tag, answer_tag, hint_selector,
+            )
 
-        # Results storage (indexed by prompt idx)
+    async def _generate_with_hints_async_token_spliced(
+        self,
+        prompts: list[list[dict]],
+        hints_list: list[list[str]],
+        max_turns: int,
+        request_tag: str,
+        answer_tag: str,
+        hint_selector,
+    ) -> list[list[dict]]:
+        """Async token-spliced multi-turn generation matching RL rollout behavior."""
+        import uuid
+        from vllm import SamplingParams, TokensPrompt
+
+        engine = await self._get_engine()
+        tokenizer = await self._get_tokenizer()
+
+        num_prompts = len(prompts)
+        max_budget = self.config.max_new_tokens
+        base_seed = self.config.seed
+
         results = [None] * num_prompts
-        completed_event = asyncio.Event()
-        completed_count = [0]  # Use list for mutability in nested function
+        completed_count = [0]
 
         async def process_single_prompt(idx: int):
-            """Process a single prompt through all its turns."""
-            import copy
+            hints = hints_list[idx]
+            last_given_index = -1
+            accumulated_text = ""
+            num_hints_used = 0
+            model_token_count = 0
+            turns = 0
+            finish_reason = "length"
+
+            # Tokenize initial prompt once
+            messages = prompts[idx]
+            if messages and messages[-1]["role"] == "assistant":
+                conversation = messages[:-1]
+                assistant_prefix = messages[-1]["content"]
+            else:
+                conversation = messages
+                assistant_prefix = ""
+
+            formatted = tokenizer.apply_chat_template(
+                conversation, tokenize=False, add_generation_prompt=True,
+            )
+            formatted += assistant_prefix
+
+            # accumulated_tokens: list of token segments
+            accumulated_tokens = [tokenizer.encode(formatted, add_special_tokens=False)]
+
+            while True:
+                remaining = max_budget - model_token_count
+                if remaining <= 0:
+                    finish_reason = "length"
+                    break
+
+                params = SamplingParams(
+                    temperature=self.config.temperature,
+                    top_p=self.config.top_p,
+                    max_tokens=remaining,
+                    n=1,
+                    stop=[request_tag, answer_tag],
+                    include_stop_str_in_output=True,
+                    seed=(base_seed + idx) if base_seed is not None else None,
+                )
+
+                # Flatten accumulated tokens
+                all_tokens = []
+                for segment in accumulated_tokens:
+                    all_tokens.extend(segment)
+
+                request_id = f"req_{idx}_{turns}_{uuid.uuid4().hex[:8]}"
+
+                final_output = None
+                async for output in engine.generate(
+                    TokensPrompt(prompt_token_ids=all_tokens), params, request_id
+                ):
+                    if output.finished:
+                        final_output = output
+                        break
+
+                if final_output is None:
+                    finish_reason = "error"
+                    break
+
+                generated_text = final_output.outputs[0].text
+                gen_tokens = list(final_output.outputs[0].token_ids)
+
+                turns += 1
+                accumulated_text += generated_text
+                accumulated_tokens.append(gen_tokens)
+                model_token_count += len(gen_tokens)
+
+                # Check if answer tag found
+                if answer_tag in accumulated_text:
+                    finish_reason = "stop"
+                    break
+
+                # Check if hint was requested
+                if request_tag in generated_text:
+                    if last_given_index + 1 < len(hints):
+                        if hint_selector is not None:
+                            hint_text, new_last = await hint_selector.select_hint(
+                                accumulated_text, hints, last_given_index,
+                            )
+                        else:
+                            next_idx = last_given_index + 1
+                            hint_text, new_last = hints[next_idx], next_idx
+
+                        if hint_text is not None:
+                            last_given_index = new_last
+                            num_hints_used += 1
+
+                            # Inject hint — tokenize independently (matches RL splicing)
+                            hint_response = f"\n<response>{hint_text}</response>\n<think>\n"
+                            hint_tokens = tokenizer.encode(hint_response, add_special_tokens=False)
+                            accumulated_text += hint_response
+                            accumulated_tokens.append(hint_tokens)
+
+                            if self.config.verbose:
+                                print(f"Prompt {idx + 1} got hint (last_given={new_last}), continuing...")
+                        else:
+                            warning = "\n<response>No more hints available.</response>\n<think>\n"
+                            warning_tokens = tokenizer.encode(warning, add_special_tokens=False)
+                            accumulated_text += warning
+                            accumulated_tokens.append(warning_tokens)
+                            num_hints_used += 1
+                    else:
+                        warning = "\n<response>No more hints available.</response>\n<think>\n"
+                        warning_tokens = tokenizer.encode(warning, add_special_tokens=False)
+                        accumulated_text += warning
+                        accumulated_tokens.append(warning_tokens)
+                        num_hints_used += 1
+                else:
+                    # No hint requested and no answer
+                    if final_output.outputs[0].finish_reason == "stop" and answer_tag not in accumulated_text:
+                        close_text = "</think>\n"
+                        close_tokens = tokenizer.encode(close_text, add_special_tokens=False)
+                        accumulated_text += close_text
+                        accumulated_tokens.append(close_tokens)
+                    else:
+                        finish_reason = final_output.outputs[0].finish_reason or "length"
+                        break
+
+            results[idx] = [{
+                "text": accumulated_text,
+                "finish_reason": finish_reason,
+                "token_count": model_token_count,
+                "total_token_count": sum(len(seg) for seg in accumulated_tokens[1:]),
+                "num_hints": num_hints_used,
+                "turns": turns,
+            }]
+
+            completed_count[0] += 1
+            if self.config.verbose:
+                print(f"Prompt {idx + 1} completed ({finish_reason}) - {completed_count[0]}/{num_prompts}")
+
+        if self.config.verbose:
+            print(f"Starting async generation for {num_prompts} prompts")
+
+        tasks = [process_single_prompt(idx) for idx in range(num_prompts)]
+        await asyncio.gather(*tasks)
+
+        if self.config.verbose:
+            total_hints = sum(r[0]["num_hints"] for r in results if r)
+            avg_turns = sum(r[0]["turns"] for r in results if r) / num_prompts
+            print(f"\nAsync generation complete: {num_prompts} prompts, {total_hints} total hints, {avg_turns:.1f} avg turns")
+
+        return results
+
+    async def _generate_with_hints_async_text_based(
+        self,
+        prompts: list[list[dict]],
+        hints_list: list[list[str]],
+        force_hints_per: list[int],
+        max_turns: int,
+        request_tag: str,
+        answer_tag: str,
+        force_hint_token_range: tuple[int, int],
+        hint_selector,
+    ) -> list[list[dict]]:
+        """Text-based async multi-turn generation for forced hint injection.
+
+        Uses chat template re-application each turn. Only used when force_hints
+        is active (SFT data generation), not during eval.
+        """
+        import copy
+        import uuid
+        from vllm import SamplingParams
+
+        engine = await self._get_engine()
+        tokenizer = await self._get_tokenizer()
+
+        num_prompts = len(prompts)
+        think_tag = "</think>"
+        max_budget = self.config.max_new_tokens
+
+        results = [None] * num_prompts
+        completed_count = [0]
+
+        async def process_single_prompt(idx: int):
             import random as _random
-            messages = copy.deepcopy(prompts[idx])  # Deep copy to avoid mutation
+            messages = copy.deepcopy(prompts[idx])
             hints = hints_list[idx]
             last_given_index = -1
             accumulated_text = ""
@@ -873,17 +1239,15 @@ class AsyncGenerator:
             finish_reason = "length"
 
             prompt_force = force_hints_per[idx]
-            force_rng = _random.Random(42 + idx)  # Per-prompt RNG for determinism
+            force_rng = _random.Random(42 + idx)
 
             while True:
-                # Check remaining token budget (excludes <response> segments)
                 model_tokens = _count_model_tokens(accumulated_text, tokenizer)
                 remaining = max_budget - model_tokens
                 if remaining <= 0:
                     finish_reason = "length"
                     break
 
-                # Choose sampling params based on whether we still need forced hints
                 needs_forcing = prompt_force > 0 and num_hints_used < prompt_force and last_given_index + 1 < len(hints)
                 if needs_forcing:
                     cap = force_rng.randint(force_hint_token_range[0], force_hint_token_range[1])
@@ -907,11 +1271,9 @@ class AsyncGenerator:
                         seed=self.config.seed,
                     )
 
-                # Format prompt
                 formatted = self._format_prompt(messages, tokenizer)
                 request_id = f"req_{idx}_{turns}_{uuid.uuid4().hex[:8]}"
 
-                # Generate
                 final_output = None
                 async for output in engine.generate(formatted, params, request_id):
                     if output.finished:
@@ -926,28 +1288,23 @@ class AsyncGenerator:
                 turns += 1
                 accumulated_text += generated_text
 
-                # Check if answer tag found (complete)
                 if answer_tag in accumulated_text:
-                    # If forcing hints and we haven't hit the minimum, strip answer and inject hint
                     if prompt_force > 0 and num_hints_used < prompt_force and last_given_index + 1 < len(hints):
                         ans_pos = accumulated_text.rfind("<answer>")
                         if ans_pos >= 0:
                             accumulated_text = accumulated_text[:ans_pos]
-                        # Insert transition before </think>
                         transition = force_rng.choice(HINT_TRANSITION_PHRASES)
                         think_pos = accumulated_text.rfind("</think>")
                         if think_pos >= 0:
                             accumulated_text = accumulated_text[:think_pos] + transition + accumulated_text[think_pos:]
                         else:
                             accumulated_text += transition + "</think>"
-                        # Inject forced hint (always sequential)
                         next_idx = last_given_index + 1
                         hint = hints[next_idx]
                         last_given_index = next_idx
                         num_hints_used += 1
                         forced = f"\n<request></request>\n<response>{hint}</response>\n<think>\n"
                         accumulated_text += forced
-                        # Rebuild messages
                         messages = copy.deepcopy(prompts[idx])
                         if messages and messages[-1]["role"] == "assistant":
                             messages[-1]["content"] += accumulated_text
@@ -957,10 +1314,8 @@ class AsyncGenerator:
                     finish_reason = "stop"
                     break
 
-                # Check if model stopped at </think> (force-hint interception)
                 if prompt_force > 0 and think_tag in generated_text and request_tag not in generated_text:
                     if num_hints_used < prompt_force and last_given_index + 1 < len(hints):
-                        # Insert transition before </think>
                         transition = force_rng.choice(HINT_TRANSITION_PHRASES)
                         think_pos = accumulated_text.rfind("</think>")
                         if think_pos >= 0:
@@ -971,7 +1326,6 @@ class AsyncGenerator:
                         num_hints_used += 1
                         forced = f"\n<request></request>\n<response>{hint}</response>\n<think>\n"
                         accumulated_text += forced
-                        # Rebuild messages
                         messages = copy.deepcopy(prompts[idx])
                         if messages and messages[-1]["role"] == "assistant":
                             messages[-1]["content"] += accumulated_text
@@ -981,17 +1335,14 @@ class AsyncGenerator:
                             print(f"Prompt {idx + 1} forced hint {last_given_index + 1}, continuing...")
                         continue
 
-                # Check if token limit hit during forced-hint turn (model cut off mid-reasoning)
                 if prompt_force > 0 and final_output.outputs[0].finish_reason == "length":
                     if num_hints_used < prompt_force and last_given_index + 1 < len(hints):
-                        # Trim to last sentence boundary (". " or "\n\n")
                         period_cut = accumulated_text.rfind('. ')
                         newline_cut = accumulated_text.rfind('\n\n')
                         cut = max(period_cut + 1 if period_cut >= 0 else -1,
                                   newline_cut if newline_cut >= 0 else -1)
                         if cut > 0:
                             accumulated_text = accumulated_text[:cut]
-                        # Add transition phrase and close think tag
                         transition = force_rng.choice(HINT_TRANSITION_PHRASES)
                         accumulated_text += transition + "</think>\n"
                         next_idx = last_given_index + 1
@@ -1000,7 +1351,6 @@ class AsyncGenerator:
                         num_hints_used += 1
                         forced = f"\n<request></request>\n<response>{hint}</response>\n<think>\n"
                         accumulated_text += forced
-                        # Rebuild messages
                         messages = copy.deepcopy(prompts[idx])
                         if messages and messages[-1]["role"] == "assistant":
                             messages[-1]["content"] += accumulated_text
@@ -1010,10 +1360,8 @@ class AsyncGenerator:
                             print(f"Prompt {idx + 1} token-capped, forced hint {last_given_index + 1}, continuing...")
                         continue
 
-                # Check if hint was requested (naturally by the model)
                 if request_tag in generated_text:
                     if last_given_index + 1 < len(hints):
-                        # Select hint (smart or sequential)
                         if hint_selector is not None:
                             hint_text, new_last = await hint_selector.select_hint(
                                 accumulated_text, hints, last_given_index,
@@ -1029,7 +1377,6 @@ class AsyncGenerator:
                             hint_response = f"\n<response>{hint_text}</response>\n<think>\n"
                             accumulated_text += hint_response
 
-                            # Update messages for next turn
                             if messages and messages[-1]["role"] == "assistant":
                                 messages[-1]["content"] += generated_text + hint_response
                             else:
@@ -1040,35 +1387,26 @@ class AsyncGenerator:
 
                             if self.config.verbose:
                                 print(f"Prompt {idx + 1} got hint (last_given={new_last}), continuing...")
-                            # Continue to next turn
                         else:
                             warning = "\n<response>No more hints available.</response>\n<think>\n"
                             accumulated_text += warning
                             num_hints_used += 1
-                            # Rebuild messages so model can continue reasoning
                             messages = copy.deepcopy(prompts[idx])
                             if messages and messages[-1]["role"] == "assistant":
                                 messages[-1]["content"] += accumulated_text
                             else:
                                 messages.append({"role": "assistant", "content": accumulated_text})
-                            # Continue — token budget is the real limit
                     else:
-                        # No more hints available
                         warning = "\n<response>No more hints available.</response>\n<think>\n"
                         accumulated_text += warning
                         num_hints_used += 1
-                        # Rebuild messages so model can continue reasoning
                         messages = copy.deepcopy(prompts[idx])
                         if messages and messages[-1]["role"] == "assistant":
                             messages[-1]["content"] += accumulated_text
                         else:
                             messages.append({"role": "assistant", "content": accumulated_text})
                 else:
-                    # No hint requested and no answer - hit max tokens or other stop
                     if final_output.outputs[0].finish_reason == "stop" and answer_tag not in accumulated_text:
-                        # Model generated EOS without producing <answer> tags.
-                        # Append </think> to close the thinking block and continue,
-                        # giving the model a chance to emit <answer>.
                         accumulated_text += "</think>\n"
                         messages = copy.deepcopy(prompts[idx])
                         if messages and messages[-1]["role"] == "assistant":
@@ -1079,7 +1417,6 @@ class AsyncGenerator:
                         finish_reason = final_output.outputs[0].finish_reason or "length"
                         break
 
-            # Store result (token_count excludes <response> segments)
             results[idx] = [{
                 "text": accumulated_text,
                 "finish_reason": finish_reason,
@@ -1093,7 +1430,6 @@ class AsyncGenerator:
             if self.config.verbose:
                 print(f"Prompt {idx + 1} completed ({finish_reason}) - {completed_count[0]}/{num_prompts}")
 
-        # Run all prompts concurrently
         if self.config.verbose:
             print(f"Starting async generation for {num_prompts} prompts")
 
