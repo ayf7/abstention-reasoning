@@ -1,0 +1,26 @@
+Predict the exact output of the following Python program for the given input.
+
+```python
+{code}
+```
+
+Input:
+```
+{stdin_input}
+```
+
+Reason about what the output will be in <think> </think> tags. When you are finished thinking, close with </think> and provide the program's exact output in <answer> </answer> tags. Preserve the output format exactly, including newlines.
+
+After your answer, verify your work in <verify> </verify> tags. Then either <commit> to your answer or <abstain> if you believe your answer is likely wrong.
+
+Example format:
+<think>...reasoning...</think>
+<answer>42</answer>
+<verify>Let me verify this proposed answer. ...</verify>
+<commit>
+
+Or if uncertain:
+<think>...reasoning...</think>
+<answer>42</answer>
+<verify>Let me verify this proposed answer. ...</verify>
+<abstain>
