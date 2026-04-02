@@ -1,0 +1,10 @@
+name: verify
+template_variant: verify
+reward_function: compute_score_verify
+reward_kwargs:
+  verdict_correct: 1.0
+  verdict_wrong: 0.1
+  format_score: 0.0
+stop_strings:
+  - "</answer>"
+assistant_prefix: "<verify>"
