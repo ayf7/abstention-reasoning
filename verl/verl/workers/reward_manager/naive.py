@@ -25,7 +25,7 @@ from verl.workers.reward_manager import register
 class NaiveRewardManager:
     """The reward manager."""
 
-    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source") -> None:
+    def __init__(self, tokenizer, num_examine=0, compute_score=None, reward_fn_key="data_source") -> None:
         """
         Initialize the NaiveRewardManager instance.
 
@@ -56,8 +56,6 @@ class NaiveRewardManager:
 
         already_print_data_sources = {}
 
-
-        group_min_hints_w_correct = {}
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
 
@@ -90,12 +88,6 @@ class NaiveRewardManager:
                 extra_info=extra_info,
             )
 
-            group_min_hints_w_correct_key =  '_'.join([f'{e}' for e in ground_truth["numbers"] + [f'{ground_truth["target"]}']])
-            if score["score"] == 1 and score["num_hints"] == 0:
-                group_min_hints_w_correct.setdefault(group_min_hints_w_correct_key, []).append(True)
-            else:
-                group_min_hints_w_correct.setdefault(group_min_hints_w_correct_key, []).append(False)
-
             if isinstance(score, dict):
                 reward = score["score"]
                 # Store the information including original reward
@@ -119,21 +111,6 @@ class NaiveRewardManager:
                         print(f"[{key}]", value)
                 else:
                     print("[score]", score)
-
-        """for i in range(len(data)):
-            data_item = data[i]  # DataProtoItem
-
-            prompt_ids = data_item.batch["prompts"]
-
-            prompt_length = prompt_ids.shape[-1]
-            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
-
-            ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-            group_min_hints_w_correct_key =  '_'.join([f'{e}' for e in ground_truth["numbers"] + [f'{ground_truth["target"]}']])
-
-            if reward_extra_info["num_hints"][i] > 0 and True in group_min_hints_w_correct[group_min_hints_w_correct_key]:
-                reward_tensor[i, valid_response_length - 1] /= 2"""
-
 
         if return_dict:
             return {

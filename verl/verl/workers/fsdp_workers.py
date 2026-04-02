@@ -491,9 +491,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 else {}
             )
             # lora_kwargs = {}
-            from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
+            from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout, vLLMAsyncAgenticRollout
 
-            vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRollout
+            # Select rollout class based on mode:
+            # - "sync": Synchronized rounds (original vLLM rollout)
+            # - "async": Async worker-based rollout
+            # - "async_agentic": Async multi-turn with independent prompt tasks
+            if self.config.rollout.mode == "sync":
+                vllm_rollout_cls = vLLMRollout
+            elif self.config.rollout.mode == "async_agentic":
+                vllm_rollout_cls = vLLMAsyncAgenticRollout
+            else:
+                vllm_rollout_cls = vLLMAsyncRollout
             rollout = vllm_rollout_cls(
                 model_path=local_path,
                 config=self.config.rollout,

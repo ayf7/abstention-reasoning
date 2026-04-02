@@ -427,8 +427,7 @@ class SGLangRollout(BaseRollout):
                 # log_requests=True,
                 # log_requests_level=2,
                 # max_running_requests=1,
-                mm_attention_backend="fa3",
-                attention_backend="fa3",
+                # NOTE: mm_attention_backend and attention_backend="fa3" removed for SGLang 0.4.6 compatibility
                 # In async mode, we want token in token out.
                 skip_tokenizer_init=self.config.mode == "async",
             )
@@ -439,12 +438,20 @@ class SGLangRollout(BaseRollout):
         self.is_sleep = True
 
     def _init_sampling_params(self, **kwargs):
+        # Default stop strings for answer extraction
+        stop_strings = ["</answer>"]
+
+        # Add </request> stop for multi-turn hint generation
+        if getattr(self.config, 'multi_turn', None) and getattr(self.config.multi_turn, 'enable', False):
+            stop_strings.append("</request>")
+
         kwargs = dict(
             n=1,
             max_new_tokens=self.config.response_length,
             presence_penalty=0.0,
             frequency_penalty=0.0,
             repetition_penalty=1.0,
+            stop=stop_strings,
         )
         # supporting adding any sampling params from the config file
         for k in self.config.keys():

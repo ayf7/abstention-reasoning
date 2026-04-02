@@ -1,0 +1,14 @@
+Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once.
+
+If you are stuck, you can request a hint by outputting <request></request>. The system will provide an intermediate expression in <response></response> tags to help guide your solution.
+When you have the answer, close with </think> and put your final answer in <answer> </answer> tags.
+
+Example format:
+<think>...reasoning...</think>
+<request></request>
+<response>...hint 1...</response>
+<think>...reasoning...</think>
+<request></request>
+<response>...hint 2...</response>
+<think>...reasoning...</think>
+<answer>ANSWER</answer>

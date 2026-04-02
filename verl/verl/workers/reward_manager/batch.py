@@ -33,7 +33,7 @@ class BatchRewardManager:
         reward_kwargs (dict): The keyword arguments to pass to the reward function.
     """
 
-    def __init__(self, tokenizer, num_examine, compute_score, reward_fn_key="data_source", **reward_kwargs):
+    def __init__(self, tokenizer, num_examine=0, compute_score=None, reward_fn_key="data_source", **reward_kwargs):
         self.tokenizer = tokenizer
         self.num_examine = num_examine
         self.compute_score = compute_score
@@ -58,12 +58,14 @@ class BatchRewardManager:
         ground_truths = [item.non_tensor_batch["reward_model"].get("ground_truth", None) for item in data]
         data_sources = data.non_tensor_batch[self.reward_fn_key]
         extras = data.non_tensor_batch.get("extra_info", [None] * len(data))
+        uids = data.non_tensor_batch.get("uid", None)
 
         scores = self.compute_score(
             data_sources=data_sources,
             solution_strs=responses_str,
             ground_truths=ground_truths,
             extra_infos=extras,
+            uids=uids,
             **self.reward_kwargs,
         )
 

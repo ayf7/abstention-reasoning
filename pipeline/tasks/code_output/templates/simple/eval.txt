@@ -1,0 +1,15 @@
+Predict the exact output of the following Python program for the given input.
+
+```python
+{code}
+```
+
+Input:
+```
+{stdin_input}
+```
+
+Reason about what the output will be in <think> </think> tags. When you are finished thinking, close with </think> and provide the program's exact output in <answer> </answer> tags. Preserve the output format exactly, including newlines. No text between </think> and your answer.
+
+For example: <answer> 42 </answer> or <answer> YES
+NO </answer>

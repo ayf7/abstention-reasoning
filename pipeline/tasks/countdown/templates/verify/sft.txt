@@ -1,0 +1,11 @@
+Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations (+, -, *, /) and each number must be used exactly once.
+
+A model attempted to solve this problem and produced the following:
+
+<generation>
+{generation}
+</generation>
+
+Your task is to verify whether the model's answer is correct. Check the reasoning step by step, verify that the equation uses the correct numbers and evaluates to the target.
+
+Write your analysis in <verify> </verify> tags, then state your verdict as exactly "correct" or "incorrect" in <answer> </answer> tags.

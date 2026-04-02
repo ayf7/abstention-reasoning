@@ -185,19 +185,28 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
 
 def compute_response_mask(data: DataProto):
-    """Compute the attention mask for the response part of the sequence.
+    """Compute the mask for response tokens, respecting document_mask if available.
 
-    This function extracts the portion of the attention mask that corresponds to the model's response,
-    which is used for masking computations that should only apply to response tokens.
+    For multi-turn interactions with system-injected tokens (like hint responses),
+    document_mask marks those tokens with 0 to exclude them from training.
+    If document_mask is not present, falls back to standard attention_mask behavior.
 
     Args:
         data (DataProto): The data containing batched model outputs and inputs.
 
     Returns:
-        torch.Tensor: The attention mask for the response tokens.
+        torch.Tensor: The mask for response tokens (1=train on token, 0=skip token).
     """
     responses = data.batch["responses"]
     response_length = responses.size(1)
+
+    # Use document_mask if available (multi-turn with masked tokens)
+    # document_mask has 0s for system-injected tokens like <response>...</response>
+    if "document_mask" in data.batch:
+        document_mask = data.batch["document_mask"]
+        return document_mask[:, -response_length:]
+
+    # Standard case: use attention_mask for response portion
     attention_mask = data.batch["attention_mask"]
     return attention_mask[:, -response_length:]
 
@@ -689,7 +698,11 @@ class RayPPOTrainer:
             sample_inputs.extend(input_texts)
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
-            non_tensor_batch_keys_to_pop = ["raw_prompt_ids", "hint_exprs", "target", "numbers"]
+            non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
+            # Conditionally add countdown-specific fields if they exist
+            for key in ["hint_exprs", "target", "numbers"]:
+                if key in test_batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append(key)
             if "multi_modal_data" in test_batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("multi_modal_data")
             if "raw_prompt" in test_batch.non_tensor_batch:
@@ -957,6 +970,11 @@ class RayPPOTrainer:
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
+        # Save reward manager state if it supports it (e.g., AdaptiveRewardManager EMA state)
+        if hasattr(self.reward_fn, "state_dict"):
+            reward_state_path = os.path.join(local_global_step_folder, "reward_manager.pt")
+            torch.save(self.reward_fn.state_dict(), reward_state_path)
+
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
@@ -1020,6 +1038,13 @@ class RayPPOTrainer:
             self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+
+        # Restore reward manager state if available (e.g., AdaptiveRewardManager EMA state)
+        reward_state_path = os.path.join(global_step_folder, "reward_manager.pt")
+        if os.path.exists(reward_state_path) and hasattr(self.reward_fn, "load_state_dict"):
+            reward_state = torch.load(reward_state_path, weights_only=False)
+            self.reward_fn.load_state_dict(reward_state)
+            print(f"Restored reward manager state from {reward_state_path}")
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
@@ -1106,8 +1131,15 @@ class RayPPOTrainer:
 
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
 
-                non_tensor_batch_keys_to_pop = ["raw_prompt_ids", "hint_exprs", "target", "numbers"]
+                non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
 
+                # Conditionally add fields if they exist
+                if "hint_exprs" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("hint_exprs")
+                if "target" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("target")
+                if "numbers" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("numbers")
                 if "multi_modal_data" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("multi_modal_data")
                 if "raw_prompt" in batch.non_tensor_batch:
@@ -1187,6 +1219,13 @@ class RayPPOTrainer:
 
                     batch = batch.union(gen_batch_output)
 
+                    # [abstention_verify] Warm swap: randomly swap <commit>↔<abstain>
+                    # tokens in responses for first N steps. Controlled by config flag.
+                    _ws = self.config.get("warm_swap", {})
+                    _ws_steps = _ws.get("steps", 0)
+                    if _ws_steps > 0 and self.global_steps < _ws_steps:
+                        from verl.trainer.ppo.warm_swap import warm_swap_commit_abstain
+                        batch = warm_swap_commit_abstain(batch, self.tokenizer, self.global_steps, rate=_ws.get("rate", 0.5))
 
                     if "response_mask" not in batch.batch:
                         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -1319,6 +1358,9 @@ class RayPPOTrainer:
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
                         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
+                            # Include warm_swapped flag in dump if present
+                            if "warm_swapped" in batch.non_tensor_batch:
+                                reward_extra_infos_dict["warm_swapped"] = batch.non_tensor_batch["warm_swapped"].tolist()
                             print(batch.batch.keys())
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
@@ -1331,6 +1373,13 @@ class RayPPOTrainer:
                                 reward_extra_infos_dict=reward_extra_infos_dict,
                                 dump_path=rollout_data_dir,
                             )
+
+                            # Print rollout score summary
+                            s = np.array(scores)
+                            print(f"[Step {self.global_steps}] Rollout scores: "
+                                  f"mean={s.mean():.3f}, std={s.std():.3f}, "
+                                  f"min={s.min():.3f}, max={s.max():.3f}, "
+                                  f">0: {(s > 0).sum()}/{len(s)} ({100*(s > 0).mean():.1f}%)")
 
                     # validate
                     if (

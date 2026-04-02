@@ -1,0 +1,33 @@
+Solve this math problem.
+
+{problem}
+
+In your reasoning, annotate each sentence with exactly one of:
+
+**(retrieval: <Concept>)** - recalling knowledge that:
+- Has a name (e.g., "AM-GM Inequality", "Difference of Squares")
+- Is not directly stated in the problem
+- Could be taught as a standalone concept
+
+**(reasoning)** - applying logic to:
+- Substitute values into equations
+- Simplify or rearrange expressions
+- Compute arithmetic or draw conclusions
+
+Place annotations at the end of each sentence, outside any LaTeX.
+
+Example 1:
+Problem: What is the sum of the roots of $x^2 - 5x + 6 = 0$?
+<think>
+By Vieta's formulas, the sum of roots of $ax^2 + bx + c = 0$ is $-b/a$ **(retrieval: Vieta's Formulas)**. Here $a=1$ and $b=-5$, so the sum is $-(-5)/1 = 5$ **(reasoning)**.
+</think>
+<answer>5</answer>
+
+Example 2:
+Problem: Simplify $\sqrt{50}$.
+<think>
+We can write $50 = 25 \cdot 2$ **(reasoning)**. Since $\sqrt{ab} = \sqrt{a}\sqrt{b}$ for positive $a,b$ **(retrieval: Product Rule for Radicals)**, we have $\sqrt{50} = \sqrt{25}\sqrt{2} = 5\sqrt{2}$ **(reasoning)**.
+</think>
+<answer>$5\sqrt{2}$</answer>
+
+Show your annotated work in <think> </think> tags. Then give your final answer in <answer> </answer> tags.

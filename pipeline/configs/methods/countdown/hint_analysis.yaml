@@ -1,0 +1,4 @@
+name: hint_analysis
+template_variant: hint_analysis
+reward_function: compute_score
+reward_kwargs: {}

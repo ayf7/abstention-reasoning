@@ -1,0 +1,12 @@
+name: abstention_commit
+template_variant: abstention_commit
+reward_function: compute_score_abstention_commit
+reward_kwargs:
+  commit_correct: 1.0
+  commit_wrong: 0.0
+  abstain_correct: 0.5
+  abstain_wrong: 0.4
+  format_score: 0.1
+stop_strings:
+  - "<commit>"
+  - "<abstain>"

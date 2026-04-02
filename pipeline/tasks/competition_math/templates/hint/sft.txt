@@ -1,0 +1,20 @@
+Solve this math problem.
+
+{problem}
+
+You have access to a hint system. You can request up to 6 progressive hints. Each hint reveals more of the solution approach. If you get stuck, request a hint.
+
+To request a hint, close your thinking with </think> and then use <request></request>.
+The system will respond with a hint in <response>...</response> tags.
+After receiving a hint, continue reasoning in <think>...</think> tags.
+When you have the answer, close with </think> and put your final answer in <answer> </answer> tags. Write your answer in plain text without LaTeX or special characters (e.g., 1/36 not \frac{1}{36}, sqrt(3) not √3, pi not π).
+
+Example format:
+<think>...reasoning...</think>
+<request></request>
+<response>...hint 1...</response>
+<think>...reasoning...</think>
+<request></request>
+<response>...hint 2...</response>
+<think>...reasoning...</think>
+<answer>ANSWER</answer>

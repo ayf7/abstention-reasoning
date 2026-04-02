@@ -116,6 +116,12 @@ class RLHFDataset(Dataset):
         self.need_tools_kwargs = config.get("need_tools_kwargs", False)
         self.filter_prompts = config.get("filter_prompts", True)
         self.serialize_dataset = False
+
+        # Runtime template application (for primitives-only parquet)
+        self.runtime_template = config.get("runtime_template", None)
+        self.runtime_system_message = config.get("runtime_system_message", None)
+        self.runtime_assistant_prefix = config.get("runtime_assistant_prefix", "<think> Let me solve this step by step.")
+
         self._download()
         self._read_files_and_tokenize()
 
@@ -188,7 +194,11 @@ class RLHFDataset(Dataset):
         return len(self.dataframe)
 
     def _build_messages(self, example: dict):
-        messages: list = example.pop(self.prompt_key)
+        # Check if this is primitives-only format (runtime template application)
+        if "primitive" in example and self.runtime_template is not None:
+            messages = self._apply_runtime_template(example)
+        else:
+            messages: list = example.pop(self.prompt_key)
 
         if self.image_key in example or self.video_key in example:
             for message in messages:
@@ -208,7 +218,38 @@ class RLHFDataset(Dataset):
 
         return messages
 
-    def __getitem__(self, item):
+    def _apply_runtime_template(self, example: dict) -> list:
+        """
+        Apply template to primitive at runtime.
+
+        Args:
+            example: Dict containing 'primitive' with task-specific fields
+
+        Returns:
+            List of chat messages
+        """
+        primitive = example.pop("primitive")
+
+        # Apply template substitution
+        content = self.runtime_template
+        for key, value in primitive.items():
+            content = content.replace(f"{{{key}}}", str(value))
+            content = content.replace(f"{{{{{key}}}}}", str(value))  # Also handle {{key}}
+
+        # Build messages
+        messages = []
+
+        if self.runtime_system_message:
+            messages.append({"role": "system", "content": self.runtime_system_message})
+
+        messages.append({"role": "user", "content": content})
+
+        if self.runtime_assistant_prefix:
+            messages.append({"role": "assistant", "content": self.runtime_assistant_prefix})
+
+        return messages
+
+    def __getitem__(self, item, _skip_attempts=0):
         """
         Note that we also return the raw_input_ids so that it can be combined with other chat template
         """
@@ -252,6 +293,21 @@ class RLHFDataset(Dataset):
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
+
+        # Safety net: skip overlong prompts that weren't caught by the pre-filter
+        # (can happen due to tokenization differences or runtime template application)
+        seq_len = input_ids.shape[-1]
+        if seq_len > self.max_prompt_length and self.truncation == "error":
+            if _skip_attempts >= 10:
+                raise RuntimeError(
+                    f"Too many consecutive overlong prompts (10) starting from item {item - _skip_attempts}. "
+                    f"Consider increasing --max-prompt-length."
+                )
+            logger.warning(
+                f"Skipping overlong prompt at index {item} "
+                f"(length {seq_len} > max_prompt_length {self.max_prompt_length})"
+            )
+            return self.__getitem__((item + 1) % len(self), _skip_attempts + 1)
 
         input_ids, attention_mask = verl_F.postprocess_data(
             input_ids=input_ids,
@@ -315,6 +371,30 @@ class RLHFDataset(Dataset):
         row_dict["index"] = index
         row_dict["tools_kwargs"] = tools_kwargs
         row_dict["interaction_kwargs"] = interaction_kwargs
+
+        # Unpack ground_truth fields to top level for rollout access
+        # The pipeline stores task-specific fields (hint_exprs, target, numbers) in ground_truth
+        # but the rollout expects them at the top level of non_tensor_batch
+        ground_truth = row_dict.get("ground_truth", {})
+        if not ground_truth:
+            # Also check reward_model.ground_truth (legacy format)
+            reward_model = row_dict.get("reward_model", {})
+            if isinstance(reward_model, dict):
+                ground_truth = reward_model.get("ground_truth", {})
+
+        if isinstance(ground_truth, dict):
+            # Extract hint_exprs (also handle legacy hints_expr name)
+            if "hint_exprs" in ground_truth:
+                row_dict["hint_exprs"] = ground_truth["hint_exprs"]
+            elif "hints_expr" in ground_truth:
+                row_dict["hint_exprs"] = ground_truth["hints_expr"]
+
+            # Extract target and numbers for countdown task
+            if "target" in ground_truth:
+                row_dict["target"] = ground_truth["target"]
+            if "numbers" in ground_truth:
+                row_dict["numbers"] = ground_truth["numbers"]
+
         return row_dict
 
     def __getstate__(self):

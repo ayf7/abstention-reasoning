@@ -1,0 +1,18 @@
+Predict the exact output of the following Python program for the given input.
+
+```python
+{code}
+```
+
+Input:
+```
+{stdin_input}
+```
+
+Reason about what the output will be. You have access to a hint system that provides the state of all variables at a specific line number. You can request up to 2 hints. The first hint corresponds to roughly 50% of the code's execution. If you get stuck or want to verify your reasoning, request a hint.
+
+To request a hint, close your thinking with </think> and then use <request></request>.
+The system will respond with variable values at that checkpoint in <response>...</response> tags (e.g., "After line 12: x = 5, y = [1, 2]").
+After receiving a hint, continue reasoning in <think>...</think> tags.
+
+Think through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and IMMEDIATELY provide your final answer in <answer> </answer> tags with no text in between.

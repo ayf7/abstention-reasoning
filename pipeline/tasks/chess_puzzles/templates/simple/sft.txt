@@ -1,0 +1,18 @@
+You are given a chess puzzle. Find the winning move for {other_mover}.
+
+FEN: {fen}
+
+Board position:
+{board_layout}
+
+From this position, {last_mover} plays: {losing_move}, in other words {elaborated_move}
+
+Your answer must be in UCI notation format: [source_square][destination_square]
+For example:
+- Knight from g1 to f3 → g1f3
+- Rook from d8 to d1 → d8d1
+- Pawn from e7 to e8 promoting to queen → e7e8q
+
+Do NOT use algebraic notation like Rd8+, Nf3, or e4. Only use UCI format.
+
+Show your analysis in <think> </think> tags and return your final move in <answer> </answer> tags, for example <answer>e2e4</answer>.

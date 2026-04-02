@@ -1,0 +1,16 @@
+Predict the exact output of the following Python program.
+
+{code}
+
+Input:
+{stdin_input}
+
+A model attempted to solve this problem and produced the following:
+
+<generation>
+{generation}
+</generation>
+
+Reason through the problem step by step to determine whether the model's final answer is correct. You can use the provided generation to help you, but if you identify that the answer is correct and the reasoning is not, still return correct.
+
+Write your analysis in <verify> </verify> tags, then state your verdict as exactly "correct" or "incorrect" in <answer> </answer> tags.

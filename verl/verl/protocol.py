@@ -567,6 +567,8 @@ class DataProto:
             tensors[key] = self.batch.pop(key)
         non_tensors = {}
         # non tensor batch
+        print(non_tensor_batch_keys)
+        print(self.non_tensor_batch.keys())
         for key in non_tensor_batch_keys:
             assert key in self.non_tensor_batch.keys()
             non_tensors[key] = self.non_tensor_batch.pop(key)

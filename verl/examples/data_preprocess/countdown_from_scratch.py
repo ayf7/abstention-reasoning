@@ -200,7 +200,7 @@ def make_prefix(dp, template_type, abstention=False, hint=False, penalty=False):
         if abstention:
             question += " If you believe you will not be able to solve the problem at any point of your thinking or reasoning process, you can return <answer> I abstain </answer>"
         if hint:
-            question += " If you believe you will not be able to solve the problem, you can ask for a hint by printing the <hint> tag."
+            question += " If you believe you will not be able to solve the problem, you can ask for a hint by outputting <request></request>."
         assistant = f"""<think> Let me solve this step by step."""
     elif template_type == 'qwen-instruct':
         print("THis template type needs to be implemented")

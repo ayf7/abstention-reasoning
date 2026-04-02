@@ -104,10 +104,22 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
 
-    try:
-        num_hints = batch.batch["num_hints"]
-    except:
-        num_hints = torch.tensor([0])
+    # Reward extra info is stored in non_tensor_batch (as numpy arrays)
+    num_hints = None
+    correct = None
+    abstained = None
+    committed = None
+    malformed = None
+    if "num_hints" in batch.non_tensor_batch:
+        num_hints = batch.non_tensor_batch["num_hints"]
+    if "correct" in batch.non_tensor_batch:
+        correct = batch.non_tensor_batch["correct"]
+    if "abstained" in batch.non_tensor_batch:
+        abstained = batch.non_tensor_batch["abstained"]
+    if "committed" in batch.non_tensor_batch:
+        committed = batch.non_tensor_batch["committed"]
+    if "malformed" in batch.non_tensor_batch:
+        malformed = batch.non_tensor_batch["malformed"]
 
     advantages = batch.batch["advantages"]
     returns = batch.batch["returns"]
@@ -182,14 +194,169 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         metrics["num_turns/max"] = num_turns.max()
         metrics["num_turns/mean"] = num_turns.mean()
 
-    try:
-        metrics["critic/num_hints/mean"] = torch.mean(num_hints).detach().item()
-        metrics["critic/num_hints/max"] = torch.max(num_hints).detach().item()
-        metrics["critic/num_hints/min"] = torch.min(num_hints).detach().item()
-    except:
-        metrics["critic/num_hints/mean"] = 0
-        metrics["critic/num_hints/max"] = 0
-        metrics["critic/num_hints/min"] = 0
+    # Hint distribution and reward/accuracy breakdown by hint count
+    # Only report when hints are actually used (skip for non-hint methods)
+    if num_hints is not None:
+        num_hints_arr = np.array(num_hints, dtype=np.int64)
+        total_samples = len(num_hints_arr)
+
+    if num_hints is not None and num_hints_arr.max() > 0:
+        metrics["rollout/num_hints/mean"] = float(np.mean(num_hints_arr))
+        metrics["rollout/num_hints/max"] = int(np.max(num_hints_arr))
+        metrics["rollout/num_hints/min"] = int(np.min(num_hints_arr))
+
+        # Distribution of num_hints (count/pct for 0-5 and 6+)
+        for i in range(6):
+            count = int((num_hints_arr == i).sum())
+            metrics[f"rollout/num_hints/count_{i}"] = count
+            metrics[f"rollout/num_hints/pct_{i}"] = count / total_samples if total_samples > 0 else 0
+        count_6plus = int((num_hints_arr >= 6).sum())
+        metrics["rollout/num_hints/count_6plus"] = count_6plus
+        metrics["rollout/num_hints/pct_6plus"] = count_6plus / total_samples if total_samples > 0 else 0
+
+        # Average reward breakdown by hint count
+        seq_reward_np = sequence_reward.detach().cpu().numpy()
+        for i in range(6):
+            mask = (num_hints_arr == i)
+            if mask.sum() > 0:
+                metrics[f"rollout/num_hints/{i}_reward_avg"] = float(seq_reward_np[mask].mean())
+        mask_6plus = (num_hints_arr >= 6)
+        if mask_6plus.sum() > 0:
+            metrics["rollout/num_hints/6plus_reward_avg"] = float(seq_reward_np[mask_6plus].mean())
+
+    # Accuracy metrics (overall and by hint count)
+    if correct is not None:
+        correct_arr = np.array(correct, dtype=bool)
+        total_samples = len(correct_arr)
+
+        metrics["accuracy/overall"] = float(correct_arr.mean()) if total_samples > 0 else 0
+
+        if num_hints is not None and num_hints_arr.max() > 0:
+            for i in range(6):
+                mask = (num_hints_arr == i)
+                count = int(mask.sum())
+                if count > 0:
+                    metrics[f"accuracy/hints_{i}"] = float(correct_arr[mask].mean())
+            mask_6plus = (num_hints_arr >= 6)
+            if mask_6plus.sum() > 0:
+                metrics[f"accuracy/hints_6plus"] = float(correct_arr[mask_6plus].mean())
+
+    # Abstention metrics
+    if abstained is not None:
+        abstained_arr = np.array(abstained, dtype=bool)
+        total_samples = len(abstained_arr)
+        if total_samples > 0:
+            metrics["abstention/rate"] = float(abstained_arr.mean())
+            metrics["abstention/count"] = int(abstained_arr.sum())
+            # Accuracy among non-abstained samples
+            if correct is not None:
+                correct_arr = np.array(correct, dtype=bool)
+                non_abstained = ~abstained_arr
+                if non_abstained.sum() > 0:
+                    metrics["abstention/accuracy_non_abstained"] = float(correct_arr[non_abstained].mean())
+
+    # Abstention-verify metrics (commit/abstain/malformed breakdown)
+    if committed is not None and correct is not None:
+        committed_arr = np.array(committed, dtype=bool)
+        correct_arr_av = np.array(correct, dtype=bool)
+        abstained_arr_av = np.array(abstained, dtype=bool) if abstained is not None else ~committed_arr
+        n = len(committed_arr)
+
+        if n > 0:
+            n_committed = int(committed_arr.sum())
+            n_abstained = int(abstained_arr_av.sum())
+
+            metrics["av/commit_pct"] = n_committed / n
+            metrics["av/abstain_pct"] = n_abstained / n
+
+            # 4-way breakdown
+            commit_correct = int((committed_arr & correct_arr_av).sum())
+            commit_wrong = int((committed_arr & ~correct_arr_av).sum())
+            abstain_correct = int((abstained_arr_av & correct_arr_av).sum())
+            abstain_wrong = int((abstained_arr_av & ~correct_arr_av).sum())
+
+            metrics["av/commit_correct"] = commit_correct / n
+            metrics["av/commit_wrong"] = commit_wrong / n
+            metrics["av/abstain_correct"] = abstain_correct / n
+            metrics["av/abstain_wrong"] = abstain_wrong / n
+
+            # Precision / recall
+            if n_committed > 0:
+                metrics["av/precision"] = commit_correct / n_committed
+            total_correct = commit_correct + abstain_correct
+            if total_correct > 0:
+                metrics["av/recall"] = commit_correct / total_correct
+
+            if malformed is not None:
+                malformed_arr = np.array(malformed, dtype=bool)
+                metrics["av/malformed_pct"] = float(malformed_arr.mean())
+
+    # Verify metrics (cross-model verification)
+    if "verdict" in batch.non_tensor_batch and "generation_correct" in batch.non_tensor_batch:
+        verdict_arr = batch.non_tensor_batch["verdict"]
+        gen_correct_arr = np.array(batch.non_tensor_batch["generation_correct"], dtype=bool)
+        n = len(verdict_arr)
+
+        if n > 0:
+            # Verdict said "correct"
+            said_correct = np.array([v == "correct" for v in verdict_arr], dtype=bool)
+            said_incorrect = np.array([v == "incorrect" for v in verdict_arr], dtype=bool)
+            has_verdict = said_correct | said_incorrect
+
+            if has_verdict.sum() > 0:
+                # Accuracy: verdict matches ground truth
+                verdict_matches = (said_correct & gen_correct_arr) | (said_incorrect & ~gen_correct_arr)
+                metrics["verify/accuracy"] = float(verdict_matches[has_verdict].mean())
+
+                # Precision: of those labeled correct, how many are actually correct
+                if said_correct.sum() > 0:
+                    metrics["verify/precision"] = float(gen_correct_arr[said_correct].mean())
+
+                # Recall: of actually correct, how many did we label correct
+                if gen_correct_arr.sum() > 0:
+                    metrics["verify/recall"] = float(said_correct[gen_correct_arr].mean())
+
+                metrics["verify/commit_rate"] = float(said_correct.mean())
+
+            if malformed is not None:
+                malformed_arr = np.array(malformed, dtype=bool)
+                metrics["verify/malformed_pct"] = float(malformed_arr.mean())
+
+    # Adaptive abstention metrics (from AdaptiveRewardManager)
+    if "r_a" in batch.non_tensor_batch:
+        metrics["abstention/r_a"] = float(batch.non_tensor_batch["r_a"][0])
+    elif "r_a_adaptive" in batch.non_tensor_batch:
+        metrics["abstention/r_a"] = float(batch.non_tensor_batch["r_a_adaptive"][0])
+    if "R_att_ema" in batch.non_tensor_batch:
+        metrics["reward/R_att_ema"] = float(batch.non_tensor_batch["R_att_ema"][0])
+    if "R_all_batch" in batch.non_tensor_batch:
+        metrics["reward/R_all_batch"] = float(batch.non_tensor_batch["R_all_batch"][0])
+    if "R_att_batch" in batch.non_tensor_batch:
+        metrics["reward/R_att_batch"] = float(batch.non_tensor_batch["R_att_batch"][0])
+    if "R_att_batch_flat" in batch.non_tensor_batch:
+        metrics["reward/R_att_batch_flat"] = float(batch.non_tensor_batch["R_att_batch_flat"][0])
+    if "abstention_rate" in batch.non_tensor_batch:
+        metrics["abstention/rate_adaptive"] = float(batch.non_tensor_batch["abstention_rate"][0])
+    if "abstention_rate_by_problem" in batch.non_tensor_batch:
+        metrics["abstention/rate_by_problem"] = float(batch.non_tensor_batch["abstention_rate_by_problem"][0])
+    if "abstention_threshold_p" in batch.non_tensor_batch:
+        metrics["abstention/threshold_p"] = float(batch.non_tensor_batch["abstention_threshold_p"][0])
+    if "attempted_accuracy" in batch.non_tensor_batch:
+        metrics["abstention/attempted_accuracy"] = float(batch.non_tensor_batch["attempted_accuracy"][0])
+
+    # Adaptive hint metrics
+    if "adaptive_final_value" in batch.non_tensor_batch:
+        metrics["hint/adaptive_final"] = float(batch.non_tensor_batch["adaptive_final_value"][0])
+    if "R_ema" in batch.non_tensor_batch:
+        metrics["hint/R_ema"] = float(batch.non_tensor_batch["R_ema"][0])
+    if "R_batch" in batch.non_tensor_batch:
+        metrics["hint/R_batch"] = float(batch.non_tensor_batch["R_batch"][0])
+    if "batch_accuracy" in batch.non_tensor_batch:
+        metrics["hint/batch_accuracy"] = float(batch.non_tensor_batch["batch_accuracy"][0])
+    if "batch_malformed_rate" in batch.non_tensor_batch:
+        metrics["hint/batch_malformed_rate"] = float(batch.non_tensor_batch["batch_malformed_rate"][0])
+    if "batch_avg_hints" in batch.non_tensor_batch:
+        metrics["hint/batch_avg_hints"] = float(batch.non_tensor_batch["batch_avg_hints"][0])
 
     return metrics
 
@@ -406,15 +573,21 @@ def process_validation_metrics(
     for data_source, prompt2var2vals in data_src2prompt2var2vals.items():
         for prompt, var2vals in prompt2var2vals.items():
             for var_name, var_vals in var2vals.items():
-                if isinstance(var_vals[0], str):
+                # Skip non-numeric values (strings, None, etc.)
+                if isinstance(var_vals[0], str) or var_vals[0] is None:
+                    continue
+
+                # Filter out any None values that might be mixed in
+                numeric_vals = [v for v in var_vals if v is not None]
+                if not numeric_vals:
                     continue
 
                 metric = {}
-                n_resps = len(var_vals)
-                metric[f"mean@{n_resps}"] = np.mean(var_vals)
+                n_resps = len(numeric_vals)
+                metric[f"mean@{n_resps}"] = np.mean(numeric_vals)
 
                 if n_resps > 1:
-                    metric[f"std@{n_resps}"] = np.std(var_vals)
+                    metric[f"std@{n_resps}"] = np.std(numeric_vals)
 
                     ns = []
                     n = 2
@@ -425,12 +598,12 @@ def process_validation_metrics(
 
                     for n in ns:
                         [(bon_mean, bon_std), (won_mean, won_std)] = bootstrap_metric(
-                            data=var_vals, subset_size=n, reduce_fns=[np.max, np.min], seed=seed
+                            data=numeric_vals, subset_size=n, reduce_fns=[np.max, np.min], seed=seed
                         )
                         metric[f"best@{n}/mean"], metric[f"best@{n}/std"] = bon_mean, bon_std
                         metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
                         if var2vals.get("pred", None) is not None:
-                            vote_data = [{"val": val, "pred": pred} for val, pred in zip(var_vals, var2vals["pred"])]
+                            vote_data = [{"val": val, "pred": pred} for val, pred in zip(numeric_vals, var2vals["pred"])]
                             [(maj_n_mean, maj_n_std)] = bootstrap_metric(
                                 data=vote_data,
                                 subset_size=n,

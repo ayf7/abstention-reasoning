@@ -1,6 +1,25 @@
+
+
 *.egg-info
 *.pyc
 __pycache__
 
 checkpoints_*
 wandb
+checkpoints*
+results*
+outputs*
+logs*
+
+artifacts/
+docs/
+temp_connections/
+
+scripts/
+slurm-scripts/
+trivial_scripts/
+
+*.png
+
+.claude/
+.vscode/

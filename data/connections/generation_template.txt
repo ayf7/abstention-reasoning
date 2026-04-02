@@ -1,5 +1,0 @@
-Group the following {total_words} words into {group_count} groups of {words_per_group} words each, where each group shares a common theme or category. Each word belongs to exactly one group.
-
-Words: {words}
-
-Show your work in <think> </think> tags. Return your final answer in <answer> </answer> tags with each group in square brackets, words in all caps separated by commas, for example <answer> {example_answer} </answer>.

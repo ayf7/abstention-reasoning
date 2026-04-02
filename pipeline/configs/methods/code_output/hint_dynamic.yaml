@@ -1,0 +1,13 @@
+name: hint_dynamic
+template_variant: hint
+reward_function: compute_score_hint_dynamic
+multi_turn: true
+max_turns: 6
+max_hints: 3
+mask_response_tokens: true
+rollout_backend: vllm
+rollout_mode: sync
+reward_kwargs:
+  correct_end: 0.3
+  incorrect_end: 0.2
+  format_score: 0.1

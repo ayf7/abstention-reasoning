@@ -76,8 +76,8 @@ def _validate_groups(predicted_groups: List[List[str]], ground_truth_answers: Li
         return False
 
 
-def get_num_hints(solution_str: str, hint_pattern: str = "<hint>") -> int:
-    """Count the number of hint tags in the solution."""
+def get_num_hints(solution_str: str, hint_pattern: str = "<request>") -> int:
+    """Count the number of hint request tags in the solution."""
     return solution_str.count(hint_pattern)
 
 

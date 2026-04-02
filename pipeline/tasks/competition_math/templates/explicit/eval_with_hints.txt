@@ -1,0 +1,10 @@
+Solve this math problem.
+
+{problem}
+
+Here are some hints about concepts that may be useful:
+{hints}
+
+Show your reasoning in <think> </think> tags. After each reasoning step, annotate the mathematical concept being applied in parentheses using the pattern "(using the <category> of <name>)".
+
+Once you are done thinking, close the </think> tag and immediately provide your final answer in <answer> </answer> tags.

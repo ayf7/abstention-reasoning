@@ -1,0 +1,17 @@
+Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once.
+
+Show your work in <think> </think> tags. When you are finished thinking, close with </think> and provide your best answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>.
+
+After your answer, verify your work in <verify> </verify> tags. Then either <commit> to your answer or <abstain> if you believe your answer is likely wrong.
+
+Example format:
+<think>...reasoning...</think>
+<answer>(1 + 2) / 3</answer>
+<verify>Let me verify this proposed answer. (1 + 2) / 3 = 3 / 3 = 1. The target is 1. This is correct.</verify>
+<commit>
+
+Or if uncertain:
+<think>...reasoning...</think>
+<answer>(1 + 2) / 3</answer>
+<verify>Let me verify this proposed answer. (1 + 2) / 3 = 3 / 3 = 1. The target is 5. This does not match.</verify>
+<abstain>

@@ -1,0 +1,12 @@
+name: abstention_verify
+template_variant: abstention_verify
+reward_function: compute_score_abstention_verify
+reward_kwargs:
+  commit_correct: 1.0
+  commit_wrong: 0.1
+  abstain_correct: 0.1001
+  abstain_wrong: 0.1001
+  format_score: 0.0
+stop_strings:
+  - "<commit>"
+  - "<abstain>"
