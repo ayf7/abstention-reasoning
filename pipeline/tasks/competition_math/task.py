@@ -377,45 +377,6 @@ class CompetitionMathTask(BaseTask):
 
         return gt
 
-    def get_split_indices(
-        self,
-        total: int,
-        split: str,
-        seed: int = 42,
-        primitives: list[dict] | None = None,
-    ) -> list[int]:
-        """
-        Return indices for a given split with custom ratios.
-
-        Split ratios:
-        - sft: 30%
-        - rl_train: 35%
-        - rl_val: 5%
-        - eval: 10%
-        - eval_augmented: 30% (overlaps eval)
-        """
-        import random
-
-        rng = random.Random(seed)
-        indices = list(range(total))
-        rng.shuffle(indices)
-
-        splits = {
-            "sft": (0.0, 0.30),
-            "rl_train": (0.30, 0.65),
-            "rl_val": (0.65, 0.70),
-            "eval": (0.90, 1.0),
-            "eval_augmented": (0.70, 1.0),
-        }
-
-        if split not in splits:
-            raise ValueError(f"Unknown split: {split}. Available: {list(splits.keys())}")
-
-        start_ratio, end_ratio = splits[split]
-        start = int(total * start_ratio)
-        end = int(total * end_ratio)
-
-        return indices[start:end]
 
     def filter_for_sft(
         self,

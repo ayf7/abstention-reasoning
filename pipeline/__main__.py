@@ -376,7 +376,9 @@ def main():
     p.add_argument("--primitives", help="Path to primitives.json (default: artifacts/{task}/primitives.json)")
     p.add_argument("--output", help="Output directory (default: artifacts/{task}/{method}/prompts/)")
     p.add_argument("--split", default="all",
-                   help="Split name (sft, rl_train, rl_val, eval, eval_augmented, or 'all'). "
+                   help="Split name, or 'all' for every split this task defines. Most tasks: "
+                   "sft, rl_train, rl_val, eval, eval_augmented; code_output has "
+                   "only sft, rl_train, eval. "
                         "eval_augmented is what most evaluations read.")
     p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")

@@ -137,7 +137,10 @@ def create_prompts(
         # eval_augmented is the split nearly every recorded evaluation reads
         # (prompts/eval_augmented.json). Leaving it out of "all" meant the
         # documented setup path silently produced none of it.
-        splits = ["sft", "rl_train", "rl_val", "eval", "eval_augmented"]
+        # Ask the task which splits it defines: code_output has no rl_val or
+        # eval_augmented, and a hardcoded list made "all" die partway through,
+        # leaving a half-written prompts dir behind.
+        splits = task.supported_splits()
         results = {}
         for split in splits:
             # Determine output format based on split
@@ -341,7 +344,8 @@ def create_verify_prompts(
         method_name: Method name for path derivation and template selection (default: "verify")
         primitives_path: Path to primitives.json (default: artifacts/{task}/primitives.json)
         output_dir: Output directory (default: artifacts/{task}/{method}/prompts/)
-        split_name: Which split to create ("sft", "rl_train", "rl_val", "eval", "eval_augmented", or "all")
+        split_name: Which split to create, or "all" for every split the task
+            defines (see BaseTask.supported_splits)
         seed: Random seed for split assignment
         include_assistant_prefix: Whether to include assistant's opening
 
@@ -389,7 +393,10 @@ def create_verify_prompts(
         # eval_augmented is the split nearly every recorded evaluation reads
         # (prompts/eval_augmented.json). Leaving it out of "all" meant the
         # documented setup path silently produced none of it.
-        splits = ["sft", "rl_train", "rl_val", "eval", "eval_augmented"]
+        # Ask the task which splits it defines: code_output has no rl_val or
+        # eval_augmented, and a hardcoded list made "all" die partway through,
+        # leaving a half-written prompts dir behind.
+        splits = task.supported_splits()
         results = {}
         for split in splits:
             ext = ".parquet" if split.startswith("rl") else ".json"
