@@ -49,7 +49,6 @@ class Method:
     - allow_hint: Enable multi-turn hint generation in RL (default: False)
     - assistant_prefix: Prefix for assistant responses (used in SFT and RL)
     - mask_response_tokens: Mask <response>...</response> tokens during SFT (default: False)
-    - rollout_backend: RL rollout backend ("vllm" or "sglang", default: "vllm")
 
     Methods also provide auto-derived artifact paths based on task and method name.
     """
@@ -63,8 +62,6 @@ class Method:
                         # are bounded by max_new_tokens, not by a turn count.
     assistant_prefix: str | None = None  # If None, use task's default
     mask_response_tokens: bool = False  # Mask <response>...</response> in SFT
-    rollout_backend: str = "vllm"  # RL rollout backend: "vllm" or "sglang"
-    rollout_mode: str = "sync"  # RL rollout mode: "sync", "async", or "async_agentic"
     interaction_name: str | None = None  # Interaction name override (default: {task}_{method})
     hint_selection: str = "sequential"  # Hint selection strategy: "sequential" or "smart"
     helper_model: str | None = None  # Model for smart hint selection (e.g., "Qwen/Qwen3-14B")
@@ -126,8 +123,6 @@ class Method:
             max_turns=data.get("max_turns", 6),
             assistant_prefix=data.get("assistant_prefix"),
             mask_response_tokens=data.get("mask_response_tokens", False),
-            rollout_backend=data.get("rollout_backend", "vllm"),
-            rollout_mode=data.get("rollout_mode", "sync"),
             interaction_name=data.get("interaction_name"),
             hint_selection=data.get("hint_selection", "sequential"),
             helper_model=data.get("helper_model"),

@@ -520,8 +520,6 @@ def train_rl(
     reward_kwargs = {}
     template_content = None
     allow_hint = False
-    rollout_backend = "vllm"
-    rollout_mode = "sync"
     interaction_name = None
     max_turns = 6
     max_hints = None
@@ -529,8 +527,6 @@ def train_rl(
         reward_function_name = method.reward_function
         reward_kwargs = {**method.reward_kwargs}
         allow_hint = method.allow_hint
-        rollout_backend = method.rollout_backend
-        rollout_mode = method.rollout_mode
         interaction_name = method.interaction_name or (f"{task_name}_{method.name}" if method.multi_turn else None)
         max_turns = method.max_turns
         max_hints = method.max_hints
@@ -600,8 +596,6 @@ def train_rl(
     print(f"Val Prompts: {val_prompts_path or 'None (no validation)'}")
     print(f"Reward Function: {reward_function_path}:{reward_function_name}")
     print(f"Reward Kwargs: {reward_kwargs}")
-    print(f"Rollout Backend: {rollout_backend}")
-    print(f"Rollout Mode: {rollout_mode}")
     print(f"Multi-Turn: {allow_hint}")
     if interaction_name:
         print(f"Interaction: {interaction_name}")
@@ -679,42 +673,16 @@ def train_rl(
             escaped_prefix = assistant_prefix.replace("\n", "\\n").replace('"', '\\"')
             cmd.append(f'+data.runtime_assistant_prefix="{escaped_prefix}"')
 
-    # Add rollout backend configuration
-    if rollout_backend == "sglang":
-        # SGLang async multi-turn configuration
-        cmd.append("actor_rollout_ref.rollout.name=sglang")
-        cmd.append("data.return_raw_chat=True")  # Required for SGLang multi-turn
-
-        if allow_hint and interaction_name:
-            # Enable multi-turn with interaction system
-            cmd.append("actor_rollout_ref.rollout.multi_turn.enable=True")
-            cmd.append(f"actor_rollout_ref.rollout.multi_turn.max_user_turns={max_turns}")
-            cmd.append(f"actor_rollout_ref.rollout.multi_turn.max_assistant_turns={max_turns}")
-
-            # Set interaction config path (use absolute path for reliability)
-            interaction_config_path = repo_root / f"verl/examples/sglang_multiturn/config/interaction_config/{interaction_name}_interaction_config.yaml"
-            if not interaction_config_path.exists():
-                raise FileNotFoundError(
-                    f"Interaction config not found: {interaction_config_path}. "
-                    f"Create a config file for interaction '{interaction_name}'."
-                )
-            cmd.append(f"actor_rollout_ref.rollout.multi_turn.interaction_config_path={interaction_config_path}")
-
-            # Relax tokenization sanity check - delta tokenization has minor mismatches at turn
-            # boundaries due to chat template quirks (whitespace handling). Training still works.
-            cmd.append("actor_rollout_ref.rollout.multi_turn.tokenization_sanity_check_mode=off")
-    else:
-        # vLLM backend (default)
-        # Set rollout mode (sync, async, or async_agentic)
-        cmd.append(f"actor_rollout_ref.rollout.mode={rollout_mode}")
-        # Add allow_hint flag for multi-turn hint generation
-        if allow_hint:
-            cmd.append("allow_hint=True")
-        # Add max_hints limit for rollout
-        if max_hints is not None:
-            cmd.append(f"+actor_rollout_ref.rollout.max_hints={max_hints}")
-        # Add max_turns for loop bound (model gets extra turns after hints exhausted)
-        cmd.append(f"+actor_rollout_ref.rollout.max_turns={max_turns}")
+    # vLLM rollout (verl's default backend and default sync mode; the SGLang
+    # backend and the async rollout modes were never used by any recorded run).
+    # Add allow_hint flag for multi-turn hint generation
+    if allow_hint:
+        cmd.append("allow_hint=True")
+    # Add max_hints limit for rollout
+    if max_hints is not None:
+        cmd.append(f"+actor_rollout_ref.rollout.max_hints={max_hints}")
+    # Add max_turns for loop bound (model gets extra turns after hints exhausted)
+    cmd.append(f"+actor_rollout_ref.rollout.max_turns={max_turns}")
 
     # Add custom stop strings for rollout if specified in method config
     if method is not None and method.stop_strings is not None:

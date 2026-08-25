@@ -4,8 +4,6 @@ reward_function: compute_score_hint_exponential
 multi_turn: true
 max_turns: 6
 mask_response_tokens: true
-rollout_backend: vllm
-rollout_mode: sync
 reward_kwargs:
   final: 0.25
   format_score: 0.1
