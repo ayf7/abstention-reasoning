@@ -1,6 +1,6 @@
 # abstention-reasoning
 
-Training language models to **abstain** — to recognize when they cannot solve a problem and say so, rather than committing to a confidently wrong answer.
+Training language models to recognize when they cannot solve a problem and perform alternative action (abstaining or hint-seeking), rather than committing to an answer every time.
 
 Models are trained in two stages: supervised fine-tuning (SFT) on chain-of-thought traces, then reinforcement learning with a reward function that pays for correct answers *and* for well-calibrated abstention. RL runs on a modified copy of [verl](https://github.com/volcengine/verl), vendored in `verl/`.
 
