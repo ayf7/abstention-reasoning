@@ -29,6 +29,8 @@ import tiktoken
 from openai import AsyncOpenAI, RateLimitError
 from tqdm.asyncio import tqdm_asyncio
 
+from pipeline.core.method import ARTIFACTS_ROOT
+
 # Initialize tokenizer (cl100k_base is used by GPT-4, GPT-3.5-turbo, and text-embedding-ada-002)
 _ENCODING = tiktoken.get_encoding("cl100k_base")
 
@@ -538,13 +540,13 @@ def main():
     parser.add_argument(
         "--input", "-i",
         type=Path,
-        default=Path("artifacts/competition_math/primitives.json"),
+        default=ARTIFACTS_ROOT / "competition_math" / "primitives.json",
         help="Input primitives file",
     )
     parser.add_argument(
         "--output", "-o",
         type=Path,
-        default=Path("artifacts/competition_math/primitives_prefix_hints.json"),
+        default=ARTIFACTS_ROOT / "competition_math" / "primitives_prefix_hints.json",
         help="Output file with prefix hints",
     )
     parser.add_argument(

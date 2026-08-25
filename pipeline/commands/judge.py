@@ -7,6 +7,8 @@ Uses the OpenAI Batch API to analyze model generations:
 - Solution attempt counting
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -15,7 +17,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from openai import OpenAI
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # annotations only; the real import is lazy (see below)
+    from openai import OpenAI
+# The openai package is imported inside the functions that need it. At module
+# level it sat on the critical path of every CLI invocation, including
+# `--help`, and made the whole CLI unusable when it was absent.
 
 from pipeline.core.io import load_json, save_json
 
@@ -261,6 +269,8 @@ def judge_generations(
     print(f"=============================")
 
     # Create and submit batch
+    from openai import OpenAI
+
     client = OpenAI()
     requests = _create_batch_requests(examples, model)
     results_by_id = _submit_and_wait(client, requests, poll_interval)
@@ -640,6 +650,8 @@ def judge_verify(
     print(f"Avg sentences per generation: {avg_sentences:.1f}")
     print(f"================================")
 
+    from openai import OpenAI
+
     client = OpenAI()
     if sync:
         results_by_id = _submit_sync(client, examples, model, max_concurrent)
@@ -935,6 +947,8 @@ def judge_correctness(
     print(f"Judge model: {model}")
     print(f"Total examples: {len(examples)}")
     print(f"=====================================")
+
+    from openai import OpenAI
 
     client = OpenAI()
     if sync:

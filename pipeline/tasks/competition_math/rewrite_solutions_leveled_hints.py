@@ -24,6 +24,8 @@ from pathlib import Path
 from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm_asyncio
 
+from pipeline.core.method import ARTIFACTS_ROOT
+
 
 HINTS_SYSTEM_PROMPT = """\
 You are a mathematics tutor who creates progressive hints for competition math problems.
@@ -310,13 +312,13 @@ def main():
     parser.add_argument(
         "--input", "-i",
         type=Path,
-        default=Path("artifacts/competition_math/primitives.json"),
+        default=ARTIFACTS_ROOT / "competition_math" / "primitives.json",
         help="Input primitives file",
     )
     parser.add_argument(
         "--output", "-o",
         type=Path,
-        default=Path("artifacts/competition_math/primitives_leveled_hints.json"),
+        default=ARTIFACTS_ROOT / "competition_math" / "primitives_leveled_hints.json",
         help="Output file with leveled hints",
     )
     parser.add_argument(

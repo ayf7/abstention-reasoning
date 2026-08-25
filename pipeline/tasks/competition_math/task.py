@@ -44,12 +44,15 @@ class CompetitionMathTask(BaseTask):
     assistant_prefix = "<think>\nLet me work through this problem step by step."
 
     # Only include harder problem types (exclude Algebra, Prealgebra, Precalculus)
-    ALLOWED_TYPES = {
+    # Ordered, not a set: iteration order feeds the selection list *before* the
+    # seeded shuffle, and set iteration order varies across processes under
+    # hash randomization. A set here made --seed non-reproducible.
+    ALLOWED_TYPES = (
         "Intermediate Algebra",
         "Geometry",
         "Number Theory",
         "Counting & Probability",
-    }
+    )
 
     def create_primitives(self, num_puzzles: int | None, seed: int = 42) -> list[dict]:
         """
@@ -76,18 +79,25 @@ class CompetitionMathTask(BaseTask):
         for t in by_type:
             rng.shuffle(by_type[t])
 
-        # Determine per-type limit for balanced sampling
+        # Determine per-type limits for balanced sampling. Integer division
+        # alone truncates: it yielded 0 primitives for any num_puzzles below the
+        # type count, and under-delivered by up to len(ALLOWED_TYPES)-1
+        # otherwise. Spread the remainder so --num-puzzles N really means N.
+        n_types = len(self.ALLOWED_TYPES)
         if num_puzzles is not None:
-            per_type = num_puzzles // len(self.ALLOWED_TYPES)
+            base, remainder = divmod(num_puzzles, n_types)
+            per_type_limits = [
+                base + (1 if i < remainder else 0) for i in range(n_types)
+            ]
         else:
-            per_type = None
+            per_type_limits = [None] * n_types
 
         # Sample from each type (balanced)
         selected = []
-        for t in self.ALLOWED_TYPES:
+        for t, limit in zip(self.ALLOWED_TYPES, per_type_limits):
             pool = by_type[t]
-            if per_type is not None:
-                pool = pool[:per_type]
+            if limit is not None:
+                pool = pool[:limit]
             selected.extend(pool)
 
         # Final shuffle

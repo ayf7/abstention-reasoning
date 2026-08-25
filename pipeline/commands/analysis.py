@@ -4,6 +4,8 @@ Analysis commands - LLM judge for abstention analysis.
 Uses the OpenAI Batch API for cost-efficient, rate-limit-free judging.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -13,7 +15,13 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from openai import OpenAI
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # annotations only; the real import is lazy (see below)
+    from openai import OpenAI
+# The openai package is imported inside the functions that need it. At module
+# level it sat on the critical path of every CLI invocation, including
+# `--help`, and made the whole CLI unusable when it was absent.
 
 from pipeline.core.io import load_json, save_json
 from pipeline.core.utils import extract_think
@@ -308,6 +316,8 @@ def analyze_abstention(
     print(f"=======================================")
 
     # Create batch requests and submit
+    from openai import OpenAI
+
     client = OpenAI()
     requests = _create_batch_requests(abstained, task_name, model)
     results_by_id = _submit_and_wait(client, requests, poll_interval)
@@ -469,11 +479,21 @@ def preprocess_for_judge(
 
     details = data["details"]
 
-    # Filter out token-limit exhaustion (no useful signal for judge)
-    filtered = [d for d in details if d.get("token_count", 0) < 2048]
+    # Filter out token-limit exhaustion (no useful signal for judge). The limit
+    # must come from the run that produced this file -- it was hardcoded to 2048
+    # while every recorded evaluation used --max-new-tokens 4096, which silently
+    # discarded ~18% of records as "truncated" when they had finished normally.
+    token_limit = data.get("config", {}).get("max_new_tokens")
+    if token_limit is None:
+        token_limit = 2048
+        print(
+            "Warning: results file has no config.max_new_tokens; "
+            f"falling back to {token_limit} for the truncation filter."
+        )
+    filtered = [d for d in details if d.get("token_count", 0) < token_limit]
     skipped = len(details) - len(filtered)
     if skipped:
-        print(f"Filtered out {skipped} examples that hit token limit (2048)")
+        print(f"Filtered out {skipped} examples that hit token limit ({token_limit})")
 
     examples = []
     for d in filtered:

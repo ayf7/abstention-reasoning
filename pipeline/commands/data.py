@@ -2,10 +2,11 @@
 Data commands - primitives and prompts creation.
 """
 
+import inspect
 from pathlib import Path
 
 from pipeline.core.io import load_json, save_json, save_parquet
-from pipeline.core.method import Method, get_primitives_path
+from pipeline.core.method import TASKS_ROOT, Method, get_primitives_path
 from pipeline.tasks import get_task
 
 
@@ -30,6 +31,25 @@ def create_primitives(
         Path to created primitives.json
     """
     task = get_task(task_name)
+
+    # Validate task-specific options against the task's actual signature. Tasks
+    # differ in what they accept (only code_output takes `tracer`), so an option
+    # the task can't use must fail loudly rather than raise a bare TypeError or
+    # be silently dropped.
+    if kwargs:
+        sig = inspect.signature(task.create_primitives)
+        takes_var_kw = any(
+            param.kind is inspect.Parameter.VAR_KEYWORD
+            for param in sig.parameters.values()
+        )
+        if not takes_var_kw:
+            unsupported = [key for key in kwargs if key not in sig.parameters]
+            if unsupported:
+                raise ValueError(
+                    f"Task '{task_name}' does not support "
+                    f"{', '.join(repr(k) for k in sorted(unsupported))}. "
+                    f"That option applies to other tasks only."
+                )
 
     # Default output path
     if output_path is None:
@@ -114,7 +134,10 @@ def create_prompts(
     # Handle "all" splits
     if split_name == "all":
         output_dir.mkdir(parents=True, exist_ok=True)
-        splits = ["sft", "rl_train", "rl_val", "classifier", "eval"]
+        # eval_augmented is the split nearly every recorded evaluation reads
+        # (prompts/eval_augmented.json). Leaving it out of "all" meant the
+        # documented setup path silently produced none of it.
+        splits = ["sft", "rl_train", "rl_val", "classifier", "eval", "eval_augmented"]
         results = {}
         for split in splits:
             # Determine output format based on split
@@ -249,10 +272,10 @@ def _create_prompts_single(
         elif split_name in ("rl_train", "rl_val"):
             template_split = "rl"
         if template_variant:
-            template_path = Path(f"pipeline/tasks/{task_name}/templates/{template_variant}/{template_split}.txt")
+            template_path = TASKS_ROOT / task_name / "templates" / template_variant / f"{template_split}.txt"
         else:
             # Legacy fallback (no variant subdirectory)
-            template_path = Path(f"pipeline/tasks/{task_name}/templates/{template_split}.txt")
+            template_path = TASKS_ROOT / task_name / "templates" / f"{template_split}.txt"
 
         if not template_path.exists():
             raise FileNotFoundError(
@@ -367,7 +390,10 @@ def create_verify_prompts(
     # Handle "all" splits
     if split_name == "all":
         output_dir.mkdir(parents=True, exist_ok=True)
-        splits = ["sft", "rl_train", "rl_val", "classifier", "eval"]
+        # eval_augmented is the split nearly every recorded evaluation reads
+        # (prompts/eval_augmented.json). Leaving it out of "all" meant the
+        # documented setup path silently produced none of it.
+        splits = ["sft", "rl_train", "rl_val", "classifier", "eval", "eval_augmented"]
         results = {}
         for split in splits:
             ext = ".parquet" if split.startswith("rl") else ".json"
@@ -447,7 +473,7 @@ def _create_verify_prompts_single(
         template_split = "eval"
     elif split_name in ("rl_train", "rl_val"):
         template_split = "rl"
-    template_path = Path(f"pipeline/tasks/{task_name}/templates/{template_variant}/{template_split}.txt")
+    template_path = TASKS_ROOT / task_name / "templates" / template_variant / f"{template_split}.txt"
     if not template_path.exists():
         raise FileNotFoundError(f"Template not found: {template_path}")
 
@@ -780,9 +806,9 @@ def create_ood_prompts(
     # Load template (always use eval template)
     template_variant = method.template_variant if method else None
     if template_variant:
-        template_path = Path(f"pipeline/tasks/{task_name}/templates/{template_variant}/eval.txt")
+        template_path = TASKS_ROOT / task_name / "templates" / template_variant / "eval.txt"
     else:
-        template_path = Path(f"pipeline/tasks/{task_name}/templates/eval.txt")
+        template_path = TASKS_ROOT / task_name / "templates" / "eval.txt"
 
     if not template_path.exists():
         raise FileNotFoundError(f"Template not found: {template_path}")

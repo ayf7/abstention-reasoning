@@ -10,15 +10,30 @@ import yaml
 from .utils import model_short_name
 
 
+# Repo root, derived from this file's location: <repo>/pipeline/core/method.py.
+# Config, template and artifact lookups used to be relative to the process's
+# working directory, so every command silently required being run from the repo
+# root and failed with "method not found" (or created a stray empty artifacts/)
+# anywhere else.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 # Default artifacts root
-ARTIFACTS_ROOT = Path("artifacts")
+ARTIFACTS_ROOT = REPO_ROOT / "artifacts"
+
+# Roots for repo-owned lookups (method configs and task templates)
+CONFIGS_ROOT = REPO_ROOT / "pipeline" / "configs" / "methods"
+TASKS_ROOT = REPO_ROOT / "pipeline" / "tasks"
 
 # External storage for models (symlinked from artifacts)
-# Set EXTERNAL_MODELS_ROOT env var to override, or None to disable
+# Model weights used to live outside the repo at /share/goyal/ayf7/models and
+# were symlinked in per run. The whole artifacts tree now lives on shared
+# storage (artifacts -> /share/goyal/ayf7/artifacts), so run directories are
+# plain directories inside it and the indirection is no longer needed.
+# Set EXTERNAL_MODELS_ROOT env var to re-enable the symlink behavior.
 EXTERNAL_MODELS_ROOT = (
     Path(os.environ["EXTERNAL_MODELS_ROOT"])
     if "EXTERNAL_MODELS_ROOT" in os.environ
-    else Path("/share/goyal/ayf7/models")
+    else None
 )
 
 
@@ -44,7 +59,8 @@ class Method:
     reward_function: str = "compute_score"
     reward_kwargs: dict[str, Any] = field(default_factory=dict)
     multi_turn: bool = False  # Enable multi-turn hint generation
-    max_turns: int = 6  # Maximum turns for multi-turn generation
+    max_turns: int = 6  # RL-only: verl's rollout turn cap. generate/evaluate
+                        # are bounded by max_new_tokens, not by a turn count.
     assistant_prefix: str | None = None  # If None, use task's default
     mask_response_tokens: bool = False  # Mask <response>...</response> in SFT
     rollout_backend: str = "vllm"  # RL rollout backend: "vllm" or "sglang"
@@ -87,7 +103,7 @@ class Method:
             config_path = path
         else:
             # Look in standard location
-            config_path = Path(f"pipeline/configs/methods/{task_name}/{name_or_path}.yaml")
+            config_path = CONFIGS_ROOT / task_name / f"{name_or_path}.yaml"
             if not config_path.exists():
                 available = cls.list_methods(task_name)
                 raise FileNotFoundError(
@@ -124,14 +140,14 @@ class Method:
     @staticmethod
     def list_methods(task_name: str) -> list[str]:
         """List available methods for a task."""
-        methods_dir = Path(f"pipeline/configs/methods/{task_name}")
+        methods_dir = CONFIGS_ROOT / task_name
         if not methods_dir.exists():
             return []
         return [p.stem for p in methods_dir.glob("*.yaml")]
 
     def get_template_path(self, task_name: str, split: str) -> Path:
         """Get the template path for a given split."""
-        return Path(f"pipeline/tasks/{task_name}/templates/{self.template_variant}/{split}.txt")
+        return TASKS_ROOT / task_name / "templates" / self.template_variant / f"{split}.txt"
 
     def load_template(self, task_name: str, split: str) -> str:
         """Load the template content for a given split."""

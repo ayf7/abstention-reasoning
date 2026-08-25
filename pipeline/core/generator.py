@@ -168,7 +168,6 @@ class Generator:
         self,
         prompts: list[list[dict]],
         ground_truths: list[dict],
-        max_turns: int = 6,
         request_tag: str = "</request>",
         answer_tag: str = "</answer>",
         force_hints: int | list[int] = 0,
@@ -189,7 +188,6 @@ class Generator:
         Args:
             prompts: List of chat message lists
             ground_truths: List of dicts containing 'hint_exprs' for each prompt
-            max_turns: Maximum number of generation turns (hint requests)
             request_tag: Tag that triggers hint injection (default: "</request>")
             answer_tag: Tag that signals completion (default: "</answer>")
             force_hints: Force at least this many hints per example by intercepting
@@ -226,13 +224,13 @@ class Generator:
         if any_forcing:
             # Forced hints require text manipulation — use legacy text-based path
             return self._generate_with_hints_text_based(
-                prompts, hints_list, force_hints_per, max_turns,
+                prompts, hints_list, force_hints_per,
                 request_tag, answer_tag, force_hint_token_range, hint_selector,
             )
         else:
             # Token-based path matching RL rollout splicing
             return self._generate_with_hints_token_spliced(
-                prompts, hints_list, max_turns,
+                prompts, hints_list,
                 request_tag, answer_tag, hint_selector,
             )
 
@@ -240,7 +238,6 @@ class Generator:
         self,
         prompts: list[list[dict]],
         hints_list: list[list[str]],
-        max_turns: int,
         request_tag: str,
         answer_tag: str,
         hint_selector,
@@ -429,7 +426,6 @@ class Generator:
         prompts: list[list[dict]],
         hints_list: list[list[str]],
         force_hints_per: list[int],
-        max_turns: int,
         request_tag: str,
         answer_tag: str,
         force_hint_token_range: tuple[int, int],
@@ -731,7 +727,6 @@ class Generator:
         self,
         prompts: list[list[dict]],
         ground_truths: list[dict],
-        max_turns: int = 6,
         callback: callable = None,
         force_hints: int | list[int] = 0,
         force_hint_token_range: tuple[int, int] = (100, 500),
@@ -747,7 +742,6 @@ class Generator:
         Args:
             prompts: List of chat message lists
             ground_truths: List of dicts with 'hint_exprs'
-            max_turns: Maximum turns per prompt
             callback: Progress callback(batch_idx, results)
             force_hints: Force at least this many hints per example.
                 Can be int (applied to all) or per-prompt list. (default: 0)
@@ -779,7 +773,6 @@ class Generator:
             batch_results = self.generate_with_hints(
                 batch_prompts,
                 batch_ground_truths,
-                max_turns=max_turns,
                 force_hints=batch_force_hints,
                 force_hint_token_range=force_hint_token_range,
                 hint_selector=hint_selector,
@@ -969,7 +962,6 @@ class AsyncGenerator:
         self,
         prompts: list[list[dict]],
         ground_truths: list[dict],
-        max_turns: int = 6,
         request_tag: str = "</request>",
         answer_tag: str = "</answer>",
         force_hints: int | list[int] = 0,
@@ -985,7 +977,6 @@ class AsyncGenerator:
         Args:
             prompts: List of chat message lists
             ground_truths: List of dicts containing 'hint_exprs' for each prompt
-            max_turns: Maximum number of generation turns per prompt
             request_tag: Tag that triggers hint injection
             answer_tag: Tag that signals completion
             force_hints: Force at least this many hints per example by intercepting
@@ -1020,12 +1011,12 @@ class AsyncGenerator:
 
         if any_forcing:
             return await self._generate_with_hints_async_text_based(
-                prompts, hints_list, force_hints_per, max_turns,
+                prompts, hints_list, force_hints_per,
                 request_tag, answer_tag, force_hint_token_range, hint_selector,
             )
         else:
             return await self._generate_with_hints_async_token_spliced(
-                prompts, hints_list, max_turns,
+                prompts, hints_list,
                 request_tag, answer_tag, hint_selector,
             )
 
@@ -1033,7 +1024,6 @@ class AsyncGenerator:
         self,
         prompts: list[list[dict]],
         hints_list: list[list[str]],
-        max_turns: int,
         request_tag: str,
         answer_tag: str,
         hint_selector,
@@ -1203,7 +1193,6 @@ class AsyncGenerator:
         prompts: list[list[dict]],
         hints_list: list[list[str]],
         force_hints_per: list[int],
-        max_turns: int,
         request_tag: str,
         answer_tag: str,
         force_hint_token_range: tuple[int, int],
@@ -1447,7 +1436,6 @@ class AsyncGenerator:
         self,
         prompts: list[list[dict]],
         ground_truths: list[dict],
-        max_turns: int = 6,
         callback: callable = None,
         force_hints: int | list[int] = 0,
         force_hint_token_range: tuple[int, int] = (100, 500),
@@ -1462,7 +1450,6 @@ class AsyncGenerator:
         Args:
             prompts: List of chat message lists
             ground_truths: List of dicts with 'hint_exprs'
-            max_turns: Maximum turns per prompt
             callback: Progress callback(batch_idx, results)
             force_hints: Force at least this many hints per example.
                 Can be int (applied to all) or per-prompt list. (default: 0)
@@ -1494,7 +1481,6 @@ class AsyncGenerator:
             batch_results = await self.generate_with_hints_async(
                 batch_prompts,
                 batch_ground_truths,
-                max_turns=max_turns,
                 force_hints=batch_force_hints,
                 force_hint_token_range=force_hint_token_range,
                 hint_selector=hint_selector,
@@ -1511,7 +1497,6 @@ def run_async_generation(
     config: GenerationConfig,
     prompts: list[list[dict]],
     ground_truths: list[dict],
-    max_turns: int = 6,
     callback: callable = None,
 ) -> list[list[dict]]:
     """
@@ -1521,7 +1506,6 @@ def run_async_generation(
         config: Generation config
         prompts: List of chat message lists
         ground_truths: List of dicts with 'hint_exprs'
-        max_turns: Maximum turns per prompt
         callback: Progress callback(batch_idx, results)
 
     Returns:
@@ -1530,6 +1514,6 @@ def run_async_generation(
     generator = AsyncGenerator(config)
     return asyncio.run(
         generator.generate_with_hints_async_batched(
-            prompts, ground_truths, max_turns, callback
+            prompts, ground_truths, callback
         )
     )

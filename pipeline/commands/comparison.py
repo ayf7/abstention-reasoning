@@ -11,7 +11,7 @@ from pathlib import Path
 
 from pipeline.core.io import load_json, save_json
 from pipeline.core.generator import AsyncGenerator, GenerationConfig
-from pipeline.core.method import Method
+from pipeline.core.method import ARTIFACTS_ROOT, Method
 from pipeline.core.utils import model_short_name
 from pipeline.tasks import get_task
 
@@ -135,7 +135,7 @@ def compare_sampling(
     if output_path is None:
         simple_tag = f"{simple_method}_{model_short_name(actual_simple)}" if simple_method else model_short_name(actual_simple)
         abstention_tag = f"{abstention_method}_{model_short_name(actual_abstention)}" if abstention_method else model_short_name(actual_abstention)
-        output_path = Path(f"artifacts/{task_name}/comparison_{simple_tag}_vs_{abstention_tag}.json")
+        output_path = ARTIFACTS_ROOT / task_name / f"comparison_{simple_tag}_vs_{abstention_tag}.json"
 
     print(f"=== Sampling Comparison ===")
     print(f"Task: {task_name}")

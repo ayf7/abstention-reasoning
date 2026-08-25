@@ -463,7 +463,6 @@ def generate(
     max_retries: int = 10,
     seed: int | None = 42,
     multi_turn: bool | None = None,
-    max_turns: int | None = None,
     use_async: bool = False,
     force_hints_distribution: dict[int, float] | None = None,
     force_hints_policy: dict[str, float] | None = None,
@@ -488,7 +487,6 @@ def generate(
         split: Which split to generate from (default: sft)
         retry_incorrect: If True, re-run incorrect examples
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
-        max_turns: Maximum turns for multi-turn generation. If None, uses method config (default: 5).
         use_async: Use async generation for optimal throughput.
         force_hints_distribution: Distribution of forced hint counts. Maps number of hints
             to probability, e.g. {1: 0.5, 2: 0.3, 3: 0.2}. Probabilities must sum to 1.
@@ -508,13 +506,11 @@ def generate(
     if method_name is not None:
         method = Method.load(method_name, task_name)
 
-    # Resolve multi_turn and max_turns from method config (CLI overrides if explicitly set)
+    # Resolve multi_turn from method config (CLI overrides if explicitly set)
     if multi_turn is None:
         multi_turn = method.multi_turn if method else False
     if force_hints_distribution:
         multi_turn = True  # force_hints requires multi_turn
-    if max_turns is None:
-        max_turns = method.max_turns if method else 6
 
     # Resolve hint selection strategy (CLI overrides method config)
     if hint_selection is None:
@@ -633,7 +629,7 @@ def generate(
             if use_async:
                 print("Async mode enabled (optimal throughput)")
             if multi_turn:
-                print(f"Multi-turn mode enabled: max_turns={max_turns}")
+                print("Multi-turn mode enabled")
 
         # Compute per-prompt force_hints based on distribution and policy
         if force_hints_distribution:
@@ -695,7 +691,6 @@ def generate(
                 async_generator.generate_with_hints_async(
                     all_prompts,
                     all_ground_truths,
-                    max_turns=max_turns,
                     force_hints=force_hints_list,
                     hint_selector=hint_selector,
                 )
@@ -764,6 +759,10 @@ def generate(
         if use_async and not multi_turn:
             import asyncio
 
+            # Same defaulting as the sync and multi-turn branches. Without it
+            # sample_strategy stays None here and overrides the function default.
+            sample_strategy = sample_strategy or "shortest_cot"
+
             async def _async_generate_with_retries():
                 async_generator = AsyncGenerator(config)
                 current_prompts = remaining_prompts
@@ -790,7 +789,7 @@ def generate(
                         }
 
                         if num_samples > 1:
-                            best_sample = select_best_sample(gen_samples, task, primitive)
+                            best_sample = select_best_sample(gen_samples, task, primitive, strategy=sample_strategy)
                         else:
                             sample = gen_samples[0]
                             is_correct, meta = task.check_correctness(primitive, sample["text"])
@@ -845,7 +844,6 @@ def generate(
                     expanded_results = generator.generate_with_hints(
                         expanded_prompts,
                         expanded_gts,
-                        max_turns=max_turns,
                         force_hints=expanded_force,
                         hint_selector=hint_selector,
                     )
@@ -859,7 +857,6 @@ def generate(
                     batch_results = generator.generate_with_hints(
                         batch_prompts,
                         batch_ground_truths,
-                        max_turns=max_turns,
                         force_hints=batch_force_hints,
                         hint_selector=hint_selector,
                     )
@@ -1033,7 +1030,6 @@ def evaluate(
     gpu_memory_utilization: float = 0.9,
     verbose: bool = False,
     multi_turn: bool | None = None,
-    max_turns: int | None = None,
     use_async: bool = False,
     seed: int | None = 42,
     hint_selection: str | None = None,
@@ -1051,7 +1047,6 @@ def evaluate(
         prompts_path: Path to eval prompts (default: artifacts/{task}/{method}/prompts/eval.json)
         output_path: Where to save results (default: artifacts/{task}/{method}/results/eval_{model}.json)
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
-        max_turns: Maximum turns for multi-turn generation. If None, uses method config (default: 5).
         use_async: Use async generation for optimal throughput.
         ... generation config ...
 
@@ -1065,11 +1060,9 @@ def evaluate(
     if method_name is not None:
         method = Method.load(method_name, task_name)
 
-    # Resolve multi_turn and max_turns from method config (CLI overrides if explicitly set)
+    # Resolve multi_turn from method config (CLI overrides if explicitly set)
     if multi_turn is None:
         multi_turn = method.multi_turn if method else False
-    if max_turns is None:
-        max_turns = method.max_turns if method else 6
 
     # Resolve hint selection strategy (CLI overrides method config)
     if hint_selection is None:
@@ -1152,7 +1145,7 @@ def evaluate(
     if use_async:
         print("Async mode enabled (optimal throughput)")
     if multi_turn:
-        print(f"Multi-turn mode enabled: max_turns={max_turns}")
+        print("Multi-turn mode enabled")
 
     # Async multi-turn generation
     if multi_turn and use_async:
@@ -1171,7 +1164,6 @@ def evaluate(
                 async_generator.generate_with_hints_async(
                     expanded_prompts,
                     expanded_gts,
-                    max_turns=max_turns,
                     hint_selector=hint_selector,
                 )
             )
@@ -1187,7 +1179,6 @@ def evaluate(
                 async_generator.generate_with_hints_async(
                     prompts,
                     ground_truths,
-                    max_turns=max_turns,
                     hint_selector=hint_selector,
                 )
             )
@@ -1211,7 +1202,6 @@ def evaluate(
             expanded_results = generator.generate_with_hints_batched(
                 expanded_prompts,
                 expanded_gts,
-                max_turns=max_turns,
                 hint_selector=hint_selector,
             )
             generations = [
@@ -1222,7 +1212,6 @@ def evaluate(
             generations = generator.generate_with_hints_batched(
                 prompts,
                 ground_truths,
-                max_turns=max_turns,
                 hint_selector=hint_selector,
             )
 
@@ -1284,7 +1273,6 @@ def evaluate(
                 "top_p": top_p,
                 "num_samples": num_samples,
                 "multi_turn": multi_turn,
-                "max_turns": max_turns if multi_turn else None,
             },
             "metrics": metrics,
             "details": details,
@@ -1364,7 +1352,6 @@ def evaluate(
             "top_p": top_p,
             "num_samples": 1,
             "multi_turn": multi_turn,
-            "max_turns": max_turns if multi_turn else None,
         },
         "metrics": metrics,
         "details": details,

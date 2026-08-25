@@ -26,6 +26,8 @@ from pathlib import Path
 from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm_asyncio
 
+from pipeline.core.method import ARTIFACTS_ROOT
+
 
 def extract_annotations(solution: str) -> dict:
     """Extract retrieval and reasoning annotations from a rewritten solution.
@@ -425,13 +427,13 @@ def main():
     parser.add_argument(
         "--input", "-i",
         type=Path,
-        default=Path("artifacts/competition_math/primitives_raw.json"),
+        default=ARTIFACTS_ROOT / "competition_math" / "primitives_raw.json",
         help="Input primitives file",
     )
     parser.add_argument(
         "--output", "-o",
         type=Path,
-        default=Path("artifacts/competition_math/primitives_idea_1.json"),
+        default=ARTIFACTS_ROOT / "competition_math" / "primitives_idea_1.json",
         help="Output file with annotated solutions",
     )
     parser.add_argument(

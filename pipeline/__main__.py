@@ -77,12 +77,17 @@ def cmd_list_methods(args):
 def cmd_create_primitives(args):
     """Create primitives."""
     output_path = Path(args.output) if args.output else None
+    # Task-specific options are forwarded only when explicitly given, so that
+    # tasks which don't accept them are not handed an unexpected keyword.
+    task_options = {}
+    if args.tracer is not None:
+        task_options["tracer"] = args.tracer
     commands.create_primitives(
         task_name=args.task,
         output_path=output_path,
         num_puzzles=args.num_puzzles,
         seed=args.seed,
-        tracer=args.tracer,
+        **task_options,
     )
 
 
@@ -154,7 +159,11 @@ def cmd_generate(args):
     policy_str = getattr(args, "force_hints_policy", None)
     if policy_str:
         if not force_hints_distribution:
-            parser.error("--force-hints-policy requires --force-hints-distribution")
+            # `parser` is a local of main(); referencing it here raised NameError
+            # instead of the intended usage error.
+            raise SystemExit(
+                "error: --force-hints-policy requires --force-hints-distribution"
+            )
         force_hints_policy = {}
         for pair in policy_str.split(","):
             level, rate = pair.strip().split(":")
@@ -181,7 +190,6 @@ def cmd_generate(args):
         max_retries=getattr(args, "max_retries", 10),
         seed=getattr(args, "seed", 42),
         multi_turn=args.multi_turn,  # None = use method config
-        max_turns=args.max_turns,  # None = use method config
         use_async=getattr(args, "use_async", False),
         force_hints_distribution=force_hints_distribution,
         force_hints_policy=force_hints_policy,
@@ -214,7 +222,6 @@ def cmd_evaluate(args):
         gpu_memory_utilization=args.gpu_memory_utilization,
         verbose=args.verbose,
         multi_turn=args.multi_turn,  # None = use method config
-        max_turns=args.max_turns,  # None = use method config
         use_async=getattr(args, "use_async", False),
         seed=args.seed,
         hint_selection=getattr(args, "hint_selection", None),
@@ -503,8 +510,9 @@ def main():
     p.add_argument("--output", help="Output path (default: artifacts/{task}/primitives.json)")
     p.add_argument("--num-puzzles", type=int, default=None, help="Number of puzzles (omit to use all available)")
     p.add_argument("--seed", type=int, default=42, help="Random seed")
-    p.add_argument("--tracer", choices=["original", "uniform"], default="original",
-                   help="Tracer for hint generation (code_output only): 'original' (top-level) or 'uniform' (execution-uniform)")
+    p.add_argument("--tracer", choices=["original", "uniform"], default=None,
+                   help="code_output only. Tracer for hint generation: 'uniform' (execution-uniform, "
+                        "used for the shipped primitives) or 'original' (top-level). Default: uniform.")
     p.set_defaults(func=cmd_create_primitives)
 
     # create_prompts
@@ -513,7 +521,9 @@ def main():
     p.add_argument("--method", help="Method name for auto-derived paths and templates")
     p.add_argument("--primitives", help="Path to primitives.json (default: artifacts/{task}/primitives.json)")
     p.add_argument("--output", help="Output directory (default: artifacts/{task}/{method}/prompts/)")
-    p.add_argument("--split", default="all", help="Split name (sft, rl_train, rl_val, classifier, eval, or 'all')")
+    p.add_argument("--split", default="all",
+                   help="Split name (sft, rl_train, rl_val, classifier, eval, eval_augmented, or 'all'). "
+                        "eval_augmented is what most evaluations read.")
     p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
     p.add_argument("--num-hints", type=int, default=None,
@@ -569,7 +579,6 @@ def main():
     p.add_argument("--max-retries", type=int, default=10, help="Max retry iterations for --retry-truncated (default: 10)")
     p.add_argument("--seed", type=int, default=42, help="Starting seed for generation (default: 42)")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
-    p.add_argument("--max-turns", type=int, default=None, help="Maximum turns for multi-turn generation (default: from method config or 6)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput, processes all prompts concurrently)")
     p.add_argument("--force-hints-distribution", type=str, default=None,
         help="Distribution of forced hint counts, e.g. '1:0.5,2:0.3,3:0.2'. "
@@ -604,7 +613,6 @@ def main():
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
-    p.add_argument("--max-turns", type=int, default=None, help="Maximum turns for multi-turn generation (default: from method config or 6)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput)")
     p.add_argument("--seed", type=int, default=42, help="Random seed for generation (default: 42)")
     p.add_argument("--hint-selection", default=None, choices=["sequential", "smart"],

@@ -239,14 +239,17 @@ class CodeOutputTask(BaseTask):
                          Total primitives will be higher due to test case expansion.
             seed: Random seed
             **kwargs: Additional options. Supports:
-                tracer: "original" (default) or "uniform" — which execution
-                    tracer to use for generating hint_exprs.
+                tracer: "uniform" (default) or "original" — which execution
+                    tracer to use for generating hint_exprs. The shipped
+                    primitives.json was generated with "uniform"; "original"
+                    produces a different number of hints per problem and has
+                    never been used for released data.
         """
         import random
         from datasets import load_dataset
         from .anonymizer import anonymize_code
 
-        tracer_name = kwargs.get("tracer", "original")
+        tracer_name = kwargs.get("tracer", "uniform")
         if tracer_name == "uniform":
             _trace_fn = trace_execution_uniform
             print("Using uniform execution tracer for hint generation")

@@ -18,6 +18,10 @@ dependencies = [
   "vllm==0.15.0",
   "xformers",
   "math-verify[antlr4_9_3]",
+  "datasets",
+  "pyyaml",
+  "pandas",
+  "openai",
 ]
 
 [build-system]
@@ -29,4 +33,4 @@ package-dir = { "" = "." }
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["exploration_scripts*", "models*", "src*", "utils*"]
+include = ["pipeline*"]

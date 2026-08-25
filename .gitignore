@@ -11,7 +11,8 @@ results*
 outputs*
 logs*
 
-artifacts/
+artifacts
+artifacts_legacy
 docs/
 temp_connections/
 
