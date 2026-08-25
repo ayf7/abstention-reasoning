@@ -1,8 +1,5 @@
 """Base task class with shared functionality."""
 
-import re
-from pathlib import Path
-from typing import Any
 from collections import defaultdict
 
 from pipeline.core.utils import extract_answer
@@ -109,17 +106,6 @@ class BaseTask:
 
         return indices[start:end]
 
-    def compute_reward(self, primitive: dict, generation: str) -> tuple[float, dict]:
-        """
-        Compute reward for RL training.
-        Default: 1.0 if correct, 0.0 otherwise.
-
-        Returns:
-            (reward, info_dict)
-        """
-        is_correct, meta = self.check_correctness(primitive, generation)
-        return (1.0 if is_correct else 0.0, {"correct": is_correct, **meta})
-
     def get_ground_truth(self, primitive: dict) -> dict:
         """
         Extract ground truth for embedding in prompts.
@@ -192,7 +178,3 @@ class BaseTask:
         """Extract answer from generation. Override for custom parsing."""
         return extract_answer(generation)
 
-    def load_template(self, template_path: Path | str) -> str:
-        """Load template from file."""
-        with open(template_path, "r", encoding="utf-8") as f:
-            return f.read()

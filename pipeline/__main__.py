@@ -46,7 +46,7 @@ os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 import argparse
 from pathlib import Path
 
-from pipeline.tasks import list_tasks, get_task
+from pipeline.tasks import list_tasks
 from pipeline.core.method import Method
 from pipeline import commands
 

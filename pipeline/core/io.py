@@ -50,7 +50,6 @@ def load_parquet(path: Path | str) -> list[dict]:
 
 def save_parquet(path: Path | str, records: list[dict]) -> None:
     """Save list of dicts as parquet file."""
-    import pandas as pd
     from datasets import Dataset
 
     path = Path(path)

@@ -214,21 +214,6 @@ class CountdownTask(BaseTask):
                 "error": str(e),
             }
 
-    def compute_reward(
-        self,
-        primitive: dict,
-        generation: str,
-    ) -> tuple[float, dict]:
-        """
-        Compute reward for RL training.
-
-        Currently binary: 1.0 if correct, 0.0 otherwise.
-        Could be extended for partial credit (e.g., close to target).
-        """
-        is_correct, meta = self.check_correctness(primitive, generation)
-        reward = 1.0 if is_correct else 0.0
-        return reward, {"correct": is_correct, **meta}
-
     def _categorize_result(self, r: dict) -> str:
         """Categorize a single result into one of: correct, abstained, incomplete, wrong.
 

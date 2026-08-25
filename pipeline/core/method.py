@@ -151,10 +151,6 @@ class Method:
         """Get the artifacts directory for this method."""
         return ARTIFACTS_ROOT / task_name / self.name
 
-    def primitives_path(self, task_name: str) -> Path:
-        """Get the primitives path (shared, not method-specific)."""
-        return ARTIFACTS_ROOT / task_name / "primitives.json"
-
     def prompts_dir(self, task_name: str) -> Path:
         """Get the prompts directory."""
         return self.artifacts_dir(task_name) / "prompts"
@@ -287,11 +283,6 @@ class Method:
     def results_dir(self, task_name: str) -> Path:
         """Get the results directory."""
         return self.artifacts_dir(task_name) / "results"
-
-    def results_path(self, task_name: str, model_name: str) -> Path:
-        """Get the results path for a specific model."""
-        model_slug = model_short_name(model_name)
-        return self.results_dir(task_name) / f"eval_{model_slug}.json"
 
 
 def get_primitives_path(task_name: str) -> Path:

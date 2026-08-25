@@ -3,7 +3,6 @@
 import asyncio
 import re
 from dataclasses import dataclass
-from typing import Any
 
 _RESPONSE_TAG_RE = re.compile(r'<response>.*?</response>', re.DOTALL)
 

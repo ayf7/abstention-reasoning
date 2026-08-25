@@ -81,7 +81,6 @@ def train_sft(
     from datasets import Dataset
     from trl import SFTTrainer, SFTConfig
     from transformers import AutoTokenizer
-    from pipeline.core.utils import model_short_name
 
     # Load method config if specified
     method = None

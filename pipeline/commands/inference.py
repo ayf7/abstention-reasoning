@@ -7,9 +7,8 @@ from datetime import datetime
 from pathlib import Path
 
 from pipeline.core.io import load_json, save_json
-from pipeline.core.generator import Generator, GenerationConfig, AsyncGenerator, run_async_generation
+from pipeline.core.generator import Generator, GenerationConfig, AsyncGenerator
 from pipeline.core.method import Method
-from pipeline.core.utils import model_short_name
 from pipeline.tasks import get_task
 
 
