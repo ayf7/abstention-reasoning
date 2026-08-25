@@ -251,27 +251,8 @@ def cmd_analyze_abstention(args):
     )
 
 
-def cmd_preprocess_for_judge(args):
-    """Preprocess eval results into enumerated lines for LLM judge."""
-    output_path = Path(args.output) if args.output else None
-    commands.preprocess_for_judge(
-        results_path=Path(args.results),
-        task_name=args.task,
-        output_path=output_path,
-        tokenizer_name=args.tokenizer,
-    )
 
 
-def cmd_judge_generations(args):
-    """Judge preprocessed generations with LLM."""
-    output_path = Path(args.output) if args.output else None
-    commands.judge_generations(
-        preprocessed_path=Path(args.preprocessed),
-        output_path=output_path,
-        model=args.model,
-        poll_interval=args.poll_interval,
-        max_samples=args.max_samples,
-    )
 
 
 def cmd_preprocess_for_verify_judge(args):
@@ -598,22 +579,7 @@ def main():
     p.add_argument("--group-by", default="variant", help="Field to group results by (default: variant, e.g. 'level' for difficulty)")
     p.set_defaults(func=cmd_analyze_abstention)
 
-    # preprocess_for_judge
-    p = subparsers.add_parser("preprocess_for_judge", help="Preprocess eval results into enumerated lines for LLM judge")
-    p.add_argument("--results", required=True, help="Path to evaluation results JSON")
-    p.add_argument("--task", required=True, help="Task name (countdown, competition_math, code_output)")
-    p.add_argument("--output", help="Output path (default: analysis/{stem}_preprocessed.json)")
-    p.add_argument("--tokenizer", default="Qwen/Qwen2.5-1.5B", help="HuggingFace tokenizer for per-line token counts (default: Qwen/Qwen2.5-1.5B)")
-    p.set_defaults(func=cmd_preprocess_for_judge)
 
-    # judge_generations
-    p = subparsers.add_parser("judge_generations", help="Judge preprocessed generations with LLM (verification, backtracking, abstention reason)")
-    p.add_argument("--preprocessed", required=True, help="Path to preprocessed JSON from preprocess_for_judge")
-    p.add_argument("--output", help="Output path (default: analysis/{stem}_judged.json)")
-    p.add_argument("--model", default="gpt-5.4-nano", help="OpenAI model for judging (default: gpt-5.4-nano)")
-    p.add_argument("--poll-interval", type=int, default=30, help="Seconds between batch status checks (default: 30)")
-    p.add_argument("--max-samples", type=int, default=None, help="Limit number of examples to judge (for testing)")
-    p.set_defaults(func=cmd_judge_generations)
 
     # preprocess_for_verify_judge
     p = subparsers.add_parser("preprocess_for_verify_judge", help="Preprocess eval results into indexed sentences for verify judge")
