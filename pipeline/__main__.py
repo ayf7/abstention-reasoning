@@ -241,28 +241,8 @@ def cmd_analyze(args):
 
 
 
-def cmd_preprocess_for_verify_judge(args):
-    """Preprocess eval results into indexed sentences for verify judge."""
-    output_path = Path(args.output) if args.output else None
-    commands.preprocess_for_verify_judge(
-        results_path=Path(args.results),
-        task_name=args.task,
-        output_path=output_path,
-    )
 
 
-def cmd_judge_verify(args):
-    """Judge preprocessed verify generations for confidence and verification coverage."""
-    output_path = Path(args.output) if args.output else None
-    commands.judge_verify(
-        preprocessed_path=Path(args.preprocessed),
-        output_path=output_path,
-        model=args.model,
-        poll_interval=args.poll_interval,
-        max_samples=args.max_samples,
-        sync=args.sync,
-        max_concurrent=args.max_concurrent,
-    )
 
 
 
@@ -516,23 +496,7 @@ def main():
 
 
 
-    # preprocess_for_verify_judge
-    p = subparsers.add_parser("preprocess_for_verify_judge", help="Preprocess eval results into indexed sentences for verify judge")
-    p.add_argument("--results", required=True, help="Path to evaluation results JSON")
-    p.add_argument("--task", required=True, help="Task name (countdown, competition_math, code_output)")
-    p.add_argument("--output", help="Output path (default: analysis/{stem}_verify_preprocessed.json)")
-    p.set_defaults(func=cmd_preprocess_for_verify_judge)
 
-    # judge_verify
-    p = subparsers.add_parser("judge_verify", help="Judge preprocessed verify generations for confidence and verification sentence coverage")
-    p.add_argument("--preprocessed", required=True, help="Path to preprocessed JSON from preprocess_for_verify_judge")
-    p.add_argument("--output", help="Output path (default: analysis/{stem}_verify_judged.json)")
-    p.add_argument("--model", default="gpt-5.4-nano", help="OpenAI model for judging (default: gpt-5.4-nano)")
-    p.add_argument("--poll-interval", type=int, default=30, help="Seconds between batch status checks (default: 30)")
-    p.add_argument("--max-samples", type=int, default=None, help="Limit number of examples to judge (for testing)")
-    p.add_argument("--sync", action="store_true", help="Use synchronous API calls instead of Batch API")
-    p.add_argument("--max-concurrent", type=int, default=20, help="Max concurrent requests in sync mode (default: 20)")
-    p.set_defaults(func=cmd_judge_verify)
 
 
 

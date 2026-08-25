@@ -10,7 +10,6 @@ Usage:
 
 from .data import create_primitives, create_prompts, create_verify_prompts, create_ood_prompts, OOD_DATASETS
 from .inference import generate, evaluate, analyze
-from .judge import preprocess_for_verify_judge, judge_verify
 from .training import train_sft, train_rl, convert_checkpoint
 
 __all__ = [
@@ -24,8 +23,6 @@ __all__ = [
     "generate",
     "evaluate",
     "analyze",
-    "preprocess_for_verify_judge",
-    "judge_verify",
     # Training commands
     "train_sft",
     "train_rl",
