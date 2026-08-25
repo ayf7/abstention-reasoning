@@ -1,9 +1,0 @@
-Solve this logic puzzle.
-
-{puzzle}
-
-Question: {question}
-
-{choices}
-
-Think through this step by step in <think> </think> tags. Then provide your final answer in <answer> </answer> tags, using the letter of the correct choice (e.g., <answer>A</answer>).

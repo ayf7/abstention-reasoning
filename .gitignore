@@ -11,7 +11,8 @@ results*
 outputs*
 logs*
 
-artifacts/
+artifacts
+artifacts_legacy
 docs/
 temp_connections/
 
@@ -23,3 +24,5 @@ trivial_scripts/
 
 .claude/
 .vscode/
+CLAUDE.md
+commands.sh

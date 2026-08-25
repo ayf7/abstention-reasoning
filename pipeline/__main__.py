@@ -13,11 +13,8 @@ Commands:
     generate                    Run model on prompts to create dataset
     train_sft                   Train SFT model on generated dataset
     train_rl                    Train RL model using verl (GRPO)
-    train_classifier            Train binary classifier for correctness prediction
     convert_checkpoint          Convert FSDP/Megatron checkpoint to HuggingFace format
     evaluate                    Evaluate model and compute metrics
-    analyze_abstention          Judge abstained examples with LLM (regret analysis)
-    evaluate_classifier         Evaluate binary classifier (confusion matrix, precision/recall/F1)
 
 Examples:
     # List available tasks and methods
@@ -49,7 +46,7 @@ os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 import argparse
 from pathlib import Path
 
-from pipeline.tasks import list_tasks, get_task
+from pipeline.tasks import list_tasks
 from pipeline.core.method import Method
 from pipeline import commands
 
@@ -77,12 +74,17 @@ def cmd_list_methods(args):
 def cmd_create_primitives(args):
     """Create primitives."""
     output_path = Path(args.output) if args.output else None
+    # Task-specific options are forwarded only when explicitly given, so that
+    # tasks which don't accept them are not handed an unexpected keyword.
+    task_options = {}
+    if args.tracer is not None:
+        task_options["tracer"] = args.tracer
     commands.create_primitives(
         task_name=args.task,
         output_path=output_path,
         num_puzzles=args.num_puzzles,
         seed=args.seed,
-        tracer=args.tracer,
+        **task_options,
     )
 
 
@@ -154,7 +156,11 @@ def cmd_generate(args):
     policy_str = getattr(args, "force_hints_policy", None)
     if policy_str:
         if not force_hints_distribution:
-            parser.error("--force-hints-policy requires --force-hints-distribution")
+            # `parser` is a local of main(); referencing it here raised NameError
+            # instead of the intended usage error.
+            raise SystemExit(
+                "error: --force-hints-policy requires --force-hints-distribution"
+            )
         force_hints_policy = {}
         for pair in policy_str.split(","):
             level, rate = pair.strip().split(":")
@@ -181,13 +187,9 @@ def cmd_generate(args):
         max_retries=getattr(args, "max_retries", 10),
         seed=getattr(args, "seed", 42),
         multi_turn=args.multi_turn,  # None = use method config
-        max_turns=args.max_turns,  # None = use method config
         use_async=getattr(args, "use_async", False),
         force_hints_distribution=force_hints_distribution,
         force_hints_policy=force_hints_policy,
-        hint_selection=getattr(args, "hint_selection", None),
-        helper_model=getattr(args, "helper_model", None),
-        helper_gpu_memory_utilization=getattr(args, "helper_gpu_memory_utilization", None),
         sample_strategy=getattr(args, "sample_strategy", None),
     )
 
@@ -214,12 +216,8 @@ def cmd_evaluate(args):
         gpu_memory_utilization=args.gpu_memory_utilization,
         verbose=args.verbose,
         multi_turn=args.multi_turn,  # None = use method config
-        max_turns=args.max_turns,  # None = use method config
         use_async=getattr(args, "use_async", False),
         seed=args.seed,
-        hint_selection=getattr(args, "hint_selection", None),
-        helper_model=getattr(args, "helper_model", None),
-        helper_gpu_memory_utilization=getattr(args, "helper_gpu_memory_utilization", None),
     )
 
 
@@ -231,127 +229,19 @@ def cmd_analyze(args):
     )
 
 
-def cmd_analyze_abstention(args):
-    """Analyze abstained examples with LLM judge."""
-    output_path = Path(args.output) if args.output else None
-    commands.analyze_abstention(
-        results_path=Path(args.results),
-        task_name=args.task,
-        output_path=output_path,
-        method_name=args.method,
-        model=args.model,
-        poll_interval=args.poll_interval,
-        max_samples=args.max_samples,
-        group_by=args.group_by,
-    )
 
 
-def cmd_preprocess_for_judge(args):
-    """Preprocess eval results into enumerated lines for LLM judge."""
-    output_path = Path(args.output) if args.output else None
-    commands.preprocess_for_judge(
-        results_path=Path(args.results),
-        task_name=args.task,
-        output_path=output_path,
-        tokenizer_name=args.tokenizer,
-    )
 
 
-def cmd_judge_generations(args):
-    """Judge preprocessed generations with LLM."""
-    output_path = Path(args.output) if args.output else None
-    commands.judge_generations(
-        preprocessed_path=Path(args.preprocessed),
-        output_path=output_path,
-        model=args.model,
-        poll_interval=args.poll_interval,
-        max_samples=args.max_samples,
-    )
 
 
-def cmd_preprocess_for_verify_judge(args):
-    """Preprocess eval results into indexed sentences for verify judge."""
-    output_path = Path(args.output) if args.output else None
-    commands.preprocess_for_verify_judge(
-        results_path=Path(args.results),
-        task_name=args.task,
-        output_path=output_path,
-    )
 
 
-def cmd_judge_verify(args):
-    """Judge preprocessed verify generations for confidence and verification coverage."""
-    output_path = Path(args.output) if args.output else None
-    commands.judge_verify(
-        preprocessed_path=Path(args.preprocessed),
-        output_path=output_path,
-        model=args.model,
-        poll_interval=args.poll_interval,
-        max_samples=args.max_samples,
-        sync=args.sync,
-        max_concurrent=args.max_concurrent,
-    )
 
 
-def cmd_judge_correctness(args):
-    """Judge correctness of model answers using LLM."""
-    output_path = Path(args.output) if args.output else None
-    commands.judge_correctness(
-        results_path=Path(args.results),
-        task_name=args.task,
-        output_path=output_path,
-        model=args.model,
-        poll_interval=args.poll_interval,
-        stall_timeout=args.stall_timeout,
-        sync=args.sync,
-        max_concurrent=args.max_concurrent,
-    )
 
 
-def cmd_compare_sampling(args):
-    """Compare per-problem accuracy vs abstention rate across multiple samples."""
-    output_path = Path(args.output) if args.output else None
-    simple_prompts = Path(args.simple_prompts) if args.simple_prompts else (Path(args.prompts) if args.prompts else None)
-    abstention_prompts = Path(args.abstention_prompts) if args.abstention_prompts else (Path(args.prompts) if args.prompts else None)
-    if simple_prompts is None or abstention_prompts is None:
-        print("Error: must provide --prompts or both --simple-prompts and --abstention-prompts")
-        return
-    commands.compare_sampling(
-        task_name=args.task,
-        simple_model=args.simple_model,
-        abstention_model=args.abstention_model,
-        simple_prompts_path=simple_prompts,
-        abstention_prompts_path=abstention_prompts,
-        output_path=output_path,
-        simple_method=args.simple_method,
-        abstention_method=args.abstention_method,
-        simple_run_id=args.simple_run_id,
-        abstention_run_id=args.abstention_run_id,
-        num_samples=args.num_samples,
-        max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        tensor_parallel_size=args.tensor_parallel_size,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        group_by=args.group_by,
-    )
 
-
-def cmd_evaluate_classifier(args):
-    """Evaluate binary classifier."""
-    classifier_path = Path(args.classifier) if args.classifier else None
-    dataset_path = Path(args.dataset) if args.dataset else None
-    output_path = Path(args.output) if args.output else None
-
-    commands.evaluate_classifier(
-        task_name=args.task,
-        classifier_path=classifier_path,
-        method_name=args.method,
-        dataset_path=dataset_path,
-        output_path=output_path,
-        batch_size=args.batch_size,
-        max_length=args.max_length,
-    )
 
 
 def cmd_train_sft(args):
@@ -372,16 +262,12 @@ def cmd_train_sft(args):
         learning_rate=args.learning_rate,
         warmup_ratio=args.warmup_ratio,
         max_length=args.max_length,
-        eval_split=args.eval_split,
-        save_steps=args.save_steps,
-        logging_steps=args.logging_steps,
         bf16=not args.no_bf16,
         report_to=args.report_to,
         project_name=args.project_name,
         experiment_name=args.experiment_name,
         include_abstained=not args.no_abstained,
         include_wrong_valid_format=args.include_wrong_valid_format,
-        cleanup_checkpoints=not args.keep_checkpoints,
         upsample_hint=args.upsample_hint,
         max_correct=args.max_correct,
         upsample_abstain=args.upsample_abstain,
@@ -445,31 +331,6 @@ def cmd_train_rl(args):
     )
 
 
-def cmd_train_classifier(args):
-    """Train binary classifier."""
-    dataset_path = Path(args.dataset) if args.dataset else None
-    output_path = Path(args.output) if args.output else None
-
-    commands.train_classifier(
-        task_name=args.task,
-        base_model=args.base_model,
-        method_name=args.method,
-        dataset_path=dataset_path,
-        output_path=output_path,
-        mode=args.mode,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        max_length=args.max_length,
-        eval_split=args.eval_split,
-        eval_steps=args.eval_steps,
-        logging_steps=args.logging_steps,
-        balance=args.balance,
-        report_to=args.report_to,
-        project_name=args.project_name,
-        experiment_name=args.experiment_name,
-    )
-
 
 def cmd_convert_checkpoint(args):
     """Convert FSDP/Megatron checkpoint to HuggingFace format."""
@@ -503,8 +364,9 @@ def main():
     p.add_argument("--output", help="Output path (default: artifacts/{task}/primitives.json)")
     p.add_argument("--num-puzzles", type=int, default=None, help="Number of puzzles (omit to use all available)")
     p.add_argument("--seed", type=int, default=42, help="Random seed")
-    p.add_argument("--tracer", choices=["original", "uniform"], default="original",
-                   help="Tracer for hint generation (code_output only): 'original' (top-level) or 'uniform' (execution-uniform)")
+    p.add_argument("--tracer", choices=["original", "uniform"], default=None,
+                   help="code_output only. Tracer for hint generation: 'uniform' (execution-uniform, "
+                        "used for the shipped primitives) or 'original' (top-level). Default: uniform.")
     p.set_defaults(func=cmd_create_primitives)
 
     # create_prompts
@@ -513,7 +375,11 @@ def main():
     p.add_argument("--method", help="Method name for auto-derived paths and templates")
     p.add_argument("--primitives", help="Path to primitives.json (default: artifacts/{task}/primitives.json)")
     p.add_argument("--output", help="Output directory (default: artifacts/{task}/{method}/prompts/)")
-    p.add_argument("--split", default="all", help="Split name (sft, rl_train, rl_val, classifier, eval, or 'all')")
+    p.add_argument("--split", default="all",
+                   help="Split name, or 'all' for every split this task defines. Most tasks: "
+                   "sft, rl_train, rl_val, eval, eval_augmented; code_output has "
+                   "only sft, rl_train, eval. "
+                        "eval_augmented is what most evaluations read.")
     p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
     p.add_argument("--num-hints", type=int, default=None,
@@ -569,7 +435,6 @@ def main():
     p.add_argument("--max-retries", type=int, default=10, help="Max retry iterations for --retry-truncated (default: 10)")
     p.add_argument("--seed", type=int, default=42, help="Starting seed for generation (default: 42)")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
-    p.add_argument("--max-turns", type=int, default=None, help="Maximum turns for multi-turn generation (default: from method config or 6)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput, processes all prompts concurrently)")
     p.add_argument("--force-hints-distribution", type=str, default=None,
         help="Distribution of forced hint counts, e.g. '1:0.5,2:0.3,3:0.2'. "
@@ -578,12 +443,6 @@ def main():
         help="Per-level force rate, e.g. '1:0.05,2:0.05,3:0.05,4:0.15,5:0.15'. "
              "Only this fraction of examples at each level will get forced hints. "
              "Requires --force-hints-distribution.")
-    p.add_argument("--hint-selection", default=None, choices=["sequential", "smart"],
-        help="Hint selection strategy (default: from method config or 'sequential')")
-    p.add_argument("--helper-model", default=None,
-        help="Helper model for smart hint selection (default: from method config)")
-    p.add_argument("--helper-gpu-memory-utilization", type=float, default=None,
-        help="GPU memory utilization for helper model (default: same as --gpu-memory-utilization)")
     p.set_defaults(func=cmd_generate)
 
     # evaluate
@@ -604,15 +463,8 @@ def main():
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
-    p.add_argument("--max-turns", type=int, default=None, help="Maximum turns for multi-turn generation (default: from method config or 6)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput)")
     p.add_argument("--seed", type=int, default=42, help="Random seed for generation (default: 42)")
-    p.add_argument("--hint-selection", default=None, choices=["sequential", "smart"],
-        help="Hint selection strategy (default: from method config or 'sequential')")
-    p.add_argument("--helper-model", default=None,
-        help="Helper model for smart hint selection (default: from method config)")
-    p.add_argument("--helper-gpu-memory-utilization", type=float, default=None,
-        help="GPU memory utilization for helper model (default: same as --gpu-memory-utilization)")
     p.set_defaults(func=cmd_evaluate)
 
     # analyze
@@ -621,97 +473,12 @@ def main():
     p.add_argument("--task", help="Task name (for task-specific metrics on raw datasets)")
     p.set_defaults(func=cmd_analyze)
 
-    # analyze_abstention
-    p = subparsers.add_parser("analyze_abstention", help="Judge abstained examples with LLM (did model have the right answer?)")
-    p.add_argument("--results", required=True, help="Path to evaluation results JSON")
-    p.add_argument("--task", required=True, help="Task name (countdown, competition_math, code_output)")
-    p.add_argument("--method", help="Method name (for auto-derived output path)")
-    p.add_argument("--output", help="Output path (default: {results_stem}_abstention_analysis.json)")
-    p.add_argument("--model", default="gpt-5.4-nano", help="OpenAI model for judging (default: gpt-5.4-nano)")
-    p.add_argument("--poll-interval", type=int, default=30, help="Seconds between batch status checks (default: 30)")
-    p.add_argument("--max-samples", type=int, default=None, help="Limit number of abstained examples to judge (for testing)")
-    p.add_argument("--group-by", default="variant", help="Field to group results by (default: variant, e.g. 'level' for difficulty)")
-    p.set_defaults(func=cmd_analyze_abstention)
 
-    # preprocess_for_judge
-    p = subparsers.add_parser("preprocess_for_judge", help="Preprocess eval results into enumerated lines for LLM judge")
-    p.add_argument("--results", required=True, help="Path to evaluation results JSON")
-    p.add_argument("--task", required=True, help="Task name (countdown, competition_math, code_output)")
-    p.add_argument("--output", help="Output path (default: analysis/{stem}_preprocessed.json)")
-    p.add_argument("--tokenizer", default="Qwen/Qwen2.5-1.5B", help="HuggingFace tokenizer for per-line token counts (default: Qwen/Qwen2.5-1.5B)")
-    p.set_defaults(func=cmd_preprocess_for_judge)
 
-    # judge_generations
-    p = subparsers.add_parser("judge_generations", help="Judge preprocessed generations with LLM (verification, backtracking, abstention reason)")
-    p.add_argument("--preprocessed", required=True, help="Path to preprocessed JSON from preprocess_for_judge")
-    p.add_argument("--output", help="Output path (default: analysis/{stem}_judged.json)")
-    p.add_argument("--model", default="gpt-5.4-nano", help="OpenAI model for judging (default: gpt-5.4-nano)")
-    p.add_argument("--poll-interval", type=int, default=30, help="Seconds between batch status checks (default: 30)")
-    p.add_argument("--max-samples", type=int, default=None, help="Limit number of examples to judge (for testing)")
-    p.set_defaults(func=cmd_judge_generations)
 
-    # preprocess_for_verify_judge
-    p = subparsers.add_parser("preprocess_for_verify_judge", help="Preprocess eval results into indexed sentences for verify judge")
-    p.add_argument("--results", required=True, help="Path to evaluation results JSON")
-    p.add_argument("--task", required=True, help="Task name (countdown, competition_math, code_output)")
-    p.add_argument("--output", help="Output path (default: analysis/{stem}_verify_preprocessed.json)")
-    p.set_defaults(func=cmd_preprocess_for_verify_judge)
 
-    # judge_verify
-    p = subparsers.add_parser("judge_verify", help="Judge preprocessed verify generations for confidence and verification sentence coverage")
-    p.add_argument("--preprocessed", required=True, help="Path to preprocessed JSON from preprocess_for_verify_judge")
-    p.add_argument("--output", help="Output path (default: analysis/{stem}_verify_judged.json)")
-    p.add_argument("--model", default="gpt-5.4-nano", help="OpenAI model for judging (default: gpt-5.4-nano)")
-    p.add_argument("--poll-interval", type=int, default=30, help="Seconds between batch status checks (default: 30)")
-    p.add_argument("--max-samples", type=int, default=None, help="Limit number of examples to judge (for testing)")
-    p.add_argument("--sync", action="store_true", help="Use synchronous API calls instead of Batch API")
-    p.add_argument("--max-concurrent", type=int, default=20, help="Max concurrent requests in sync mode (default: 20)")
-    p.set_defaults(func=cmd_judge_verify)
 
-    # judge_correctness
-    p = subparsers.add_parser("judge_correctness", help="Judge answer correctness using LLM (OpenAI Batch API)")
-    p.add_argument("--results", required=True, help="Path to eval results JSON")
-    p.add_argument("--task", required=True, help="Task name (competition_math, countdown, code_output)")
-    p.add_argument("--output", help="Output path (default: {results_stem}_correctness_judged.json)")
-    p.add_argument("--model", default="gpt-5.4-mini", help="OpenAI model for judging (default: gpt-5.4-mini)")
-    p.add_argument("--poll-interval", type=int, default=30, help="Seconds between batch status checks (default: 30)")
-    p.add_argument("--stall-timeout", type=int, default=600, help="Cancel batch if stalled for N seconds (default: 600)")
-    p.add_argument("--sync", action="store_true", help="Use synchronous concurrent API calls instead of Batch API")
-    p.add_argument("--max-concurrent", type=int, default=20, help="Max concurrent requests in sync mode (default: 20)")
-    p.set_defaults(func=cmd_judge_correctness)
 
-    # compare_sampling
-    p = subparsers.add_parser("compare_sampling", help="Sample N times from two models, compare accuracy vs abstention rate")
-    p.add_argument("--task", required=True, help="Task name")
-    p.add_argument("--simple-model", required=True, help="Simple/baseline model name or path (or 'sft'/'rl')")
-    p.add_argument("--abstention-model", required=True, help="Abstention model name or path (or 'sft'/'rl')")
-    p.add_argument("--prompts", help="Path to shared eval prompts (used for both models if --simple-prompts/--abstention-prompts not set)")
-    p.add_argument("--simple-prompts", help="Prompts for simple model (overrides --prompts)")
-    p.add_argument("--abstention-prompts", help="Prompts for abstention model (overrides --prompts)")
-    p.add_argument("--simple-method", help="Method name for resolving simple model path")
-    p.add_argument("--abstention-method", help="Method name for resolving abstention model path")
-    p.add_argument("--simple-run-id", help="Run ID for simple model")
-    p.add_argument("--abstention-run-id", help="Run ID for abstention model")
-    p.add_argument("--output", help="Output base path (.json and .pdf)")
-    p.add_argument("--num-samples", type=int, default=16, help="Samples per problem (default: 16)")
-    p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
-    p.add_argument("--temperature", type=float, default=1.0, help="Temperature (default: 1.0)")
-    p.add_argument("--top-p", type=float, default=1.0, help="Top-p (default: 1.0)")
-    p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
-    p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
-    p.add_argument("--group-by", default="variant", help="Field to group/color scatter points by (default: variant)")
-    p.set_defaults(func=cmd_compare_sampling)
-
-    # evaluate_classifier
-    p = subparsers.add_parser("evaluate_classifier", help="Evaluate binary classifier on a dataset")
-    p.add_argument("--task", required=True, help="Task name")
-    p.add_argument("--classifier", help="Path to classifier model (default: artifacts/{task}/{method}/models/classifier)")
-    p.add_argument("--method", help="Method name for auto-derived paths")
-    p.add_argument("--dataset", help="Path to dataset with 'prompt', 'generation', 'correct' fields")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/results/classifier_eval.json)")
-    p.add_argument("--batch-size", type=int, default=8, help="Batch size for inference")
-    p.add_argument("--max-length", type=int, default=2048, help="Maximum sequence length")
-    p.set_defaults(func=cmd_evaluate_classifier)
 
     # train_sft
     p = subparsers.add_parser("train_sft", help="Train SFT model on generated dataset")
@@ -727,16 +494,12 @@ def main():
     p.add_argument("--learning-rate", type=float, default=1e-5, help="Learning rate")
     p.add_argument("--warmup-ratio", type=float, default=0.1, help="Warmup ratio")
     p.add_argument("--max-length", type=int, default=4096, help="Maximum sequence length")
-    p.add_argument("--eval-split", type=float, default=0.0, help="Fraction of data for evaluation (0 = disabled)")
-    p.add_argument("--save-steps", type=int, default=0, help="Save checkpoint every N steps (0 = final only)")
-    p.add_argument("--logging-steps", type=int, default=10, help="Log every N steps")
     p.add_argument("--no-bf16", action="store_true", help="Disable bfloat16 training")
     p.add_argument("--report-to", default="wandb", help="Reporting integration (wandb, none)")
     p.add_argument("--project-name", help="Wandb project name (default: {task}-sft)")
     p.add_argument("--experiment-name", help="Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})")
     p.add_argument("--no-abstained", action="store_true", help="Exclude abstained examples (by default they're included)")
     p.add_argument("--include-wrong-valid-format", action="store_true", help="Include wrong answers with valid format (task-specific, e.g., valid UCI but wrong move for chess)")
-    p.add_argument("--keep-checkpoints", action="store_true", help="Keep intermediate checkpoints after training (by default they are deleted)")
     p.add_argument("--upsample-hint", type=int, default=1, help="Upsample hint-containing examples by this factor (e.g., 4 = 4x copies)")
     p.add_argument("--max-correct", type=int, default=None, help="Downsample correct examples to at most this many (random subset, seed=42)")
     p.add_argument("--upsample-abstain", type=int, default=1, help="Upsample abstained examples by this factor (e.g., 2 = 2x copies)")
@@ -775,27 +538,6 @@ def main():
     p.add_argument("--reward-kwargs", nargs="*", metavar="KEY=VALUE", help="Override reward kwargs (e.g., --reward-kwargs hint_penalty=0.05 hint_bonus=0.1)")
     p.add_argument("--shuffle-seed", type=int, default=None, help="Seed for shuffling training data (default: 1, set to randomize order across runs)")
     p.set_defaults(func=cmd_train_rl)
-
-    # train_classifier
-    p = subparsers.add_parser("train_classifier", help="Train binary classifier for puzzle solvability prediction")
-    p.add_argument("--task", required=True, help="Task name")
-    p.add_argument("--base-model", required=True, help="Base model for classification")
-    p.add_argument("--method", help="Method name for auto-derived paths")
-    p.add_argument("--dataset", help="Path to generated dataset (default: auto-detect from method)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/models/classifier_{dataset})")
-    p.add_argument("--mode", default="binary", choices=["binary", "three_class"], help="Classification mode")
-    p.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
-    p.add_argument("--batch-size", type=int, default=8, help="Per-device batch size")
-    p.add_argument("--learning-rate", type=float, default=2e-5, help="Learning rate")
-    p.add_argument("--max-length", type=int, default=2048, help="Maximum sequence length")
-    p.add_argument("--eval-split", type=float, default=0.1, help="Fraction of data for evaluation")
-    p.add_argument("--eval-steps", type=int, default=None, help="Evaluate every N steps (default: once per epoch)")
-    p.add_argument("--logging-steps", type=int, default=10, help="Log every N steps")
-    p.add_argument("--balance", default="none", choices=["none", "downsample", "upsample"], help="Class balancing strategy")
-    p.add_argument("--report-to", default="wandb", help="Reporting integration (wandb, none)")
-    p.add_argument("--project-name", default="binary_classifier", help="Wandb project name")
-    p.add_argument("--experiment-name", help="Custom experiment name (default: {task}_{dataset_source}_{model})")
-    p.set_defaults(func=cmd_train_classifier)
 
     # convert_checkpoint
     p = subparsers.add_parser("convert_checkpoint", help="Convert FSDP/Megatron checkpoint to HuggingFace format")

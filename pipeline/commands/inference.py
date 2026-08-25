@@ -7,10 +7,8 @@ from datetime import datetime
 from pathlib import Path
 
 from pipeline.core.io import load_json, save_json
-from pipeline.core.generator import Generator, GenerationConfig, AsyncGenerator, run_async_generation
-from pipeline.core.hint_selector import HintSelector
+from pipeline.core.generator import Generator, GenerationConfig, AsyncGenerator
 from pipeline.core.method import Method
-from pipeline.core.utils import model_short_name
 from pipeline.tasks import get_task
 
 
@@ -463,13 +461,9 @@ def generate(
     max_retries: int = 10,
     seed: int | None = 42,
     multi_turn: bool | None = None,
-    max_turns: int | None = None,
     use_async: bool = False,
     force_hints_distribution: dict[int, float] | None = None,
     force_hints_policy: dict[str, float] | None = None,
-    hint_selection: str | None = None,
-    helper_model: str | None = None,
-    helper_gpu_memory_utilization: float | None = None,
     sample_strategy: str | None = None,
 ) -> Path:
     """
@@ -488,7 +482,6 @@ def generate(
         split: Which split to generate from (default: sft)
         retry_incorrect: If True, re-run incorrect examples
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
-        max_turns: Maximum turns for multi-turn generation. If None, uses method config (default: 5).
         use_async: Use async generation for optimal throughput.
         force_hints_distribution: Distribution of forced hint counts. Maps number of hints
             to probability, e.g. {1: 0.5, 2: 0.3, 3: 0.2}. Probabilities must sum to 1.
@@ -508,33 +501,11 @@ def generate(
     if method_name is not None:
         method = Method.load(method_name, task_name)
 
-    # Resolve multi_turn and max_turns from method config (CLI overrides if explicitly set)
+    # Resolve multi_turn from method config (CLI overrides if explicitly set)
     if multi_turn is None:
         multi_turn = method.multi_turn if method else False
     if force_hints_distribution:
         multi_turn = True  # force_hints requires multi_turn
-    if max_turns is None:
-        max_turns = method.max_turns if method else 6
-
-    # Resolve hint selection strategy (CLI overrides method config)
-    if hint_selection is None:
-        hint_selection = method.hint_selection if method else "sequential"
-    if helper_model is None:
-        helper_model = method.helper_model if method else None
-
-    # Create HintSelector if using smart selection
-    hint_selector = None
-    if hint_selection == "smart" and multi_turn:
-        helper_gpu_util = helper_gpu_memory_utilization if helper_gpu_memory_utilization is not None else gpu_memory_utilization
-        hint_selector = HintSelector(
-            strategy="smart",
-            helper_model=helper_model,
-            tensor_parallel_size=tensor_parallel_size,
-            gpu_memory_utilization=helper_gpu_util,
-        )
-        print(f"Smart hint selection enabled (helper: {helper_model}, gpu_util: {helper_gpu_util})")
-    elif hint_selection == "smart" and not multi_turn:
-        print("Warning: --hint-selection smart requires multi-turn mode, ignoring")
 
     # Resolve model shortcuts (sft, rl)
     actual_model_name = model_name
@@ -633,7 +604,7 @@ def generate(
             if use_async:
                 print("Async mode enabled (optimal throughput)")
             if multi_turn:
-                print(f"Multi-turn mode enabled: max_turns={max_turns}")
+                print("Multi-turn mode enabled")
 
         # Compute per-prompt force_hints based on distribution and policy
         if force_hints_distribution:
@@ -695,9 +666,7 @@ def generate(
                 async_generator.generate_with_hints_async(
                     all_prompts,
                     all_ground_truths,
-                    max_turns=max_turns,
                     force_hints=force_hints_list,
-                    hint_selector=hint_selector,
                 )
             )
 
@@ -748,9 +717,6 @@ def generate(
             print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%)")
             _print_verify_metrics(records)
             print(f"Saved dataset to {output_path}")
-            if hint_selector is not None:
-                hint_selector.shutdown()
-
             if not retry_truncated:
                 return output_path
             truncated = sum(1 for r in records if r.get("finish_reason") == "length")
@@ -763,6 +729,10 @@ def generate(
         # Async regular generation (non-multi-turn)
         if use_async and not multi_turn:
             import asyncio
+
+            # Same defaulting as the sync and multi-turn branches. Without it
+            # sample_strategy stays None here and overrides the function default.
+            sample_strategy = sample_strategy or "shortest_cot"
 
             async def _async_generate_with_retries():
                 async_generator = AsyncGenerator(config)
@@ -790,7 +760,7 @@ def generate(
                         }
 
                         if num_samples > 1:
-                            best_sample = select_best_sample(gen_samples, task, primitive)
+                            best_sample = select_best_sample(gen_samples, task, primitive, strategy=sample_strategy)
                         else:
                             sample = gen_samples[0]
                             is_correct, meta = task.check_correctness(primitive, sample["text"])
@@ -845,9 +815,7 @@ def generate(
                     expanded_results = generator.generate_with_hints(
                         expanded_prompts,
                         expanded_gts,
-                        max_turns=max_turns,
                         force_hints=expanded_force,
-                        hint_selector=hint_selector,
                     )
                     batch_results = [
                         [r[0] for r in expanded_results[i * num_samples:(i + 1) * num_samples]]
@@ -859,9 +827,7 @@ def generate(
                     batch_results = generator.generate_with_hints(
                         batch_prompts,
                         batch_ground_truths,
-                        max_turns=max_turns,
                         force_hints=batch_force_hints,
-                        hint_selector=hint_selector,
                     )
             else:
                 batch_results = generator.generate(batch_prompts)
@@ -932,9 +898,6 @@ def generate(
             print(f"All records complete after {attempt + 1} attempt(s).")
             break
         print(f"{truncated} truncated records remaining.")
-
-    if hint_selector is not None:
-        hint_selector.shutdown()
 
     return output_path
 
@@ -1033,12 +996,8 @@ def evaluate(
     gpu_memory_utilization: float = 0.9,
     verbose: bool = False,
     multi_turn: bool | None = None,
-    max_turns: int | None = None,
     use_async: bool = False,
     seed: int | None = 42,
-    hint_selection: str | None = None,
-    helper_model: str | None = None,
-    helper_gpu_memory_utilization: float | None = None,
 ) -> Path:
     """
     Evaluate a model on prompts and compute metrics.
@@ -1051,7 +1010,6 @@ def evaluate(
         prompts_path: Path to eval prompts (default: artifacts/{task}/{method}/prompts/eval.json)
         output_path: Where to save results (default: artifacts/{task}/{method}/results/eval_{model}.json)
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
-        max_turns: Maximum turns for multi-turn generation. If None, uses method config (default: 5).
         use_async: Use async generation for optimal throughput.
         ... generation config ...
 
@@ -1065,29 +1023,9 @@ def evaluate(
     if method_name is not None:
         method = Method.load(method_name, task_name)
 
-    # Resolve multi_turn and max_turns from method config (CLI overrides if explicitly set)
+    # Resolve multi_turn from method config (CLI overrides if explicitly set)
     if multi_turn is None:
         multi_turn = method.multi_turn if method else False
-    if max_turns is None:
-        max_turns = method.max_turns if method else 6
-
-    # Resolve hint selection strategy (CLI overrides method config)
-    if hint_selection is None:
-        hint_selection = method.hint_selection if method else "sequential"
-    if helper_model is None:
-        helper_model = method.helper_model if method else None
-
-    # Create HintSelector if using smart selection
-    hint_selector = None
-    if hint_selection == "smart" and multi_turn:
-        helper_gpu_util = helper_gpu_memory_utilization if helper_gpu_memory_utilization is not None else gpu_memory_utilization
-        hint_selector = HintSelector(
-            strategy="smart",
-            helper_model=helper_model,
-            tensor_parallel_size=tensor_parallel_size,
-            gpu_memory_utilization=helper_gpu_util,
-        )
-        print(f"Smart hint selection enabled (helper: {helper_model}, gpu_util: {helper_gpu_util})")
 
     # Resolve model shortcuts (sft, rl)
     actual_model_name = model_name
@@ -1152,7 +1090,7 @@ def evaluate(
     if use_async:
         print("Async mode enabled (optimal throughput)")
     if multi_turn:
-        print(f"Multi-turn mode enabled: max_turns={max_turns}")
+        print("Multi-turn mode enabled")
 
     # Async multi-turn generation
     if multi_turn and use_async:
@@ -1171,8 +1109,6 @@ def evaluate(
                 async_generator.generate_with_hints_async(
                     expanded_prompts,
                     expanded_gts,
-                    max_turns=max_turns,
-                    hint_selector=hint_selector,
                 )
             )
             # Group back: every num_samples consecutive results belong to the same prompt
@@ -1187,8 +1123,6 @@ def evaluate(
                 async_generator.generate_with_hints_async(
                     prompts,
                     ground_truths,
-                    max_turns=max_turns,
-                    hint_selector=hint_selector,
                 )
             )
 
@@ -1211,8 +1145,6 @@ def evaluate(
             expanded_results = generator.generate_with_hints_batched(
                 expanded_prompts,
                 expanded_gts,
-                max_turns=max_turns,
-                hint_selector=hint_selector,
             )
             generations = [
                 [r[0] for r in expanded_results[i * num_samples:(i + 1) * num_samples]]
@@ -1222,8 +1154,6 @@ def evaluate(
             generations = generator.generate_with_hints_batched(
                 prompts,
                 ground_truths,
-                max_turns=max_turns,
-                hint_selector=hint_selector,
             )
 
     # Sync regular generation
@@ -1284,7 +1214,6 @@ def evaluate(
                 "top_p": top_p,
                 "num_samples": num_samples,
                 "multi_turn": multi_turn,
-                "max_turns": max_turns if multi_turn else None,
             },
             "metrics": metrics,
             "details": details,
@@ -1295,9 +1224,6 @@ def evaluate(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         save_json(output_path, results)
         print(f"\nSaved results to {output_path}")
-
-        if hint_selector is not None:
-            hint_selector.shutdown()
 
         return output_path
 
@@ -1364,7 +1290,6 @@ def evaluate(
             "top_p": top_p,
             "num_samples": 1,
             "multi_turn": multi_turn,
-            "max_turns": max_turns if multi_turn else None,
         },
         "metrics": metrics,
         "details": details,
@@ -1381,21 +1306,6 @@ def evaluate(
     if hint_metrics:
         print(format_hint_metrics(hint_metrics, details))
 
-    # Print per-problem hint selection details if smart selection was used
-    if hint_selection == "smart" and multi_turn:
-        print("\n--- Hint Selection Details ---")
-        for d in details:
-            sels = d.get("hint_selections", [])
-            if sels:
-                level = d.get("level", "?")
-                correct = "Y" if d.get("correct") else "N"
-                idx = d.get("index", "?")
-                sel_strs = [
-                    f"turn {s['turn']}: {s['prev_last_given']}->{s['new_last_given']} ({s['type']})"
-                    for s in sels
-                ]
-                print(f"  [{idx}] level={level} correct={correct} hints={d.get('num_hints', 0)} | {', '.join(sel_strs)}")
-
     # Print and save verify metrics if applicable
     verify_metrics = _print_verify_metrics(details)
     if verify_metrics:
@@ -1405,9 +1315,6 @@ def evaluate(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_json(output_path, results)
     print(f"\nSaved results to {output_path}")
-
-    if hint_selector is not None:
-        hint_selector.shutdown()
 
     return output_path
 
@@ -1485,261 +1392,3 @@ def _format_basic_metrics(metrics: dict, model_name: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def evaluate_classifier(
-    task_name: str,
-    classifier_path: Path,
-    method_name: str | None = None,
-    dataset_path: Path | None = None,
-    output_path: Path | None = None,
-    batch_size: int = 8,
-    max_length: int = 2048,
-) -> Path:
-    """
-    Evaluate a binary classifier on a dataset with ground truth correctness labels.
-
-    Computes confusion matrix, precision, recall, F1 score by comparing
-    classifier predictions to actual correctness labels.
-
-    Args:
-        task_name: Name of task
-        classifier_path: Path to trained classifier model
-        method_name: Method name for auto-derived paths
-        dataset_path: Path to dataset with 'prompt', 'generation', 'correct' fields
-                     (default: uses classifier dataset from method)
-        output_path: Where to save results
-                    (default: artifacts/{task}/{method}/results/classifier_eval.json)
-        batch_size: Batch size for inference
-        max_length: Maximum sequence length
-
-    Returns:
-        Path to results file
-    """
-    import torch
-    from transformers import AutoModelForSequenceClassification, AutoTokenizer
-
-    method = None
-    if method_name is not None:
-        method = Method.load(method_name, task_name)
-
-    # Default classifier path from method
-    if classifier_path is None:
-        if method is None:
-            raise ValueError(
-                "Either --classifier or --method must be specified. "
-                "Use --method to auto-derive paths, or --classifier for explicit paths."
-            )
-        classifier_path = method.classifier_model_path(task_name)
-
-    # Default dataset path - look for classifier dataset
-    if dataset_path is None:
-        if method is None:
-            raise ValueError(
-                "Either --method or --dataset must be specified. "
-                "Use --method to auto-derive paths, or --dataset for explicit paths."
-            )
-        datasets_dir = method.datasets_dir(task_name)
-        classifier_files = list(datasets_dir.glob("classifier_*.json"))
-        if not classifier_files:
-            raise FileNotFoundError(
-                f"No classifier datasets found in {datasets_dir}. "
-                f"Run 'python -m pipeline generate --task {task_name} --method {method_name} --split classifier' first."
-            )
-        dataset_path = classifier_files[0]
-
-    # Default output path - derive from dataset name
-    if output_path is None:
-        # Extract dataset identifier from filename (e.g., "eval_sft" from "eval_sft.json")
-        dataset_stem = dataset_path.stem  # e.g., "eval_sft", "classifier_sft"
-        output_name = f"classifier_{dataset_stem}.json"
-
-        if method is not None:
-            output_path = method.results_dir(task_name) / output_name
-        else:
-            # Put results in results dir next to dataset
-            output_path = dataset_path.parent.parent / "results" / output_name
-
-    print(f"=== Classifier Evaluation ===")
-    print(f"Classifier: {classifier_path}")
-    print(f"Dataset: {dataset_path}")
-    print(f"Output: {output_path}")
-    print(f"==============================")
-
-    # Load dataset
-    raw_data = load_json(dataset_path)
-
-    # Handle eval results format (with "details" array and separate prompts file)
-    if isinstance(raw_data, dict) and "details" in raw_data:
-        print("Detected eval results format, loading prompts separately...")
-        prompts_file = raw_data.get("prompts")
-        prompts_by_index = {}
-        if prompts_file:
-            prompts_path = Path(prompts_file)
-            # Try the referenced path first, then look relative to dataset
-            if not prompts_path.exists():
-                # Try finding eval.json in same method directory
-                alt_path = dataset_path.parent.parent / "prompts" / "eval.json"
-                if alt_path.exists():
-                    prompts_path = alt_path
-                    print(f"  Using prompts from: {prompts_path}")
-            if prompts_path.exists():
-                prompts_data = load_json(prompts_path)
-                prompts_by_index = {p["index"]: p["prompt"] for p in prompts_data}
-            else:
-                print(f"  Warning: prompts file not found at {prompts_file}")
-
-        # Convert to standard format
-        data = []
-        for detail in raw_data["details"]:
-            record = {
-                "index": detail["index"],
-                "variant": detail.get("variant", "unknown"),
-                "prompt": prompts_by_index.get(detail["index"], ""),
-                "generation": detail["generation"],
-                "correct": detail.get("correct", False),
-            }
-            data.append(record)
-    else:
-        # Standard dataset format (list of records with prompt, generation, correct)
-        data = raw_data
-
-    print(f"Loaded {len(data)} examples")
-
-    # Count ground truth distribution
-    gt_positive = sum(1 for ex in data if ex.get("correct", False))
-    gt_negative = len(data) - gt_positive
-    print(f"Ground truth: {gt_positive} correct, {gt_negative} incorrect")
-
-    # Load classifier
-    print(f"Loading classifier from {classifier_path}")
-    tokenizer = AutoTokenizer.from_pretrained(classifier_path)
-    model = AutoModelForSequenceClassification.from_pretrained(classifier_path)
-
-    # Ensure pad token exists
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    model.eval()
-
-    # Prepare texts (prompt only - matches training)
-    texts = []
-    for ex in data:
-        if isinstance(ex["prompt"], list):
-            # Chat format - concatenate messages
-            prompt_text = ""
-            for msg in ex["prompt"]:
-                prompt_text += f"{msg['role']}: {msg['content']}\n"
-        else:
-            prompt_text = ex["prompt"]
-        texts.append(prompt_text)
-
-    # Run inference
-    print(f"Running classifier inference...")
-    predictions = []
-    probabilities = []
-
-    for i in range(0, len(texts), batch_size):
-        batch_texts = texts[i:i + batch_size]
-
-        inputs = tokenizer(
-            batch_texts,
-            truncation=True,
-            max_length=max_length,
-            padding=True,
-            return_tensors="pt",
-        ).to(device)
-
-        with torch.no_grad():
-            outputs = model(**inputs)
-            logits = outputs.logits
-            probs = torch.softmax(logits, dim=-1)
-            preds = torch.argmax(logits, dim=-1)
-
-        predictions.extend(preds.cpu().tolist())
-        probabilities.extend(probs.cpu().tolist())
-
-        if (i // batch_size + 1) % 10 == 0:
-            print(f"Batch {i // batch_size + 1}/{(len(texts) + batch_size - 1) // batch_size}")
-
-    # Compute metrics
-    ground_truth = [1 if ex.get("correct", False) else 0 for ex in data]
-
-    tp = sum(1 for gt, pred in zip(ground_truth, predictions) if gt == 1 and pred == 1)
-    tn = sum(1 for gt, pred in zip(ground_truth, predictions) if gt == 0 and pred == 0)
-    fp = sum(1 for gt, pred in zip(ground_truth, predictions) if gt == 0 and pred == 1)
-    fn = sum(1 for gt, pred in zip(ground_truth, predictions) if gt == 1 and pred == 0)
-
-    accuracy = (tp + tn) / len(data) if len(data) > 0 else 0
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-
-    # Build confusion matrix
-    confusion_matrix = {
-        "true_positive": tp,
-        "true_negative": tn,
-        "false_positive": fp,
-        "false_negative": fn,
-    }
-
-    metrics = {
-        "accuracy": accuracy,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "confusion_matrix": confusion_matrix,
-        "total": len(data),
-        "ground_truth_positive": gt_positive,
-        "ground_truth_negative": gt_negative,
-        "predicted_positive": tp + fp,
-        "predicted_negative": tn + fn,
-    }
-
-    # Print results
-    print(f"\n=== Classifier Evaluation Results ===")
-    print(f"Total examples: {len(data)}")
-    print(f"\nConfusion Matrix:")
-    print(f"                    Predicted")
-    print(f"                 Correct  Incorrect")
-    print(f"Actual Correct     {tp:5d}      {fn:5d}")
-    print(f"Actual Incorrect   {fp:5d}      {tn:5d}")
-    print(f"\nMetrics:")
-    print(f"  Accuracy:  {accuracy:.4f} ({accuracy*100:.1f}%)")
-    print(f"  Precision: {precision:.4f} ({precision*100:.1f}%)")
-    print(f"  Recall:    {recall:.4f} ({recall*100:.1f}%)")
-    print(f"  F1 Score:  {f1:.4f} ({f1*100:.1f}%)")
-    print(f"\nInterpretation:")
-    print(f"  - Precision: When classifier predicts 'correct', it's right {precision*100:.1f}% of the time")
-    print(f"  - Recall: Classifier finds {recall*100:.1f}% of actually correct examples")
-    print(f"======================================")
-
-    # Build detailed results
-    details = []
-    for i, ex in enumerate(data):
-        detail = {
-            "index": ex.get("index", i),
-            "variant": ex.get("variant", "unknown"),
-            "ground_truth": ground_truth[i],
-            "prediction": predictions[i],
-            "correct_classification": ground_truth[i] == predictions[i],
-            "probability_correct": probabilities[i][1],
-            "probability_incorrect": probabilities[i][0],
-        }
-        details.append(detail)
-
-    results = {
-        "classifier": str(classifier_path),
-        "dataset": str(dataset_path),
-        "timestamp": datetime.now().isoformat(),
-        "metrics": metrics,
-        "details": details,
-    }
-
-    # Save
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    save_json(output_path, results)
-    print(f"\nSaved classifier eval results to {output_path}")
-
-    return output_path

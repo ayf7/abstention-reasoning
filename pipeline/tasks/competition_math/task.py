@@ -5,13 +5,9 @@ mathematics problems across 7 categories and 5 difficulty levels.
 
 Dataset: https://huggingface.co/datasets/qwedsacf/competition_math
 
-Supports multiple hint systems via hint_source config:
-- None (default): prefix_hints (5-hint progressive system)
-- "solution_hints": 3-hint solution decomposition
-- "mcq_hints": 3-hint multiple-choice narrowing
+Hints come from each primitive's prefix_hints (6-hint progressive system).
 """
 
-import json
 import re
 
 from pipeline.tasks.base import BaseTask
@@ -29,12 +25,6 @@ class CompetitionMathTask(BaseTask):
 
     name = "competition_math"
 
-    # Set by method config via hint_source field; determines which hint data
-    # to map into hint_exprs for RL rollouts.
-    # None = use prefix_hints (6-hint system), "solution_hints" = 3-hint from
-    # solution splits, "mcq_hints" = 3-hint MCQ choices.
-    hint_source = None
-
     system_message = (
         "A conversation between User and Assistant. The user asks a question, "
         "and the Assistant solves it. The assistant first thinks about the "
@@ -44,12 +34,15 @@ class CompetitionMathTask(BaseTask):
     assistant_prefix = "<think>\nLet me work through this problem step by step."
 
     # Only include harder problem types (exclude Algebra, Prealgebra, Precalculus)
-    ALLOWED_TYPES = {
+    # Ordered, not a set: iteration order feeds the selection list *before* the
+    # seeded shuffle, and set iteration order varies across processes under
+    # hash randomization. A set here made --seed non-reproducible.
+    ALLOWED_TYPES = (
         "Intermediate Algebra",
         "Geometry",
         "Number Theory",
         "Counting & Probability",
-    }
+    )
 
     def create_primitives(self, num_puzzles: int | None, seed: int = 42) -> list[dict]:
         """
@@ -76,18 +69,25 @@ class CompetitionMathTask(BaseTask):
         for t in by_type:
             rng.shuffle(by_type[t])
 
-        # Determine per-type limit for balanced sampling
+        # Determine per-type limits for balanced sampling. Integer division
+        # alone truncates: it yielded 0 primitives for any num_puzzles below the
+        # type count, and under-delivered by up to len(ALLOWED_TYPES)-1
+        # otherwise. Spread the remainder so --num-puzzles N really means N.
+        n_types = len(self.ALLOWED_TYPES)
         if num_puzzles is not None:
-            per_type = num_puzzles // len(self.ALLOWED_TYPES)
+            base, remainder = divmod(num_puzzles, n_types)
+            per_type_limits = [
+                base + (1 if i < remainder else 0) for i in range(n_types)
+            ]
         else:
-            per_type = None
+            per_type_limits = [None] * n_types
 
         # Sample from each type (balanced)
         selected = []
-        for t in self.ALLOWED_TYPES:
+        for t, limit in zip(self.ALLOWED_TYPES, per_type_limits):
             pool = by_type[t]
-            if per_type is not None:
-                pool = pool[:per_type]
+            if limit is not None:
+                pool = pool[:limit]
             selected.extend(pool)
 
         # Final shuffle
@@ -356,10 +356,7 @@ class CompetitionMathTask(BaseTask):
     def get_ground_truth(self, primitive: dict) -> dict:
         """Extract ground truth for embedding in prompts and RL interactions.
 
-        Hint mapping depends on hint_source (set from method config):
-        - None: prefix_hints (5-hint progressive system)
-        - "solution_hints": 3-hint solution decomposition
-        - "mcq_hints": 3-hint multiple-choice narrowing
+        Hints come from the primitive's prefix_hints (6-hint progressive system).
         """
         gt = {
             "level": primitive["level"],
@@ -368,76 +365,18 @@ class CompetitionMathTask(BaseTask):
             "answer": primitive["answer"],
         }
 
-        if self.hint_source == "mcq_hints":
-            mcq = primitive.get("mcq_hints")
-            if mcq:
-                gt["hint_exprs"] = [
-                    f'The answer is one of: {json.dumps(mcq["hint_1"])}',
-                    f'The answer is one of: {json.dumps(mcq["hint_2"])}',
-                    mcq["hint_3"],
-                ]
-        elif self.hint_source == "solution_hints":
-            solution_hints = primitive.get("solution_hints")
-            if solution_hints:
-                gt["hint_exprs"] = [
-                    solution_hints["hint_1"],
-                    solution_hints["hint_2"],
-                    solution_hints["hint_3"],
-                ]
-        else:
-            # Default: prefix_hints (5-hint progressive system)
-            if "prefix_hints" in primitive and primitive["prefix_hints"]:
-                prefix_hints = primitive["prefix_hints"]
-                hint_exprs = []
-                for i in range(1, 7):  # hint_1 through hint_6
-                    key = f"hint_{i}"
-                    if key in prefix_hints:
-                        hint_exprs.append(prefix_hints[key])
-                gt["hint_exprs"] = hint_exprs
-                gt["prefix_hints"] = prefix_hints  # Keep original for reference
+        if "prefix_hints" in primitive and primitive["prefix_hints"]:
+            prefix_hints = primitive["prefix_hints"]
+            hint_exprs = []
+            for i in range(1, 7):  # hint_1 through hint_6
+                key = f"hint_{i}"
+                if key in prefix_hints:
+                    hint_exprs.append(prefix_hints[key])
+            gt["hint_exprs"] = hint_exprs
+            gt["prefix_hints"] = prefix_hints  # Keep original for reference
 
         return gt
 
-    def get_split_indices(
-        self,
-        total: int,
-        split: str,
-        seed: int = 42,
-        primitives: list[dict] | None = None,
-    ) -> list[int]:
-        """
-        Return indices for a given split with custom ratios.
-
-        Split ratios:
-        - sft: 30%
-        - rl_train: 35%
-        - rl_val: 5%
-        - classifier: 20%
-        - eval: 10%
-        """
-        import random
-
-        rng = random.Random(seed)
-        indices = list(range(total))
-        rng.shuffle(indices)
-
-        splits = {
-            "sft": (0.0, 0.30),
-            "rl_train": (0.30, 0.65),
-            "rl_val": (0.65, 0.70),
-            "classifier": (0.70, 0.90),
-            "eval": (0.90, 1.0),
-            "eval_augmented": (0.70, 1.0),
-        }
-
-        if split not in splits:
-            raise ValueError(f"Unknown split: {split}. Available: {list(splits.keys())}")
-
-        start_ratio, end_ratio = splits[split]
-        start = int(total * start_ratio)
-        end = int(total * end_ratio)
-
-        return indices[start:end]
 
     def filter_for_sft(
         self,

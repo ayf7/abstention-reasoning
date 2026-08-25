@@ -4,8 +4,6 @@ reward_function: compute_score_hint_dynamic
 multi_turn: true
 max_turns: 6
 mask_response_tokens: true
-rollout_backend: vllm
-rollout_mode: sync
 reward_kwargs:
   correct_end: 0.55
   incorrect_end: 0.45

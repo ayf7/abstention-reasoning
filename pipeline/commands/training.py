@@ -1,5 +1,5 @@
 """
-Training commands - SFT, RL, classifier training, and checkpoint conversion.
+Training commands - SFT, RL, and checkpoint conversion.
 """
 
 import re
@@ -39,16 +39,12 @@ def train_sft(
     learning_rate: float = 1e-5,
     warmup_ratio: float = 0.1,
     max_length: int = 4096,
-    eval_split: float = 0.0,
-    save_steps: int = 0,
-    logging_steps: int = 10,
     bf16: bool = True,
     report_to: str = "wandb",
     project_name: str | None = None,
     experiment_name: str | None = None,
     include_abstained: bool = True,
     include_wrong_valid_format: bool = False,
-    cleanup_checkpoints: bool = True,
     upsample_hint: int = 1,
     max_correct: int | None = None,
     upsample_abstain: int = 1,
@@ -72,16 +68,12 @@ def train_sft(
         learning_rate: Learning rate
         warmup_ratio: Warmup ratio
         max_length: Maximum sequence length
-        eval_split: Fraction of data for evaluation
-        save_steps: Save checkpoint every N steps
-        logging_steps: Log every N steps
         bf16: Use bfloat16 training
         report_to: Reporting integration ("none", "wandb", etc.)
         project_name: Wandb project name (default: {task}-sft)
         experiment_name: Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})
         include_abstained: Include abstained examples in training (default: True)
         include_wrong_valid_format: Include wrong answers with valid format (task-specific, default: False)
-        cleanup_checkpoints: Delete intermediate checkpoints after training (default: True)
 
     Returns:
         Path to trained model
@@ -89,7 +81,6 @@ def train_sft(
     from datasets import Dataset
     from trl import SFTTrainer, SFTConfig
     from transformers import AutoTokenizer
-    from pipeline.core.utils import model_short_name
 
     # Load method config if specified
     method = None
@@ -305,22 +296,15 @@ def train_sft(
 
     dataset = Dataset.from_list(formatted)
 
-    # Train/eval split
-    if eval_split > 0:
-        split = dataset.train_test_split(test_size=eval_split, seed=42)
-        train_dataset = split["train"]
-        eval_dataset = split["test"]
-        print(f"Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
-    else:
-        train_dataset = dataset
-        eval_dataset = None
-        print(f"Train: {len(train_dataset)}, Eval: disabled")
+    train_dataset = dataset
+    print(f"Train: {len(train_dataset)}")
 
     # Data collator - standard collator handles completion_mask
     data_collator = None
 
-    # Training config
-    save_strategy = "no" if save_steps <= 0 else "steps"
+    # Training config. SFT keeps only the final weights: intermediate
+    # checkpointing and a held-out eval split were dropped after every recorded
+    # run turned out to consume just the final model.
     training_args = SFTConfig(
         output_dir=str(output_path),
         num_train_epochs=epochs,
@@ -329,12 +313,9 @@ def train_sft(
         learning_rate=learning_rate,
         warmup_ratio=warmup_ratio,
         max_length=max_length,
-        logging_steps=logging_steps,
-        save_strategy=save_strategy,
-        save_steps=save_steps if save_steps > 0 else None,
-        eval_strategy="steps" if eval_dataset is not None else "no",
-        eval_steps=save_steps if eval_dataset is not None and save_steps > 0 else None,
-        save_total_limit=3 if save_strategy == "steps" else None,
+        logging_steps=10,
+        save_strategy="no",
+        eval_strategy="no",
         bf16=bf16,
         report_to=report_to,
         run_name=experiment_name,
@@ -351,7 +332,6 @@ def train_sft(
         model=base_model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
         data_collator=data_collator,
     )
 
@@ -361,16 +341,6 @@ def train_sft(
     trainer.save_model(str(output_path))
     tokenizer.save_pretrained(str(output_path))
     print(f"Saved model to {output_path}")
-
-    # Cleanup intermediate checkpoints if requested
-    if cleanup_checkpoints:
-        import shutil
-        checkpoint_dirs = list(output_path.glob("checkpoint-*"))
-        if checkpoint_dirs:
-            print(f"Cleaning up {len(checkpoint_dirs)} intermediate checkpoints...")
-            for ckpt_dir in checkpoint_dirs:
-                shutil.rmtree(ckpt_dir)
-            print("Checkpoint cleanup complete.")
 
     return output_path
 
@@ -511,6 +481,30 @@ def train_rl(
     checkpoints_dir = Path(checkpoints_dir).resolve()
     rollouts_dir = Path(rollouts_dir).resolve()
     output_path = Path(output_path).resolve()
+
+    # A prompts file that does not exist used to be handed straight to verl,
+    # which then failed much later with an opaque error. Only explicitly-passed
+    # paths can be missing here: the auto-derived val path above is assigned
+    # solely when it exists.
+    for flag, prompts_path in (
+        ("--train-prompts", train_prompts_path),
+        ("--val-prompts", val_prompts_path),
+    ):
+        if prompts_path is None or prompts_path.exists():
+            continue
+        split = prompts_path.stem
+        supported = get_task(task_name).supported_splits()
+        if split not in supported:
+            detail = (
+                f"task '{task_name}' does not define the '{split}' split "
+                f"(it has: {', '.join(supported)})"
+            )
+        else:
+            detail = (
+                f"run: python -m pipeline create_prompts --task {task_name} "
+                f"--method {method.name if method else '<method>'} --split {split}"
+            )
+        raise FileNotFoundError(f"{flag} not found: {prompts_path}\n  {detail}")
     if not actor_model.startswith("/") and "/" in actor_model:
         # Relative path (not a HuggingFace model ID like "Qwen/Qwen2.5-1.5B")
         actor_model = str(Path(actor_model).resolve())
@@ -520,8 +514,6 @@ def train_rl(
     reward_kwargs = {}
     template_content = None
     allow_hint = False
-    rollout_backend = "vllm"
-    rollout_mode = "sync"
     interaction_name = None
     max_turns = 6
     max_hints = None
@@ -529,8 +521,6 @@ def train_rl(
         reward_function_name = method.reward_function
         reward_kwargs = {**method.reward_kwargs}
         allow_hint = method.allow_hint
-        rollout_backend = method.rollout_backend
-        rollout_mode = method.rollout_mode
         interaction_name = method.interaction_name or (f"{task_name}_{method.name}" if method.multi_turn else None)
         max_turns = method.max_turns
         max_hints = method.max_hints
@@ -600,8 +590,6 @@ def train_rl(
     print(f"Val Prompts: {val_prompts_path or 'None (no validation)'}")
     print(f"Reward Function: {reward_function_path}:{reward_function_name}")
     print(f"Reward Kwargs: {reward_kwargs}")
-    print(f"Rollout Backend: {rollout_backend}")
-    print(f"Rollout Mode: {rollout_mode}")
     print(f"Multi-Turn: {allow_hint}")
     if interaction_name:
         print(f"Interaction: {interaction_name}")
@@ -679,42 +667,16 @@ def train_rl(
             escaped_prefix = assistant_prefix.replace("\n", "\\n").replace('"', '\\"')
             cmd.append(f'+data.runtime_assistant_prefix="{escaped_prefix}"')
 
-    # Add rollout backend configuration
-    if rollout_backend == "sglang":
-        # SGLang async multi-turn configuration
-        cmd.append("actor_rollout_ref.rollout.name=sglang")
-        cmd.append("data.return_raw_chat=True")  # Required for SGLang multi-turn
-
-        if allow_hint and interaction_name:
-            # Enable multi-turn with interaction system
-            cmd.append("actor_rollout_ref.rollout.multi_turn.enable=True")
-            cmd.append(f"actor_rollout_ref.rollout.multi_turn.max_user_turns={max_turns}")
-            cmd.append(f"actor_rollout_ref.rollout.multi_turn.max_assistant_turns={max_turns}")
-
-            # Set interaction config path (use absolute path for reliability)
-            interaction_config_path = repo_root / f"verl/examples/sglang_multiturn/config/interaction_config/{interaction_name}_interaction_config.yaml"
-            if not interaction_config_path.exists():
-                raise FileNotFoundError(
-                    f"Interaction config not found: {interaction_config_path}. "
-                    f"Create a config file for interaction '{interaction_name}'."
-                )
-            cmd.append(f"actor_rollout_ref.rollout.multi_turn.interaction_config_path={interaction_config_path}")
-
-            # Relax tokenization sanity check - delta tokenization has minor mismatches at turn
-            # boundaries due to chat template quirks (whitespace handling). Training still works.
-            cmd.append("actor_rollout_ref.rollout.multi_turn.tokenization_sanity_check_mode=off")
-    else:
-        # vLLM backend (default)
-        # Set rollout mode (sync, async, or async_agentic)
-        cmd.append(f"actor_rollout_ref.rollout.mode={rollout_mode}")
-        # Add allow_hint flag for multi-turn hint generation
-        if allow_hint:
-            cmd.append("allow_hint=True")
-        # Add max_hints limit for rollout
-        if max_hints is not None:
-            cmd.append(f"+actor_rollout_ref.rollout.max_hints={max_hints}")
-        # Add max_turns for loop bound (model gets extra turns after hints exhausted)
-        cmd.append(f"+actor_rollout_ref.rollout.max_turns={max_turns}")
+    # vLLM rollout (verl's default backend and default sync mode; the SGLang
+    # backend and the async rollout modes were never used by any recorded run).
+    # Add allow_hint flag for multi-turn hint generation
+    if allow_hint:
+        cmd.append("allow_hint=True")
+    # Add max_hints limit for rollout
+    if max_hints is not None:
+        cmd.append(f"+actor_rollout_ref.rollout.max_hints={max_hints}")
+    # Add max_turns for loop bound (model gets extra turns after hints exhausted)
+    cmd.append(f"+actor_rollout_ref.rollout.max_turns={max_turns}")
 
     # Add custom stop strings for rollout if specified in method config
     if method is not None and method.stop_strings is not None:
@@ -815,298 +777,6 @@ def train_rl(
     return hf_model_path
 
 
-def train_classifier(
-    task_name: str,
-    base_model: str,
-    method_name: str | None = None,
-    dataset_path: Path | None = None,
-    output_path: Path | None = None,
-    mode: str = "binary",
-    epochs: int = 3,
-    batch_size: int = 8,
-    learning_rate: float = 2e-5,
-    max_length: int = 2048,
-    eval_split: float = 0.1,
-    eval_steps: int | None = None,
-    logging_steps: int = 10,
-    balance: str = "none",
-    report_to: str = "wandb",
-    project_name: str = "binary_classifier",
-    experiment_name: str | None = None,
-) -> Path:
-    """
-    Train a binary classifier to predict puzzle solvability from prompt only.
-
-    The classifier takes the prompt (puzzle) as input and predicts whether
-    the model will solve it correctly.
-
-    Args:
-        task_name: Name of task
-        base_model: Base model for classification
-        method_name: Method name for auto-derived paths
-        dataset_path: Path to generated dataset (from generate command)
-        output_path: Where to save trained classifier
-        mode: Classification mode ("binary" or "three_class")
-        epochs: Number of training epochs
-        batch_size: Per-device batch size
-        learning_rate: Learning rate
-        max_length: Maximum sequence length
-        eval_split: Fraction of data for evaluation
-        eval_steps: Evaluate every N steps (default: once per epoch)
-        logging_steps: Log every N steps
-        balance: Class balancing strategy ("none", "downsample", "upsample")
-        report_to: Reporting integration ("wandb", "none", etc.)
-        project_name: Wandb project name
-        experiment_name: Custom experiment name (default: auto-generated from task/dataset/model)
-
-    Returns:
-        Path to trained classifier
-    """
-    from pipeline.core.utils import model_short_name
-    from datasets import Dataset
-    from transformers import (
-        AutoModelForSequenceClassification,
-        AutoTokenizer,
-        Trainer,
-        TrainingArguments,
-    )
-
-    # Validate mode
-    if mode != "binary":
-        raise NotImplementedError(f"Mode '{mode}' not yet implemented. Only 'binary' is supported.")
-
-    # Load method config if specified
-    method = None
-    if method_name is not None:
-        method = Method.load(method_name, task_name)
-
-    # Default dataset path
-    if dataset_path is None:
-        if method is None:
-            raise ValueError(
-                "Either --method or --dataset must be specified. "
-                "Use --method to auto-derive paths, or --dataset for explicit paths."
-            )
-        datasets_dir = method.datasets_dir(task_name)
-        classifier_files = list(datasets_dir.glob("classifier_*.json"))
-        if not classifier_files:
-            raise FileNotFoundError(
-                f"No classifier datasets found in {datasets_dir}. "
-                f"Run 'python -m pipeline generate --task {task_name} --method {method_name} --split classifier' first."
-            )
-        dataset_path = classifier_files[0]
-
-    # Default output path - derive from dataset name (e.g., classifier_sft.json -> models/classifier_sft/)
-    if output_path is None:
-        if method is None:
-            raise ValueError(
-                "Either --method or --output must be specified. "
-                "Use --method to auto-derive paths, or --output for explicit paths."
-            )
-        # Use dataset stem as model directory name (e.g., "classifier_sft" -> "classifier_sft/")
-        output_path = method.models_dir(task_name) / dataset_path.stem
-
-    # Generate experiment name if not provided
-    # Format: {task}_{dataset_source}_{base_model_short}
-    # e.g., "countdown_sft_1.5b" or "countdown_rl_3b"
-    if experiment_name is None:
-        # Extract source from dataset filename (e.g., "classifier_sft.json" -> "sft")
-        dataset_stem = dataset_path.stem  # e.g., "classifier_sft"
-        if "_" in dataset_stem:
-            dataset_source = dataset_stem.split("_", 1)[1]  # e.g., "sft"
-        else:
-            dataset_source = "unknown"
-        base_model_short = model_short_name(base_model)
-        experiment_name = f"{task_name}_{dataset_source}_{base_model_short}"
-
-    print(f"=== Classifier Training Configuration ===")
-    print(f"Task: {task_name}")
-    print(f"Base Model: {base_model}")
-    print(f"Dataset: {dataset_path}")
-    print(f"Output: {output_path}")
-    print(f"Project: {project_name}")
-    print(f"Experiment: {experiment_name}")
-    print(f"Report to: {report_to}")
-    print(f"==========================================")
-
-    # Load dataset
-    print(f"Loading dataset from {dataset_path}")
-    data = load_json(dataset_path)
-    print(f"Loaded {len(data)} examples")
-
-    # Prepare classification data
-    # NOTE: We train on prompt ONLY (not prompt + generation) to predict
-    # puzzle difficulty/solvability, not to detect generation completeness.
-    print("Preparing classification data...")
-    formatted = []
-    for ex in data:
-        # Format prompt as string
-        if isinstance(ex["prompt"], list):
-            # Chat format - concatenate messages
-            prompt_text = ""
-            for msg in ex["prompt"]:
-                prompt_text += f"{msg['role']}: {msg['content']}\n"
-        else:
-            prompt_text = ex["prompt"]
-
-        # Input is prompt only (predicts solvability, not generation quality)
-        text = prompt_text
-
-        # Label is correctness
-        label = 1 if ex.get("correct", False) else 0
-
-        formatted.append({"text": text, "label": label})
-
-    # Count label distribution
-    from collections import Counter
-    import random
-    label_dist = Counter(ex["label"] for ex in formatted)
-    print(f"Label distribution (before balancing): {dict(label_dist)}")
-
-    # Apply class balancing if requested
-    if balance != "none":
-        positive = [ex for ex in formatted if ex["label"] == 1]
-        negative = [ex for ex in formatted if ex["label"] == 0]
-
-        if balance == "downsample":
-            # Downsample majority class to match minority
-            min_count = min(len(positive), len(negative))
-            random.seed(42)
-            if len(positive) > min_count:
-                positive = random.sample(positive, min_count)
-            if len(negative) > min_count:
-                negative = random.sample(negative, min_count)
-            formatted = positive + negative
-            random.shuffle(formatted)
-            print(f"Downsampled to {len(formatted)} examples ({min_count} per class)")
-
-        elif balance == "upsample":
-            # Upsample minority class to match majority
-            max_count = max(len(positive), len(negative))
-            random.seed(42)
-            if len(positive) < max_count:
-                positive = positive * (max_count // len(positive)) + random.sample(positive, max_count % len(positive))
-            if len(negative) < max_count:
-                negative = negative * (max_count // len(negative)) + random.sample(negative, max_count % len(negative))
-            formatted = positive + negative
-            random.shuffle(formatted)
-            print(f"Upsampled to {len(formatted)} examples ({max_count} per class)")
-
-        label_dist = Counter(ex["label"] for ex in formatted)
-        print(f"Label distribution (after balancing): {dict(label_dist)}")
-
-    dataset = Dataset.from_list(formatted)
-
-    # Train/eval split
-    split = dataset.train_test_split(test_size=eval_split, seed=42)
-    print(f"Train: {len(split['train'])}, Eval: {len(split['test'])}")
-
-    # Load tokenizer and model
-    print(f"Loading model: {base_model}")
-    tokenizer = AutoTokenizer.from_pretrained(base_model)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        base_model,
-        num_labels=2,
-    )
-
-    # Ensure pad token exists
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-    model.config.pad_token_id = tokenizer.pad_token_id
-
-    # Tokenize
-    def tokenize_fn(examples):
-        return tokenizer(
-            examples["text"],
-            truncation=True,
-            max_length=max_length,
-            padding="max_length",
-        )
-
-    train_dataset = split["train"].map(tokenize_fn, batched=True)
-    eval_dataset = split["test"].map(tokenize_fn, batched=True)
-
-    # Training arguments
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    # Determine eval strategy
-    if eval_steps is not None:
-        eval_strategy = "steps"
-        save_strategy = "steps"
-        save_steps = eval_steps
-    else:
-        eval_strategy = "epoch"
-        save_strategy = "epoch"
-        save_steps = None
-
-    training_args = TrainingArguments(
-        output_dir=str(output_path),
-        num_train_epochs=epochs,
-        per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=batch_size,
-        learning_rate=learning_rate,
-        warmup_ratio=0.1,
-        eval_strategy=eval_strategy,
-        eval_steps=eval_steps,
-        save_strategy=save_strategy,
-        save_steps=save_steps,
-        save_total_limit=2,
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_accuracy",
-        greater_is_better=True,
-        logging_steps=logging_steps,
-        report_to=report_to,
-        run_name=experiment_name,
-        bf16=True,
-    )
-
-    # Log wandb config if enabled
-    if report_to == "wandb":
-        import wandb
-        wandb.init(project=project_name, name=experiment_name, reinit=True)
-
-    # Compute metrics
-    def compute_metrics(eval_pred):
-        logits, labels = eval_pred
-        preds = logits.argmax(axis=-1)
-        acc = (preds == labels).mean()
-
-        # Compute precision, recall, F1 for positive class
-        tp = ((preds == 1) & (labels == 1)).sum()
-        fp = ((preds == 1) & (labels == 0)).sum()
-        fn = ((preds == 0) & (labels == 1)).sum()
-
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-
-        return {
-            "accuracy": float(acc),
-            "precision": float(precision),
-            "recall": float(recall),
-            "f1": float(f1),
-        }
-
-    # Train
-    print(f"Starting classifier training: {base_model} -> {output_path}")
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        tokenizer=tokenizer,
-        compute_metrics=compute_metrics,
-    )
-
-    trainer.train()
-
-    # Save final model
-    trainer.save_model(str(output_path))
-    tokenizer.save_pretrained(str(output_path))
-    print(f"Saved classifier to {output_path}")
-
-    return output_path
 
 
 def convert_checkpoint(

@@ -219,19 +219,7 @@ class vLLMRollout(BaseRollout):
             kwargs["stop"].append("</response>")  # Stop if model tries to generate its own response
 
         # Smart hint selection
-        self.hint_selection = config.get("hint_selection", "sequential")
         self.hint_selector = None
-        if self.hint_selection == "smart" and self.allow_hint:
-            from pipeline.core.hint_selector import HintSelector
-            helper_model = config.get("helper_model", None)
-            if helper_model:
-                self.hint_selector = HintSelector(
-                    strategy="smart",
-                    helper_model=helper_model,
-                    tensor_parallel_size=config.get("helper_tensor_parallel_size", 1),
-                    gpu_memory_utilization=config.get("helper_gpu_memory_utilization", 0.9),
-                )
-                print(f"Smart hint selection enabled (helper: {helper_model})")
 
         self.n = config.n
 
@@ -993,19 +981,7 @@ class vLLMAsyncAgenticRollout(BaseRollout):
         self.n = config.n
 
         # Smart hint selection
-        self.hint_selection = config.get("hint_selection", "sequential")
         self.hint_selector = None
-        if self.hint_selection == "smart" and self.allow_hint:
-            from pipeline.core.hint_selector import HintSelector
-            helper_model = config.get("helper_model", None)
-            if helper_model:
-                self.hint_selector = HintSelector(
-                    strategy="smart",
-                    helper_model=helper_model,
-                    tensor_parallel_size=config.get("helper_tensor_parallel_size", 1),
-                    gpu_memory_utilization=config.get("helper_gpu_memory_utilization", 0.9),
-                )
-                print(f"Smart hint selection enabled (helper: {helper_model})")
 
         tensor_parallel_size = config.get("tensor_model_parallel_size", 1)
         assert tensor_parallel_size <= torch.distributed.get_world_size(), (

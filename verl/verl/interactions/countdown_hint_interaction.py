@@ -32,7 +32,6 @@ class CountdownHintInteraction(BaseInteraction):
     During RL rollouts, when the model outputs <request></request>, this handler
     provides the next intermediate expression hint from the ground truth.
 
-    Supports both sequential and smart hint selection via HintSelector.
 
     Flow:
     1. Model generates: <think>reasoning...</think><request></request>
@@ -47,20 +46,7 @@ class CountdownHintInteraction(BaseInteraction):
         self._instance_dict: Dict[str, Dict[str, Any]] = {}
         self.request_tag_pattern = re.compile(r"<request>.*?</request>|<request>|<request/>", re.DOTALL)
 
-        # Smart hint selection
         self.hint_selector = None
-        hint_selection = config.get("hint_selection", "sequential")
-        if hint_selection == "smart":
-            from pipeline.core.hint_selector import HintSelector
-            helper_model = config.get("helper_model")
-            if helper_model:
-                self.hint_selector = HintSelector(
-                    strategy="smart",
-                    helper_model=helper_model,
-                    tensor_parallel_size=config.get("helper_tensor_parallel_size", 1),
-                    gpu_memory_utilization=config.get("helper_gpu_memory_utilization", 0.9),
-                )
-                logger.info(f"Smart hint selection enabled (helper: {helper_model})")
 
     async def start_interaction(
         self,

@@ -8,7 +8,6 @@ import ast
 import builtins
 import keyword
 import re
-from typing import Any
 
 
 # Names that should never be renamed

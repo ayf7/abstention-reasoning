@@ -239,14 +239,17 @@ class CodeOutputTask(BaseTask):
                          Total primitives will be higher due to test case expansion.
             seed: Random seed
             **kwargs: Additional options. Supports:
-                tracer: "original" (default) or "uniform" — which execution
-                    tracer to use for generating hint_exprs.
+                tracer: "uniform" (default) or "original" — which execution
+                    tracer to use for generating hint_exprs. The shipped
+                    primitives.json was generated with "uniform"; "original"
+                    produces a different number of hints per problem and has
+                    never been used for released data.
         """
         import random
         from datasets import load_dataset
         from .anonymizer import anonymize_code
 
-        tracer_name = kwargs.get("tracer", "original")
+        tracer_name = kwargs.get("tracer", "uniform")
         if tracer_name == "uniform":
             _trace_fn = trace_execution_uniform
             print("Using uniform execution tracer for hint generation")
@@ -515,40 +518,15 @@ class CodeOutputTask(BaseTask):
             "hint_exprs": primitive.get("hint_exprs", []),
         }
 
-    def get_split_indices(
-        self,
-        total: int,
-        split: str,
-        seed: int = 42,
-        primitives: list[dict] | None = None,
-    ) -> list[int]:
-        """
-        Custom split ratios for code_output.
-
-        - sft: ~1000 samples (19.2%)
-        - rl_train: ~2500 samples (48.0%)
-        - eval: remaining (~1706 samples, 32.8%)
-        """
-        import random
-
-        rng = random.Random(seed)
-        indices = list(range(total))
-        rng.shuffle(indices)
-
-        splits = {
-            "sft": (0.0, 0.192),
-            "rl_train": (0.192, 0.672),
-            "eval": (0.672, 1.0),
-        }
-
-        if split not in splits:
-            raise ValueError(f"Unknown split: {split}. Available: {list(splits.keys())}")
-
-        start_ratio, end_ratio = splits[split]
-        start = int(total * start_ratio)
-        end = int(total * end_ratio)
-
-        return indices[start:end]
+    # code_output allocates the whole [0, 1) range across three splits, so it
+    # has no spare region to carve an eval_augmented superset from and no
+    # rl_val. Changing these boundaries would repartition every existing
+    # code_output artifact, so they are kept exactly as originally generated.
+    SPLITS = {
+        "sft": (0.0, 0.192),
+        "rl_train": (0.192, 0.672),
+        "eval": (0.672, 1.0),
+    }
 
     def _categorize_result(self, r: dict) -> str:
         """Categorize a result into: correct, abstained, incomplete, wrong.

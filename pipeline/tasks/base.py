@@ -1,8 +1,5 @@
 """Base task class with shared functionality."""
 
-import re
-from pathlib import Path
-from typing import Any
 from collections import defaultdict
 
 from pipeline.core.utils import extract_answer
@@ -59,6 +56,23 @@ class BaseTask:
 
     # === Optional methods (can override) ===
 
+    # Fractional [start, end) ranges over the shuffled primitive order.
+    # Tasks override this to declare their own layout; a task need not define
+    # every split (code_output has no rl_val / eval_augmented), so callers that
+    # sweep "all" splits must ask supported_splits() rather than assume the set.
+    SPLITS: dict[str, tuple[float, float]] = {
+        "sft": (0.0, 0.3),
+        "rl_train": (0.3, 0.65),
+        "rl_val": (0.65, 0.7),
+        "eval": (0.9, 1.0),
+        "eval_augmented": (0.7, 1.0),
+    }
+
+    @classmethod
+    def supported_splits(cls) -> list[str]:
+        """Split names this task defines, in creation order."""
+        return list(cls.SPLITS)
+
     def get_split_indices(
         self,
         total: int,
@@ -69,16 +83,19 @@ class BaseTask:
         """
         Return indices for a given split.
 
-        Override this to define custom split logic. Default splits:
+        Ranges come from the task's SPLITS table; override that (not this
+        method) to change the layout. Base layout:
         - sft: 30% (indices 0-30%)
         - rl_train: 35% (indices 30-65%)
         - rl_val: 5% (indices 65-70%)
-        - classifier: 20% (indices 70-90%)
         - eval: 10% (indices 90-100%)
+        - eval_augmented: 30% (indices 70-100%), overlapping eval
+
+        Raises ValueError if the task does not define `split`.
 
         Args:
             total: Total number of primitives
-            split: Split name (sft, rl_train, rl_val, classifier, eval)
+            split: Split name; must be a key of this task's SPLITS
             seed: Random seed for shuffling
             primitives: Optional list of primitives (for stratified sampling)
 
@@ -91,35 +108,19 @@ class BaseTask:
         indices = list(range(total))
         rng.shuffle(indices)
 
-        # Default split ratios
-        splits = {
-            "sft": (0.0, 0.3),
-            "rl_train": (0.3, 0.65),
-            "rl_val": (0.65, 0.7),
-            "classifier": (0.7, 0.9),
-            "eval": (0.9, 1.0),
-            "eval_augmented": (0.7, 1.0),
-        }
+        splits = self.SPLITS
 
         if split not in splits:
-            raise ValueError(f"Unknown split: {split}. Available: {list(splits.keys())}")
+            raise ValueError(
+                f"Task '{self.name}' does not define split '{split}'. "
+                f"Available: {list(splits)}"
+            )
 
         start_ratio, end_ratio = splits[split]
         start = int(total * start_ratio)
         end = int(total * end_ratio)
 
         return indices[start:end]
-
-    def compute_reward(self, primitive: dict, generation: str) -> tuple[float, dict]:
-        """
-        Compute reward for RL training.
-        Default: 1.0 if correct, 0.0 otherwise.
-
-        Returns:
-            (reward, info_dict)
-        """
-        is_correct, meta = self.check_correctness(primitive, generation)
-        return (1.0 if is_correct else 0.0, {"correct": is_correct, **meta})
 
     def get_ground_truth(self, primitive: dict) -> dict:
         """
@@ -193,7 +194,3 @@ class BaseTask:
         """Extract answer from generation. Override for custom parsing."""
         return extract_answer(generation)
 
-    def load_template(self, template_path: Path | str) -> str:
-        """Load template from file."""
-        with open(template_path, "r", encoding="utf-8") as f:
-            return f.read()
