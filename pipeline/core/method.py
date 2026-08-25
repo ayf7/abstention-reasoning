@@ -190,8 +190,26 @@ class Method:
         Returns:
             Path to the run directory.
         """
-        # Already exists (real dir or symlink) -> leave as-is
-        if run_dir.exists() or run_dir.is_symlink():
+        # A convenience alias (models/rl/qwen3-4b -> qwen3-4b-g8) names a sibling
+        # run in the same directory, so the canonical size names resolve without
+        # renaming anything. Training through one would write into the run it
+        # points at and destroy it. Such aliases are relative and have no "/";
+        # the external-storage links created below and the artifacts_legacy
+        # links are absolute and remain valid resume targets.
+        if run_dir.is_symlink():
+            target = os.readlink(run_dir)
+            if "/" not in target:
+                raise FileExistsError(
+                    f"'{run_dir.name}' is a convenience symlink to sibling run "
+                    f"'{target}', not a run directory of its own. Training here "
+                    f"would overwrite that run.\n"
+                    f"  Use --run-id {target} to train or resume it, "
+                    f"or pick a new run id."
+                )
+            return run_dir
+
+        # Already exists -> leave as-is
+        if run_dir.exists():
             return run_dir
 
         # External storage configured -> create symlink
