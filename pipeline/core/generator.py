@@ -172,7 +172,6 @@ class Generator:
         answer_tag: str = "</answer>",
         force_hints: int | list[int] = 0,
         force_hint_token_range: tuple[int, int] = (100, 500),
-        hint_selector=None,
     ) -> list[list[dict]]:
         """
         Multi-turn generation with hint injection using turn-synchronized batching.
@@ -225,13 +224,13 @@ class Generator:
             # Forced hints require text manipulation — use legacy text-based path
             return self._generate_with_hints_text_based(
                 prompts, hints_list, force_hints_per,
-                request_tag, answer_tag, force_hint_token_range, hint_selector,
+                request_tag, answer_tag, force_hint_token_range,
             )
         else:
             # Token-based path matching RL rollout splicing
             return self._generate_with_hints_token_spliced(
                 prompts, hints_list,
-                request_tag, answer_tag, hint_selector,
+                request_tag, answer_tag,
             )
 
     def _generate_with_hints_token_spliced(
@@ -240,7 +239,6 @@ class Generator:
         hints_list: list[list[str]],
         request_tag: str,
         answer_tag: str,
-        hint_selector,
     ) -> list[list[dict]]:
         """Token-spliced multi-turn generation matching RL rollout behavior.
 
@@ -348,18 +346,13 @@ class Generator:
                     last_given = state["last_given_index"][idx]
 
                     if last_given + 1 < len(hints):
-                        if hint_selector is not None:
-                            hint_text, new_last = hint_selector.select_hint_sync(
-                                state["accumulated_text"][idx], hints, last_given,
-                            )
-                        else:
-                            next_idx = last_given + 1
-                            hint_text, new_last = hints[next_idx], next_idx
+                        next_idx = last_given + 1
+                        hint_text, new_last = hints[next_idx], next_idx
 
                         if hint_text is not None:
                             state["hint_selections"][idx].append({
                                 "turn": state["turns"][idx],
-                                "type": "smart" if hint_selector is not None else "sequential",
+                                "type": "sequential",
                                 "prev_last_given": last_given,
                                 "new_last_given": new_last,
                             })
@@ -429,7 +422,6 @@ class Generator:
         request_tag: str,
         answer_tag: str,
         force_hint_token_range: tuple[int, int],
-        hint_selector,
     ) -> list[list[dict]]:
         """Text-based multi-turn generation for forced hint injection.
 
@@ -584,18 +576,13 @@ class Generator:
                         last_given = state["last_given_index"][idx]
 
                         if last_given + 1 < len(hints):
-                            if hint_selector is not None:
-                                hint_text, new_last = hint_selector.select_hint_sync(
-                                    state["accumulated_text"][idx], hints, last_given,
-                                )
-                            else:
-                                next_idx = last_given + 1
-                                hint_text, new_last = hints[next_idx], next_idx
+                            next_idx = last_given + 1
+                            hint_text, new_last = hints[next_idx], next_idx
 
                             if hint_text is not None:
                                 state["hint_selections"][idx].append({
                                     "turn": state["turns"][idx],
-                                    "type": "smart" if hint_selector is not None else "sequential",
+                                    "type": "sequential",
                                     "prev_last_given": last_given,
                                     "new_last_given": new_last,
                                 })
@@ -730,7 +717,6 @@ class Generator:
         callback: callable = None,
         force_hints: int | list[int] = 0,
         force_hint_token_range: tuple[int, int] = (100, 500),
-        hint_selector=None,
     ) -> list[list[dict]]:
         """
         Multi-turn generation with hint injection, split into macro-batches.
@@ -775,7 +761,6 @@ class Generator:
                 batch_ground_truths,
                 force_hints=batch_force_hints,
                 force_hint_token_range=force_hint_token_range,
-                hint_selector=hint_selector,
             )
             all_results.extend(batch_results)
 
@@ -966,7 +951,6 @@ class AsyncGenerator:
         answer_tag: str = "</answer>",
         force_hints: int | list[int] = 0,
         force_hint_token_range: tuple[int, int] = (100, 500),
-        hint_selector=None,
     ) -> list[list[dict]]:
         """
         Async multi-turn generation with hint injection.
@@ -982,7 +966,6 @@ class AsyncGenerator:
             force_hints: Force at least this many hints per example by intercepting
                 </think> tags and injecting hint requests (default: 0, disabled)
             force_hint_token_range: (min, max) token cap for forced-hint turns.
-            hint_selector: Optional HintSelector instance for smart hint selection
 
         Returns:
             List of lists of dicts with 'text', 'finish_reason', 'token_count', 'num_hints'
@@ -1012,12 +995,12 @@ class AsyncGenerator:
         if any_forcing:
             return await self._generate_with_hints_async_text_based(
                 prompts, hints_list, force_hints_per,
-                request_tag, answer_tag, force_hint_token_range, hint_selector,
+                request_tag, answer_tag, force_hint_token_range,
             )
         else:
             return await self._generate_with_hints_async_token_spliced(
                 prompts, hints_list,
-                request_tag, answer_tag, hint_selector,
+                request_tag, answer_tag,
             )
 
     async def _generate_with_hints_async_token_spliced(
@@ -1026,7 +1009,6 @@ class AsyncGenerator:
         hints_list: list[list[str]],
         request_tag: str,
         answer_tag: str,
-        hint_selector,
     ) -> list[list[dict]]:
         """Async token-spliced multi-turn generation matching RL rollout behavior."""
         import uuid
@@ -1119,13 +1101,8 @@ class AsyncGenerator:
                 # Check if hint was requested
                 if request_tag in generated_text:
                     if last_given_index + 1 < len(hints):
-                        if hint_selector is not None:
-                            hint_text, new_last = await hint_selector.select_hint(
-                                accumulated_text, hints, last_given_index,
-                            )
-                        else:
-                            next_idx = last_given_index + 1
-                            hint_text, new_last = hints[next_idx], next_idx
+                        next_idx = last_given_index + 1
+                        hint_text, new_last = hints[next_idx], next_idx
 
                         if hint_text is not None:
                             last_given_index = new_last
@@ -1196,7 +1173,6 @@ class AsyncGenerator:
         request_tag: str,
         answer_tag: str,
         force_hint_token_range: tuple[int, int],
-        hint_selector,
     ) -> list[list[dict]]:
         """Text-based async multi-turn generation for forced hint injection.
 
@@ -1351,13 +1327,8 @@ class AsyncGenerator:
 
                 if request_tag in generated_text:
                     if last_given_index + 1 < len(hints):
-                        if hint_selector is not None:
-                            hint_text, new_last = await hint_selector.select_hint(
-                                accumulated_text, hints, last_given_index,
-                            )
-                        else:
-                            next_idx = last_given_index + 1
-                            hint_text, new_last = hints[next_idx], next_idx
+                        next_idx = last_given_index + 1
+                        hint_text, new_last = hints[next_idx], next_idx
 
                         if hint_text is not None:
                             last_given_index = new_last
@@ -1439,7 +1410,6 @@ class AsyncGenerator:
         callback: callable = None,
         force_hints: int | list[int] = 0,
         force_hint_token_range: tuple[int, int] = (100, 500),
-        hint_selector=None,
     ) -> list[list[dict]]:
         """
         Async multi-turn generation split into macro-batches.
@@ -1483,7 +1453,6 @@ class AsyncGenerator:
                 batch_ground_truths,
                 force_hints=batch_force_hints,
                 force_hint_token_range=force_hint_token_range,
-                hint_selector=hint_selector,
             )
             all_results.extend(batch_results)
 

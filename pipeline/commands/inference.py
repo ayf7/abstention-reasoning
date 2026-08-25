@@ -8,7 +8,6 @@ from pathlib import Path
 
 from pipeline.core.io import load_json, save_json
 from pipeline.core.generator import Generator, GenerationConfig, AsyncGenerator, run_async_generation
-from pipeline.core.hint_selector import HintSelector
 from pipeline.core.method import Method
 from pipeline.core.utils import model_short_name
 from pipeline.tasks import get_task
@@ -466,9 +465,6 @@ def generate(
     use_async: bool = False,
     force_hints_distribution: dict[int, float] | None = None,
     force_hints_policy: dict[str, float] | None = None,
-    hint_selection: str | None = None,
-    helper_model: str | None = None,
-    helper_gpu_memory_utilization: float | None = None,
     sample_strategy: str | None = None,
 ) -> Path:
     """
@@ -511,26 +507,6 @@ def generate(
         multi_turn = method.multi_turn if method else False
     if force_hints_distribution:
         multi_turn = True  # force_hints requires multi_turn
-
-    # Resolve hint selection strategy (CLI overrides method config)
-    if hint_selection is None:
-        hint_selection = method.hint_selection if method else "sequential"
-    if helper_model is None:
-        helper_model = method.helper_model if method else None
-
-    # Create HintSelector if using smart selection
-    hint_selector = None
-    if hint_selection == "smart" and multi_turn:
-        helper_gpu_util = helper_gpu_memory_utilization if helper_gpu_memory_utilization is not None else gpu_memory_utilization
-        hint_selector = HintSelector(
-            strategy="smart",
-            helper_model=helper_model,
-            tensor_parallel_size=tensor_parallel_size,
-            gpu_memory_utilization=helper_gpu_util,
-        )
-        print(f"Smart hint selection enabled (helper: {helper_model}, gpu_util: {helper_gpu_util})")
-    elif hint_selection == "smart" and not multi_turn:
-        print("Warning: --hint-selection smart requires multi-turn mode, ignoring")
 
     # Resolve model shortcuts (sft, rl)
     actual_model_name = model_name
@@ -692,7 +668,6 @@ def generate(
                     all_prompts,
                     all_ground_truths,
                     force_hints=force_hints_list,
-                    hint_selector=hint_selector,
                 )
             )
 
@@ -743,9 +718,6 @@ def generate(
             print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%)")
             _print_verify_metrics(records)
             print(f"Saved dataset to {output_path}")
-            if hint_selector is not None:
-                hint_selector.shutdown()
-
             if not retry_truncated:
                 return output_path
             truncated = sum(1 for r in records if r.get("finish_reason") == "length")
@@ -845,7 +817,6 @@ def generate(
                         expanded_prompts,
                         expanded_gts,
                         force_hints=expanded_force,
-                        hint_selector=hint_selector,
                     )
                     batch_results = [
                         [r[0] for r in expanded_results[i * num_samples:(i + 1) * num_samples]]
@@ -858,7 +829,6 @@ def generate(
                         batch_prompts,
                         batch_ground_truths,
                         force_hints=batch_force_hints,
-                        hint_selector=hint_selector,
                     )
             else:
                 batch_results = generator.generate(batch_prompts)
@@ -929,9 +899,6 @@ def generate(
             print(f"All records complete after {attempt + 1} attempt(s).")
             break
         print(f"{truncated} truncated records remaining.")
-
-    if hint_selector is not None:
-        hint_selector.shutdown()
 
     return output_path
 
@@ -1032,9 +999,6 @@ def evaluate(
     multi_turn: bool | None = None,
     use_async: bool = False,
     seed: int | None = 42,
-    hint_selection: str | None = None,
-    helper_model: str | None = None,
-    helper_gpu_memory_utilization: float | None = None,
 ) -> Path:
     """
     Evaluate a model on prompts and compute metrics.
@@ -1063,24 +1027,6 @@ def evaluate(
     # Resolve multi_turn from method config (CLI overrides if explicitly set)
     if multi_turn is None:
         multi_turn = method.multi_turn if method else False
-
-    # Resolve hint selection strategy (CLI overrides method config)
-    if hint_selection is None:
-        hint_selection = method.hint_selection if method else "sequential"
-    if helper_model is None:
-        helper_model = method.helper_model if method else None
-
-    # Create HintSelector if using smart selection
-    hint_selector = None
-    if hint_selection == "smart" and multi_turn:
-        helper_gpu_util = helper_gpu_memory_utilization if helper_gpu_memory_utilization is not None else gpu_memory_utilization
-        hint_selector = HintSelector(
-            strategy="smart",
-            helper_model=helper_model,
-            tensor_parallel_size=tensor_parallel_size,
-            gpu_memory_utilization=helper_gpu_util,
-        )
-        print(f"Smart hint selection enabled (helper: {helper_model}, gpu_util: {helper_gpu_util})")
 
     # Resolve model shortcuts (sft, rl)
     actual_model_name = model_name
@@ -1164,7 +1110,6 @@ def evaluate(
                 async_generator.generate_with_hints_async(
                     expanded_prompts,
                     expanded_gts,
-                    hint_selector=hint_selector,
                 )
             )
             # Group back: every num_samples consecutive results belong to the same prompt
@@ -1179,7 +1124,6 @@ def evaluate(
                 async_generator.generate_with_hints_async(
                     prompts,
                     ground_truths,
-                    hint_selector=hint_selector,
                 )
             )
 
@@ -1202,7 +1146,6 @@ def evaluate(
             expanded_results = generator.generate_with_hints_batched(
                 expanded_prompts,
                 expanded_gts,
-                hint_selector=hint_selector,
             )
             generations = [
                 [r[0] for r in expanded_results[i * num_samples:(i + 1) * num_samples]]
@@ -1212,7 +1155,6 @@ def evaluate(
             generations = generator.generate_with_hints_batched(
                 prompts,
                 ground_truths,
-                hint_selector=hint_selector,
             )
 
     # Sync regular generation
@@ -1283,9 +1225,6 @@ def evaluate(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         save_json(output_path, results)
         print(f"\nSaved results to {output_path}")
-
-        if hint_selector is not None:
-            hint_selector.shutdown()
 
         return output_path
 
@@ -1368,21 +1307,6 @@ def evaluate(
     if hint_metrics:
         print(format_hint_metrics(hint_metrics, details))
 
-    # Print per-problem hint selection details if smart selection was used
-    if hint_selection == "smart" and multi_turn:
-        print("\n--- Hint Selection Details ---")
-        for d in details:
-            sels = d.get("hint_selections", [])
-            if sels:
-                level = d.get("level", "?")
-                correct = "Y" if d.get("correct") else "N"
-                idx = d.get("index", "?")
-                sel_strs = [
-                    f"turn {s['turn']}: {s['prev_last_given']}->{s['new_last_given']} ({s['type']})"
-                    for s in sels
-                ]
-                print(f"  [{idx}] level={level} correct={correct} hints={d.get('num_hints', 0)} | {', '.join(sel_strs)}")
-
     # Print and save verify metrics if applicable
     verify_metrics = _print_verify_metrics(details)
     if verify_metrics:
@@ -1392,9 +1316,6 @@ def evaluate(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_json(output_path, results)
     print(f"\nSaved results to {output_path}")
-
-    if hint_selector is not None:
-        hint_selector.shutdown()
 
     return output_path
 

@@ -190,9 +190,6 @@ def cmd_generate(args):
         use_async=getattr(args, "use_async", False),
         force_hints_distribution=force_hints_distribution,
         force_hints_policy=force_hints_policy,
-        hint_selection=getattr(args, "hint_selection", None),
-        helper_model=getattr(args, "helper_model", None),
-        helper_gpu_memory_utilization=getattr(args, "helper_gpu_memory_utilization", None),
         sample_strategy=getattr(args, "sample_strategy", None),
     )
 
@@ -221,9 +218,6 @@ def cmd_evaluate(args):
         multi_turn=args.multi_turn,  # None = use method config
         use_async=getattr(args, "use_async", False),
         seed=args.seed,
-        hint_selection=getattr(args, "hint_selection", None),
-        helper_model=getattr(args, "helper_model", None),
-        helper_gpu_memory_utilization=getattr(args, "helper_gpu_memory_utilization", None),
     )
 
 
@@ -268,16 +262,12 @@ def cmd_train_sft(args):
         learning_rate=args.learning_rate,
         warmup_ratio=args.warmup_ratio,
         max_length=args.max_length,
-        eval_split=args.eval_split,
-        save_steps=args.save_steps,
-        logging_steps=args.logging_steps,
         bf16=not args.no_bf16,
         report_to=args.report_to,
         project_name=args.project_name,
         experiment_name=args.experiment_name,
         include_abstained=not args.no_abstained,
         include_wrong_valid_format=args.include_wrong_valid_format,
-        cleanup_checkpoints=not args.keep_checkpoints,
         upsample_hint=args.upsample_hint,
         max_correct=args.max_correct,
         upsample_abstain=args.upsample_abstain,
@@ -451,12 +441,6 @@ def main():
         help="Per-level force rate, e.g. '1:0.05,2:0.05,3:0.05,4:0.15,5:0.15'. "
              "Only this fraction of examples at each level will get forced hints. "
              "Requires --force-hints-distribution.")
-    p.add_argument("--hint-selection", default=None, choices=["sequential", "smart"],
-        help="Hint selection strategy (default: from method config or 'sequential')")
-    p.add_argument("--helper-model", default=None,
-        help="Helper model for smart hint selection (default: from method config)")
-    p.add_argument("--helper-gpu-memory-utilization", type=float, default=None,
-        help="GPU memory utilization for helper model (default: same as --gpu-memory-utilization)")
     p.set_defaults(func=cmd_generate)
 
     # evaluate
@@ -479,12 +463,6 @@ def main():
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput)")
     p.add_argument("--seed", type=int, default=42, help="Random seed for generation (default: 42)")
-    p.add_argument("--hint-selection", default=None, choices=["sequential", "smart"],
-        help="Hint selection strategy (default: from method config or 'sequential')")
-    p.add_argument("--helper-model", default=None,
-        help="Helper model for smart hint selection (default: from method config)")
-    p.add_argument("--helper-gpu-memory-utilization", type=float, default=None,
-        help="GPU memory utilization for helper model (default: same as --gpu-memory-utilization)")
     p.set_defaults(func=cmd_evaluate)
 
     # analyze
@@ -514,16 +492,12 @@ def main():
     p.add_argument("--learning-rate", type=float, default=1e-5, help="Learning rate")
     p.add_argument("--warmup-ratio", type=float, default=0.1, help="Warmup ratio")
     p.add_argument("--max-length", type=int, default=4096, help="Maximum sequence length")
-    p.add_argument("--eval-split", type=float, default=0.0, help="Fraction of data for evaluation (0 = disabled)")
-    p.add_argument("--save-steps", type=int, default=0, help="Save checkpoint every N steps (0 = final only)")
-    p.add_argument("--logging-steps", type=int, default=10, help="Log every N steps")
     p.add_argument("--no-bf16", action="store_true", help="Disable bfloat16 training")
     p.add_argument("--report-to", default="wandb", help="Reporting integration (wandb, none)")
     p.add_argument("--project-name", help="Wandb project name (default: {task}-sft)")
     p.add_argument("--experiment-name", help="Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})")
     p.add_argument("--no-abstained", action="store_true", help="Exclude abstained examples (by default they're included)")
     p.add_argument("--include-wrong-valid-format", action="store_true", help="Include wrong answers with valid format (task-specific, e.g., valid UCI but wrong move for chess)")
-    p.add_argument("--keep-checkpoints", action="store_true", help="Keep intermediate checkpoints after training (by default they are deleted)")
     p.add_argument("--upsample-hint", type=int, default=1, help="Upsample hint-containing examples by this factor (e.g., 4 = 4x copies)")
     p.add_argument("--max-correct", type=int, default=None, help="Downsample correct examples to at most this many (random subset, seed=42)")
     p.add_argument("--upsample-abstain", type=int, default=1, help="Upsample abstained examples by this factor (e.g., 2 = 2x copies)")

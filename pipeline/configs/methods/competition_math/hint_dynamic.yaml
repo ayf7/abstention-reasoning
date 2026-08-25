@@ -4,7 +4,6 @@ reward_function: compute_score_hint_dynamic
 multi_turn: true
 max_turns: 6
 mask_response_tokens: true
-interaction_config: verl/examples/sglang_multiturn/config/interaction_config/competition_math_hint_interaction_config.yaml
 reward_kwargs:
   correct_end: 0.55
   incorrect_end: 0.45

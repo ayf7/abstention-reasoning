@@ -5,13 +5,9 @@ mathematics problems across 7 categories and 5 difficulty levels.
 
 Dataset: https://huggingface.co/datasets/qwedsacf/competition_math
 
-Supports multiple hint systems via hint_source config:
-- None (default): prefix_hints (5-hint progressive system)
-- "solution_hints": 3-hint solution decomposition
-- "mcq_hints": 3-hint multiple-choice narrowing
+Hints come from each primitive's prefix_hints (6-hint progressive system).
 """
 
-import json
 import re
 
 from pipeline.tasks.base import BaseTask
@@ -28,12 +24,6 @@ class CompetitionMathTask(BaseTask):
     """
 
     name = "competition_math"
-
-    # Set by method config via hint_source field; determines which hint data
-    # to map into hint_exprs for RL rollouts.
-    # None = use prefix_hints (6-hint system), "solution_hints" = 3-hint from
-    # solution splits, "mcq_hints" = 3-hint MCQ choices.
-    hint_source = None
 
     system_message = (
         "A conversation between User and Assistant. The user asks a question, "
@@ -366,10 +356,7 @@ class CompetitionMathTask(BaseTask):
     def get_ground_truth(self, primitive: dict) -> dict:
         """Extract ground truth for embedding in prompts and RL interactions.
 
-        Hint mapping depends on hint_source (set from method config):
-        - None: prefix_hints (5-hint progressive system)
-        - "solution_hints": 3-hint solution decomposition
-        - "mcq_hints": 3-hint multiple-choice narrowing
+        Hints come from the primitive's prefix_hints (6-hint progressive system).
         """
         gt = {
             "level": primitive["level"],
@@ -378,33 +365,15 @@ class CompetitionMathTask(BaseTask):
             "answer": primitive["answer"],
         }
 
-        if self.hint_source == "mcq_hints":
-            mcq = primitive.get("mcq_hints")
-            if mcq:
-                gt["hint_exprs"] = [
-                    f'The answer is one of: {json.dumps(mcq["hint_1"])}',
-                    f'The answer is one of: {json.dumps(mcq["hint_2"])}',
-                    mcq["hint_3"],
-                ]
-        elif self.hint_source == "solution_hints":
-            solution_hints = primitive.get("solution_hints")
-            if solution_hints:
-                gt["hint_exprs"] = [
-                    solution_hints["hint_1"],
-                    solution_hints["hint_2"],
-                    solution_hints["hint_3"],
-                ]
-        else:
-            # Default: prefix_hints (5-hint progressive system)
-            if "prefix_hints" in primitive and primitive["prefix_hints"]:
-                prefix_hints = primitive["prefix_hints"]
-                hint_exprs = []
-                for i in range(1, 7):  # hint_1 through hint_6
-                    key = f"hint_{i}"
-                    if key in prefix_hints:
-                        hint_exprs.append(prefix_hints[key])
-                gt["hint_exprs"] = hint_exprs
-                gt["prefix_hints"] = prefix_hints  # Keep original for reference
+        if "prefix_hints" in primitive and primitive["prefix_hints"]:
+            prefix_hints = primitive["prefix_hints"]
+            hint_exprs = []
+            for i in range(1, 7):  # hint_1 through hint_6
+                key = f"hint_{i}"
+                if key in prefix_hints:
+                    hint_exprs.append(prefix_hints[key])
+            gt["hint_exprs"] = hint_exprs
+            gt["prefix_hints"] = prefix_hints  # Keep original for reference
 
         return gt
 

@@ -46,7 +46,7 @@ class Method:
     - template_variant: Which template variant to use (e.g., "simple", "simple_abstention")
     - reward_function: Name of reward function for RL training
     - reward_kwargs: Additional arguments for reward function
-    - allow_hint: Enable multi-turn hint generation in RL (default: False)
+    - multi_turn: Enable multi-turn hint generation in RL (default: False)
     - assistant_prefix: Prefix for assistant responses (used in SFT and RL)
     - mask_response_tokens: Mask <response>...</response> tokens during SFT (default: False)
 
@@ -63,11 +63,8 @@ class Method:
     assistant_prefix: str | None = None  # If None, use task's default
     mask_response_tokens: bool = False  # Mask <response>...</response> in SFT
     interaction_name: str | None = None  # Interaction name override (default: {task}_{method})
-    hint_selection: str = "sequential"  # Hint selection strategy: "sequential" or "smart"
-    helper_model: str | None = None  # Model for smart hint selection (e.g., "Qwen/Qwen3-14B")
     max_hints: int | None = None  # Maximum number of hints to give during RL rollout (None = unlimited)
     reward_manager: str = "naive"  # Reward manager type: "naive" or "batch"
-    hint_source: str | None = None  # Hint data field in primitives (e.g., "solution_hints", "mcq_hints")
     stop_strings: list[str] | None = None  # Custom stop strings for generation (None = default)
 
     # Backwards compatibility alias
@@ -111,24 +108,18 @@ class Method:
         with open(config_path) as f:
             data = yaml.safe_load(f)
 
-        # Support both 'multi_turn' and legacy 'allow_hint' field names
-        multi_turn = data.get("multi_turn", data.get("allow_hint", False))
-
         return cls(
             name=data.get("name", name_or_path),
             template_variant=data["template_variant"],
             reward_function=data.get("reward_function", "compute_score"),
             reward_kwargs=data.get("reward_kwargs", {}),
-            multi_turn=multi_turn,
+            multi_turn=data.get("multi_turn", False),
             max_turns=data.get("max_turns", 6),
             assistant_prefix=data.get("assistant_prefix"),
             mask_response_tokens=data.get("mask_response_tokens", False),
             interaction_name=data.get("interaction_name"),
-            hint_selection=data.get("hint_selection", "sequential"),
-            helper_model=data.get("helper_model"),
             max_hints=data.get("max_hints"),
             reward_manager=data.get("reward_manager", "naive"),
-            hint_source=data.get("hint_source"),
             stop_strings=data.get("stop_strings"),
         )
 

@@ -39,16 +39,12 @@ def train_sft(
     learning_rate: float = 1e-5,
     warmup_ratio: float = 0.1,
     max_length: int = 4096,
-    eval_split: float = 0.0,
-    save_steps: int = 0,
-    logging_steps: int = 10,
     bf16: bool = True,
     report_to: str = "wandb",
     project_name: str | None = None,
     experiment_name: str | None = None,
     include_abstained: bool = True,
     include_wrong_valid_format: bool = False,
-    cleanup_checkpoints: bool = True,
     upsample_hint: int = 1,
     max_correct: int | None = None,
     upsample_abstain: int = 1,
@@ -72,16 +68,12 @@ def train_sft(
         learning_rate: Learning rate
         warmup_ratio: Warmup ratio
         max_length: Maximum sequence length
-        eval_split: Fraction of data for evaluation
-        save_steps: Save checkpoint every N steps
-        logging_steps: Log every N steps
         bf16: Use bfloat16 training
         report_to: Reporting integration ("none", "wandb", etc.)
         project_name: Wandb project name (default: {task}-sft)
         experiment_name: Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})
         include_abstained: Include abstained examples in training (default: True)
         include_wrong_valid_format: Include wrong answers with valid format (task-specific, default: False)
-        cleanup_checkpoints: Delete intermediate checkpoints after training (default: True)
 
     Returns:
         Path to trained model
@@ -305,22 +297,15 @@ def train_sft(
 
     dataset = Dataset.from_list(formatted)
 
-    # Train/eval split
-    if eval_split > 0:
-        split = dataset.train_test_split(test_size=eval_split, seed=42)
-        train_dataset = split["train"]
-        eval_dataset = split["test"]
-        print(f"Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
-    else:
-        train_dataset = dataset
-        eval_dataset = None
-        print(f"Train: {len(train_dataset)}, Eval: disabled")
+    train_dataset = dataset
+    print(f"Train: {len(train_dataset)}")
 
     # Data collator - standard collator handles completion_mask
     data_collator = None
 
-    # Training config
-    save_strategy = "no" if save_steps <= 0 else "steps"
+    # Training config. SFT keeps only the final weights: intermediate
+    # checkpointing and a held-out eval split were dropped after every recorded
+    # run turned out to consume just the final model.
     training_args = SFTConfig(
         output_dir=str(output_path),
         num_train_epochs=epochs,
@@ -329,12 +314,9 @@ def train_sft(
         learning_rate=learning_rate,
         warmup_ratio=warmup_ratio,
         max_length=max_length,
-        logging_steps=logging_steps,
-        save_strategy=save_strategy,
-        save_steps=save_steps if save_steps > 0 else None,
-        eval_strategy="steps" if eval_dataset is not None else "no",
-        eval_steps=save_steps if eval_dataset is not None and save_steps > 0 else None,
-        save_total_limit=3 if save_strategy == "steps" else None,
+        logging_steps=10,
+        save_strategy="no",
+        eval_strategy="no",
         bf16=bf16,
         report_to=report_to,
         run_name=experiment_name,
@@ -351,7 +333,6 @@ def train_sft(
         model=base_model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
         data_collator=data_collator,
     )
 
@@ -361,16 +342,6 @@ def train_sft(
     trainer.save_model(str(output_path))
     tokenizer.save_pretrained(str(output_path))
     print(f"Saved model to {output_path}")
-
-    # Cleanup intermediate checkpoints if requested
-    if cleanup_checkpoints:
-        import shutil
-        checkpoint_dirs = list(output_path.glob("checkpoint-*"))
-        if checkpoint_dirs:
-            print(f"Cleaning up {len(checkpoint_dirs)} intermediate checkpoints...")
-            for ckpt_dir in checkpoint_dirs:
-                shutil.rmtree(ckpt_dir)
-            print("Checkpoint cleanup complete.")
 
     return output_path
 
