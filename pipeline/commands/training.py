@@ -481,6 +481,30 @@ def train_rl(
     checkpoints_dir = Path(checkpoints_dir).resolve()
     rollouts_dir = Path(rollouts_dir).resolve()
     output_path = Path(output_path).resolve()
+
+    # A prompts file that does not exist used to be handed straight to verl,
+    # which then failed much later with an opaque error. Only explicitly-passed
+    # paths can be missing here: the auto-derived val path above is assigned
+    # solely when it exists.
+    for flag, prompts_path in (
+        ("--train-prompts", train_prompts_path),
+        ("--val-prompts", val_prompts_path),
+    ):
+        if prompts_path is None or prompts_path.exists():
+            continue
+        split = prompts_path.stem
+        supported = get_task(task_name).supported_splits()
+        if split not in supported:
+            detail = (
+                f"task '{task_name}' does not define the '{split}' split "
+                f"(it has: {', '.join(supported)})"
+            )
+        else:
+            detail = (
+                f"run: python -m pipeline create_prompts --task {task_name} "
+                f"--method {method.name if method else '<method>'} --split {split}"
+            )
+        raise FileNotFoundError(f"{flag} not found: {prompts_path}\n  {detail}")
     if not actor_model.startswith("/") and "/" in actor_model:
         # Relative path (not a HuggingFace model ID like "Qwen/Qwen2.5-1.5B")
         actor_model = str(Path(actor_model).resolve())
