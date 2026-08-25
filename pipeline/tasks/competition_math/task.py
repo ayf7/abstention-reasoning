@@ -422,8 +422,8 @@ class CompetitionMathTask(BaseTask):
         - sft: 30%
         - rl_train: 35%
         - rl_val: 5%
-        - classifier: 20%
         - eval: 10%
+        - eval_augmented: 30% (overlaps eval)
         """
         import random
 
@@ -435,7 +435,6 @@ class CompetitionMathTask(BaseTask):
             "sft": (0.0, 0.30),
             "rl_train": (0.30, 0.65),
             "rl_val": (0.65, 0.70),
-            "classifier": (0.70, 0.90),
             "eval": (0.90, 1.0),
             "eval_augmented": (0.70, 1.0),
         }

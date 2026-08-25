@@ -9,11 +9,11 @@ Usage:
 """
 
 from .data import create_primitives, create_prompts, create_verify_prompts, create_ood_prompts, OOD_DATASETS
-from .inference import generate, evaluate, evaluate_classifier, analyze
+from .inference import generate, evaluate, analyze
 from .analysis import analyze_abstention, preprocess_for_judge
 from .judge import judge_generations, preprocess_for_verify_judge, judge_verify, judge_correctness
 from .comparison import compare_sampling
-from .training import train_sft, train_rl, train_classifier, convert_checkpoint
+from .training import train_sft, train_rl, convert_checkpoint
 
 __all__ = [
     # Data commands
@@ -25,7 +25,6 @@ __all__ = [
     # Inference commands
     "generate",
     "evaluate",
-    "evaluate_classifier",
     "analyze",
     "analyze_abstention",
     "preprocess_for_judge",
@@ -37,6 +36,5 @@ __all__ = [
     # Training commands
     "train_sft",
     "train_rl",
-    "train_classifier",
     "convert_checkpoint",
 ]

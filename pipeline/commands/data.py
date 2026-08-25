@@ -89,7 +89,7 @@ def create_prompts(
         method_name: Method name for auto-derived paths and template selection
         primitives_path: Path to primitives.json (default: artifacts/{task}/primitives.json)
         output_dir: Directory to save prompts (default: artifacts/{task}/{method}/prompts/)
-        split_name: Name of split (sft, rl_train, rl_val, classifier, eval, or 'all')
+        split_name: Name of split (sft, rl_train, rl_val, eval, eval_augmented, or 'all')
         seed: Random seed for split assignment
         include_assistant_prefix: Whether to include assistant's opening
         num_hints: Number of hints to extract from prefix_hints (0-6). If None, no hint injection.
@@ -137,7 +137,7 @@ def create_prompts(
         # eval_augmented is the split nearly every recorded evaluation reads
         # (prompts/eval_augmented.json). Leaving it out of "all" meant the
         # documented setup path silently produced none of it.
-        splits = ["sft", "rl_train", "rl_val", "classifier", "eval", "eval_augmented"]
+        splits = ["sft", "rl_train", "rl_val", "eval", "eval_augmented"]
         results = {}
         for split in splits:
             # Determine output format based on split
@@ -345,7 +345,7 @@ def create_verify_prompts(
         method_name: Method name for path derivation and template selection (default: "verify")
         primitives_path: Path to primitives.json (default: artifacts/{task}/primitives.json)
         output_dir: Output directory (default: artifacts/{task}/{method}/prompts/)
-        split_name: Which split to create ("sft", "rl_train", "rl_val", "classifier", "eval", or "all")
+        split_name: Which split to create ("sft", "rl_train", "rl_val", "eval", "eval_augmented", or "all")
         seed: Random seed for split assignment
         include_assistant_prefix: Whether to include assistant's opening
 
@@ -393,7 +393,7 @@ def create_verify_prompts(
         # eval_augmented is the split nearly every recorded evaluation reads
         # (prompts/eval_augmented.json). Leaving it out of "all" meant the
         # documented setup path silently produced none of it.
-        splits = ["sft", "rl_train", "rl_val", "classifier", "eval", "eval_augmented"]
+        splits = ["sft", "rl_train", "rl_val", "eval", "eval_augmented"]
         results = {}
         for split in splits:
             ext = ".parquet" if split.startswith("rl") else ".json"

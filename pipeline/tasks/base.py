@@ -73,12 +73,12 @@ class BaseTask:
         - sft: 30% (indices 0-30%)
         - rl_train: 35% (indices 30-65%)
         - rl_val: 5% (indices 65-70%)
-        - classifier: 20% (indices 70-90%)
         - eval: 10% (indices 90-100%)
+        - eval_augmented: 30% (indices 70-100%)
 
         Args:
             total: Total number of primitives
-            split: Split name (sft, rl_train, rl_val, classifier, eval)
+            split: Split name (sft, rl_train, rl_val, eval, eval_augmented)
             seed: Random seed for shuffling
             primitives: Optional list of primitives (for stratified sampling)
 
@@ -96,7 +96,6 @@ class BaseTask:
             "sft": (0.0, 0.3),
             "rl_train": (0.3, 0.65),
             "rl_val": (0.65, 0.7),
-            "classifier": (0.7, 0.9),
             "eval": (0.9, 1.0),
             "eval_augmented": (0.7, 1.0),
         }

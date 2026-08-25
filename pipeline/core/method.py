@@ -298,11 +298,6 @@ class Method:
             Path to models/rl/{run_id}/model/
         """
         return self.rl_run_dir(task_name, run_id) / "model"
-
-    def classifier_model_path(self, task_name: str) -> Path:
-        """Get the classifier model path."""
-        return self.models_dir(task_name) / "classifier"
-
     def results_dir(self, task_name: str) -> Path:
         """Get the results directory."""
         return self.artifacts_dir(task_name) / "results"

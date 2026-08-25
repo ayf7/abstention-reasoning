@@ -12,13 +12,9 @@ TASKS: dict[str, type["BaseTask"]] = {}
 def _register_tasks():
     """Import tasks to populate registry."""
     from .countdown.task import CountdownTask
-    from .zebra_logic.task import ZebraLogicTask
-    from .chess_puzzles.task import ChessPuzzlesTask
     from .competition_math.task import CompetitionMathTask
     from .code_output.task import CodeOutputTask
     TASKS["countdown"] = CountdownTask
-    TASKS["zebra_logic"] = ZebraLogicTask
-    TASKS["chess_puzzles"] = ChessPuzzlesTask
     TASKS["competition_math"] = CompetitionMathTask
     TASKS["code_output"] = CodeOutputTask
 

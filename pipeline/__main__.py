@@ -13,11 +13,9 @@ Commands:
     generate                    Run model on prompts to create dataset
     train_sft                   Train SFT model on generated dataset
     train_rl                    Train RL model using verl (GRPO)
-    train_classifier            Train binary classifier for correctness prediction
     convert_checkpoint          Convert FSDP/Megatron checkpoint to HuggingFace format
     evaluate                    Evaluate model and compute metrics
     analyze_abstention          Judge abstained examples with LLM (regret analysis)
-    evaluate_classifier         Evaluate binary classifier (confusion matrix, precision/recall/F1)
 
 Examples:
     # List available tasks and methods
@@ -344,22 +342,6 @@ def cmd_compare_sampling(args):
     )
 
 
-def cmd_evaluate_classifier(args):
-    """Evaluate binary classifier."""
-    classifier_path = Path(args.classifier) if args.classifier else None
-    dataset_path = Path(args.dataset) if args.dataset else None
-    output_path = Path(args.output) if args.output else None
-
-    commands.evaluate_classifier(
-        task_name=args.task,
-        classifier_path=classifier_path,
-        method_name=args.method,
-        dataset_path=dataset_path,
-        output_path=output_path,
-        batch_size=args.batch_size,
-        max_length=args.max_length,
-    )
-
 
 def cmd_train_sft(args):
     """Train SFT model."""
@@ -452,31 +434,6 @@ def cmd_train_rl(args):
     )
 
 
-def cmd_train_classifier(args):
-    """Train binary classifier."""
-    dataset_path = Path(args.dataset) if args.dataset else None
-    output_path = Path(args.output) if args.output else None
-
-    commands.train_classifier(
-        task_name=args.task,
-        base_model=args.base_model,
-        method_name=args.method,
-        dataset_path=dataset_path,
-        output_path=output_path,
-        mode=args.mode,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        max_length=args.max_length,
-        eval_split=args.eval_split,
-        eval_steps=args.eval_steps,
-        logging_steps=args.logging_steps,
-        balance=args.balance,
-        report_to=args.report_to,
-        project_name=args.project_name,
-        experiment_name=args.experiment_name,
-    )
-
 
 def cmd_convert_checkpoint(args):
     """Convert FSDP/Megatron checkpoint to HuggingFace format."""
@@ -522,7 +479,7 @@ def main():
     p.add_argument("--primitives", help="Path to primitives.json (default: artifacts/{task}/primitives.json)")
     p.add_argument("--output", help="Output directory (default: artifacts/{task}/{method}/prompts/)")
     p.add_argument("--split", default="all",
-                   help="Split name (sft, rl_train, rl_val, classifier, eval, eval_augmented, or 'all'). "
+                   help="Split name (sft, rl_train, rl_val, eval, eval_augmented, or 'all'). "
                         "eval_augmented is what most evaluations read.")
     p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
@@ -710,17 +667,6 @@ def main():
     p.add_argument("--group-by", default="variant", help="Field to group/color scatter points by (default: variant)")
     p.set_defaults(func=cmd_compare_sampling)
 
-    # evaluate_classifier
-    p = subparsers.add_parser("evaluate_classifier", help="Evaluate binary classifier on a dataset")
-    p.add_argument("--task", required=True, help="Task name")
-    p.add_argument("--classifier", help="Path to classifier model (default: artifacts/{task}/{method}/models/classifier)")
-    p.add_argument("--method", help="Method name for auto-derived paths")
-    p.add_argument("--dataset", help="Path to dataset with 'prompt', 'generation', 'correct' fields")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/results/classifier_eval.json)")
-    p.add_argument("--batch-size", type=int, default=8, help="Batch size for inference")
-    p.add_argument("--max-length", type=int, default=2048, help="Maximum sequence length")
-    p.set_defaults(func=cmd_evaluate_classifier)
-
     # train_sft
     p = subparsers.add_parser("train_sft", help="Train SFT model on generated dataset")
     p.add_argument("--task", required=True, help="Task name")
@@ -783,27 +729,6 @@ def main():
     p.add_argument("--reward-kwargs", nargs="*", metavar="KEY=VALUE", help="Override reward kwargs (e.g., --reward-kwargs hint_penalty=0.05 hint_bonus=0.1)")
     p.add_argument("--shuffle-seed", type=int, default=None, help="Seed for shuffling training data (default: 1, set to randomize order across runs)")
     p.set_defaults(func=cmd_train_rl)
-
-    # train_classifier
-    p = subparsers.add_parser("train_classifier", help="Train binary classifier for puzzle solvability prediction")
-    p.add_argument("--task", required=True, help="Task name")
-    p.add_argument("--base-model", required=True, help="Base model for classification")
-    p.add_argument("--method", help="Method name for auto-derived paths")
-    p.add_argument("--dataset", help="Path to generated dataset (default: auto-detect from method)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/models/classifier_{dataset})")
-    p.add_argument("--mode", default="binary", choices=["binary", "three_class"], help="Classification mode")
-    p.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
-    p.add_argument("--batch-size", type=int, default=8, help="Per-device batch size")
-    p.add_argument("--learning-rate", type=float, default=2e-5, help="Learning rate")
-    p.add_argument("--max-length", type=int, default=2048, help="Maximum sequence length")
-    p.add_argument("--eval-split", type=float, default=0.1, help="Fraction of data for evaluation")
-    p.add_argument("--eval-steps", type=int, default=None, help="Evaluate every N steps (default: once per epoch)")
-    p.add_argument("--logging-steps", type=int, default=10, help="Log every N steps")
-    p.add_argument("--balance", default="none", choices=["none", "downsample", "upsample"], help="Class balancing strategy")
-    p.add_argument("--report-to", default="wandb", help="Reporting integration (wandb, none)")
-    p.add_argument("--project-name", default="binary_classifier", help="Wandb project name")
-    p.add_argument("--experiment-name", help="Custom experiment name (default: {task}_{dataset_source}_{model})")
-    p.set_defaults(func=cmd_train_classifier)
 
     # convert_checkpoint
     p = subparsers.add_parser("convert_checkpoint", help="Convert FSDP/Megatron checkpoint to HuggingFace format")
