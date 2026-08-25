@@ -24,3 +24,5 @@ trivial_scripts/
 
 .claude/
 .vscode/
+CLAUDE.md
+commands.sh
