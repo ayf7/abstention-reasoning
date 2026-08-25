@@ -15,7 +15,6 @@ Commands:
     train_rl                    Train RL model using verl (GRPO)
     convert_checkpoint          Convert FSDP/Megatron checkpoint to HuggingFace format
     evaluate                    Evaluate model and compute metrics
-    analyze_abstention          Judge abstained examples with LLM (regret analysis)
 
 Examples:
     # List available tasks and methods
@@ -236,19 +235,6 @@ def cmd_analyze(args):
     )
 
 
-def cmd_analyze_abstention(args):
-    """Analyze abstained examples with LLM judge."""
-    output_path = Path(args.output) if args.output else None
-    commands.analyze_abstention(
-        results_path=Path(args.results),
-        task_name=args.task,
-        output_path=output_path,
-        method_name=args.method,
-        model=args.model,
-        poll_interval=args.poll_interval,
-        max_samples=args.max_samples,
-        group_by=args.group_by,
-    )
 
 
 
@@ -279,48 +265,8 @@ def cmd_judge_verify(args):
     )
 
 
-def cmd_judge_correctness(args):
-    """Judge correctness of model answers using LLM."""
-    output_path = Path(args.output) if args.output else None
-    commands.judge_correctness(
-        results_path=Path(args.results),
-        task_name=args.task,
-        output_path=output_path,
-        model=args.model,
-        poll_interval=args.poll_interval,
-        stall_timeout=args.stall_timeout,
-        sync=args.sync,
-        max_concurrent=args.max_concurrent,
-    )
 
 
-def cmd_compare_sampling(args):
-    """Compare per-problem accuracy vs abstention rate across multiple samples."""
-    output_path = Path(args.output) if args.output else None
-    simple_prompts = Path(args.simple_prompts) if args.simple_prompts else (Path(args.prompts) if args.prompts else None)
-    abstention_prompts = Path(args.abstention_prompts) if args.abstention_prompts else (Path(args.prompts) if args.prompts else None)
-    if simple_prompts is None or abstention_prompts is None:
-        print("Error: must provide --prompts or both --simple-prompts and --abstention-prompts")
-        return
-    commands.compare_sampling(
-        task_name=args.task,
-        simple_model=args.simple_model,
-        abstention_model=args.abstention_model,
-        simple_prompts_path=simple_prompts,
-        abstention_prompts_path=abstention_prompts,
-        output_path=output_path,
-        simple_method=args.simple_method,
-        abstention_method=args.abstention_method,
-        simple_run_id=args.simple_run_id,
-        abstention_run_id=args.abstention_run_id,
-        num_samples=args.num_samples,
-        max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        tensor_parallel_size=args.tensor_parallel_size,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        group_by=args.group_by,
-    )
 
 
 
@@ -567,17 +513,6 @@ def main():
     p.add_argument("--task", help="Task name (for task-specific metrics on raw datasets)")
     p.set_defaults(func=cmd_analyze)
 
-    # analyze_abstention
-    p = subparsers.add_parser("analyze_abstention", help="Judge abstained examples with LLM (did model have the right answer?)")
-    p.add_argument("--results", required=True, help="Path to evaluation results JSON")
-    p.add_argument("--task", required=True, help="Task name (countdown, competition_math, code_output)")
-    p.add_argument("--method", help="Method name (for auto-derived output path)")
-    p.add_argument("--output", help="Output path (default: {results_stem}_abstention_analysis.json)")
-    p.add_argument("--model", default="gpt-5.4-nano", help="OpenAI model for judging (default: gpt-5.4-nano)")
-    p.add_argument("--poll-interval", type=int, default=30, help="Seconds between batch status checks (default: 30)")
-    p.add_argument("--max-samples", type=int, default=None, help="Limit number of abstained examples to judge (for testing)")
-    p.add_argument("--group-by", default="variant", help="Field to group results by (default: variant, e.g. 'level' for difficulty)")
-    p.set_defaults(func=cmd_analyze_abstention)
 
 
 
@@ -599,39 +534,7 @@ def main():
     p.add_argument("--max-concurrent", type=int, default=20, help="Max concurrent requests in sync mode (default: 20)")
     p.set_defaults(func=cmd_judge_verify)
 
-    # judge_correctness
-    p = subparsers.add_parser("judge_correctness", help="Judge answer correctness using LLM (OpenAI Batch API)")
-    p.add_argument("--results", required=True, help="Path to eval results JSON")
-    p.add_argument("--task", required=True, help="Task name (competition_math, countdown, code_output)")
-    p.add_argument("--output", help="Output path (default: {results_stem}_correctness_judged.json)")
-    p.add_argument("--model", default="gpt-5.4-mini", help="OpenAI model for judging (default: gpt-5.4-mini)")
-    p.add_argument("--poll-interval", type=int, default=30, help="Seconds between batch status checks (default: 30)")
-    p.add_argument("--stall-timeout", type=int, default=600, help="Cancel batch if stalled for N seconds (default: 600)")
-    p.add_argument("--sync", action="store_true", help="Use synchronous concurrent API calls instead of Batch API")
-    p.add_argument("--max-concurrent", type=int, default=20, help="Max concurrent requests in sync mode (default: 20)")
-    p.set_defaults(func=cmd_judge_correctness)
 
-    # compare_sampling
-    p = subparsers.add_parser("compare_sampling", help="Sample N times from two models, compare accuracy vs abstention rate")
-    p.add_argument("--task", required=True, help="Task name")
-    p.add_argument("--simple-model", required=True, help="Simple/baseline model name or path (or 'sft'/'rl')")
-    p.add_argument("--abstention-model", required=True, help="Abstention model name or path (or 'sft'/'rl')")
-    p.add_argument("--prompts", help="Path to shared eval prompts (used for both models if --simple-prompts/--abstention-prompts not set)")
-    p.add_argument("--simple-prompts", help="Prompts for simple model (overrides --prompts)")
-    p.add_argument("--abstention-prompts", help="Prompts for abstention model (overrides --prompts)")
-    p.add_argument("--simple-method", help="Method name for resolving simple model path")
-    p.add_argument("--abstention-method", help="Method name for resolving abstention model path")
-    p.add_argument("--simple-run-id", help="Run ID for simple model")
-    p.add_argument("--abstention-run-id", help="Run ID for abstention model")
-    p.add_argument("--output", help="Output base path (.json and .pdf)")
-    p.add_argument("--num-samples", type=int, default=16, help="Samples per problem (default: 16)")
-    p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
-    p.add_argument("--temperature", type=float, default=1.0, help="Temperature (default: 1.0)")
-    p.add_argument("--top-p", type=float, default=1.0, help="Top-p (default: 1.0)")
-    p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
-    p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
-    p.add_argument("--group-by", default="variant", help="Field to group/color scatter points by (default: variant)")
-    p.set_defaults(func=cmd_compare_sampling)
 
     # train_sft
     p = subparsers.add_parser("train_sft", help="Train SFT model on generated dataset")
