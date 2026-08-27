@@ -60,15 +60,24 @@ def cmd_list_tasks(args):
 
 
 def cmd_list_methods(args):
-    """List available methods for a task."""
-    methods = Method.list_methods(args.task)
-    if methods:
-        print(f"Available methods for '{args.task}':")
-        for method in methods:
-            print(f"  - {method}")
-    else:
+    """List available methods for a task, separating active from deprecated."""
+    status = Method.method_status(args.task)
+    if not status:
         print(f"No methods found for task '{args.task}'")
         print(f"Create method configs in: pipeline/configs/methods/{args.task}/")
+        return
+
+    active = [n for n, (dep, _) in status.items() if not dep]
+    retired = [(n, note) for n, (dep, note) in status.items() if dep]
+
+    print(f"Available methods for '{args.task}':")
+    for name in active:
+        print(f"  - {name}")
+
+    if retired and not args.no_deprecated:
+        print(f"\nDeprecated (still loadable, for reproducing old results):")
+        for name, note in retired:
+            print(f"  - {name}" + (f"  ({note})" if note else ""))
 
 
 def cmd_create_primitives(args):
@@ -355,6 +364,7 @@ def main():
 
     # list_methods
     p = subparsers.add_parser("list_methods", help="List available methods for a task")
+    p.add_argument("--no-deprecated", action="store_true", help="Hide deprecated methods")
     p.add_argument("--task", required=True, help="Task name")
     p.set_defaults(func=cmd_list_methods)
 

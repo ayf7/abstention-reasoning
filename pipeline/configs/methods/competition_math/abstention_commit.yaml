@@ -10,3 +10,8 @@ reward_kwargs:
 stop_strings:
   - "<commit>"
   - "<abstain>"
+
+# Retired 2026-08-25. Loadable so existing results stay reproducible;
+# not for new work. See docs/all_methods.md.
+deprecated: true
+deprecated_note: "superseded by abstention_verify, the paper Abstention Verify row"
