@@ -336,6 +336,7 @@ def cmd_train_rl(args):
         cleanup_checkpoints=not args.keep_checkpoints,
         keep_state=args.keep_state,
         reward_kwargs_overrides=reward_kwargs_overrides,
+        extra_overrides=args.override,
         shuffle_seed=args.shuffle_seed,
         overwrite=args.overwrite,
         continue_run=args.continue_run,
@@ -556,6 +557,7 @@ def main():
     p.add_argument("--keep-checkpoints", action="store_true", help="Keep checkpoints and rollouts after training (by default they are deleted)")
     p.add_argument("--keep-state", action="store_true", help="Keep the last optimizer state checkpoint after training")
     p.add_argument("--reward-kwargs", nargs="*", metavar="KEY=VALUE", help="Override reward kwargs (e.g., --reward-kwargs hint_penalty=0.05 hint_bonus=0.1)")
+    p.add_argument("--override", nargs="*", default=None, metavar="KEY=VALUE", help="Raw hydra overrides appended verbatim (e.g., --override ray_init.num_cpus=8)")
     p.add_argument("--shuffle-seed", type=int, default=None, help="Seed for shuffling training data (default: 1, set to randomize order across runs)")
     p.set_defaults(func=cmd_train_rl)
 

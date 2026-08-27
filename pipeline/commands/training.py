@@ -456,6 +456,7 @@ def train_rl(
     cleanup_checkpoints: bool = True,
     keep_state: bool = False,
     reward_kwargs_overrides: dict | None = None,
+    extra_overrides: list[str] | None = None,
     shuffle_seed: int | None = None,
     overwrite: bool = False,
     continue_run: bool = False,
@@ -817,6 +818,10 @@ def train_rl(
         if reward_kwargs:
             for key, value in reward_kwargs.items():
                 cmd.append(f"+reward_model.reward_kwargs.{key}={value}")
+
+    # Raw hydra overrides go last so they win over everything derived above.
+    if extra_overrides:
+        cmd.extend(extra_overrides)
 
     # Set environment variables
     env = os.environ.copy()
