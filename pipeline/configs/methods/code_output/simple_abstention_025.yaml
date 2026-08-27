@@ -4,3 +4,8 @@ reward_function: compute_score_abstain
 reward_kwargs:
   abstention_score: 0.15
   format_score: 0.1
+
+# Retired 2026-08-25. Loadable so existing results stay reproducible;
+# not for new work. See docs/all_methods.md.
+deprecated: true
+deprecated_note: "abstention-score ablation of simple_abstention; never produced model weights"

@@ -2,3 +2,8 @@ name: hint_analysis
 template_variant: hint_analysis
 reward_function: compute_score
 reward_kwargs: {}
+
+# Retired 2026-08-25. Loadable so existing results stay reproducible;
+# not for new work. See docs/all_methods.md.
+deprecated: true
+deprecated_note: "analysis-only hint variant; never produced model weights"

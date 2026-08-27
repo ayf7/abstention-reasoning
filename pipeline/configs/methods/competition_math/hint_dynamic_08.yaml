@@ -8,3 +8,8 @@ reward_kwargs:
   correct_end: 0.85
   incorrect_end: 0.75
   format_score: 0.1
+
+# Retired 2026-08-25. Loadable so existing results stay reproducible;
+# not for new work. See docs/all_methods.md.
+deprecated: true
+deprecated_note: "threshold ablation of hint_dynamic; never produced model weights"
