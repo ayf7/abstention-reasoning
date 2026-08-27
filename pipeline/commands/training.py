@@ -690,13 +690,6 @@ def train_rl(
         for key, value in reward_kwargs.items():
             cmd.append(f"+custom_reward_function.reward_kwargs.{key}={value}")
 
-    # Warm swap config (for abstention_verify warm start)
-    if reward_kwargs and "warm_diversity_steps" in reward_kwargs:
-        ws_steps = int(reward_kwargs["warm_diversity_steps"])
-        if ws_steps > 0:
-            cmd.append(f"+warm_swap.steps={ws_steps}")
-            cmd.append(f"+warm_swap.rate=0.5")
-
     # Set reward manager type if non-default
     if method is not None and method.reward_manager != "naive":
         cmd.append(f"reward_model.reward_manager={method.reward_manager}")
