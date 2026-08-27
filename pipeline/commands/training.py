@@ -374,9 +374,19 @@ def _guard_existing_run(
             key=lambda d: int(d.name.rsplit("_", 1)[1]),
         )
 
+    model_dirs = [
+        d for d in (
+            output_path,
+            (run_dir / "best") if run_dir is not None else None,
+            (run_dir / "last") if run_dir is not None else None,
+        )
+        if d is not None
+    ]
+
     found = []
-    if output_path is not None and output_path.is_dir() and any(output_path.iterdir()):
-        found.append(f"final model  {output_path}")
+    for path in model_dirs:
+        if path.is_symlink() or (path.is_dir() and any(path.iterdir())):
+            found.append(f"model        {path}")
     if ckpts:
         found.append(f"{len(ckpts)} checkpoint(s)  {checkpoints_dir} (latest {ckpts[-1].name})")
     if rollouts_dir is not None and rollouts_dir.is_dir() and any(rollouts_dir.iterdir()):
@@ -397,8 +407,13 @@ def _guard_existing_run(
 
     if overwrite:
         print(f"--overwrite: clearing existing run at {run_dir}")
-        for path in (checkpoints_dir, output_path, rollouts_dir):
-            if path is not None and path.is_dir():
+        for path in [checkpoints_dir, rollouts_dir, *model_dirs]:
+            if path is None:
+                continue
+            if path.is_symlink():
+                path.unlink()
+                print(f"  removed {path}")
+            elif path.is_dir():
                 shutil.rmtree(path)
                 print(f"  removed {path}")
         return
@@ -446,7 +461,7 @@ def train_rl(
     continue_run: bool = False,
     save_best: bool = False,
     best_metric: str = "auto",
-    max_ckpt_to_keep: int = 1,
+    max_ckpt_to_keep: int | None = None,
 ) -> Path:
     """
     Train RL model using verl (GRPO algorithm).
@@ -512,6 +527,15 @@ def train_rl(
         test_freq = save_freq if save_freq > 0 else 25
     if save_best and test_freq <= 0:
         raise ValueError("--save-best needs validation enabled; --test-freq must be > 0")
+
+    # verl prunes checkpoints by recency. Best-saves only ever happen at
+    # increasing steps and the final save is later still, so the two most recent
+    # survivors are exactly the best and the last -- but only if room for two.
+    if max_ckpt_to_keep is None:
+        max_ckpt_to_keep = 2 if save_best else 1
+    elif save_best and max_ckpt_to_keep < 2:
+        print("Note: --save-best needs room for the best and the final checkpoint; using --max-ckpt-to-keep 2")
+        max_ckpt_to_keep = 2
 
     # Default paths from method
     if method is not None:
@@ -738,7 +762,9 @@ def train_rl(
         f"trainer.rollout_data_dir={rollouts_dir}",
     ]
 
-    # Best-checkpoint selection (vendored verl extension)
+    # Checkpoint selection (vendored verl extensions). save_last guarantees the
+    # final step is on disk regardless of the periodic save cadence.
+    cmd.append("+trainer.save_last=True")
     if save_best:
         cmd.append("+trainer.save_best=True")
         cmd.append(f"+trainer.best_ckpt_metric={best_metric}")
@@ -808,7 +834,9 @@ def train_rl(
 
     print(f"RL training complete. Checkpoints saved to {checkpoints_dir}")
 
-    # Find and convert the final checkpoint
+    # Convert checkpoints to HuggingFace format. last/ is whatever the run
+    # ended on and is always written; best/ appears when --save-best recorded
+    # a winning step.
     import re
     checkpoint_dirs = [
         d for d in checkpoints_dir.iterdir()
@@ -817,14 +845,13 @@ def train_rl(
 
     hf_model_path = output_path
     if checkpoint_dirs:
-        # Sort by step number and get the latest
         def get_step(d):
             match = re.search(r"global_step_(\d+)", d.name)
             return int(match.group(1)) if match else 0
 
-        # With --save-best the trainer records which step won; without it the
-        # record is absent and the newest checkpoint is the right one.
         import json
+        import shutil
+
         best_step = None
         best_record = checkpoints_dir / "best_checkpoint.json"
         if best_record.exists():
@@ -833,28 +860,59 @@ def train_rl(
             except (ValueError, KeyError, TypeError, OSError) as exc:
                 print(f"Warning: could not read {best_record}: {exc}")
 
-        latest_checkpoint = None
+        last_ckpt = max(checkpoint_dirs, key=get_step)
+        best_ckpt = None
         if best_step is not None:
-            latest_checkpoint = next(
-                (d for d in checkpoint_dirs if get_step(d) == best_step), None
-            )
-            if latest_checkpoint is None:
+            best_ckpt = next((d for d in checkpoint_dirs if get_step(d) == best_step), None)
+            if best_ckpt is None:
                 print(
-                    f"Warning: best checkpoint global_step_{best_step} was recorded "
-                    f"but is no longer on disk; falling back to the newest"
+                    f"Warning: best checkpoint global_step_{best_step} was recorded but is "
+                    f"no longer on disk; writing last/ only"
                 )
             else:
-                print(f"Best checkpoint by validation: global_step_{best_step}")
-        if latest_checkpoint is None:
-            latest_checkpoint = max(checkpoint_dirs, key=get_step)
-        actor_path = latest_checkpoint / "actor"
+                print(f"Best checkpoint by validation: {best_ckpt.name}")
 
-        if actor_path.exists():
-            print(f"\nConverting final checkpoint: {latest_checkpoint.name}")
-            hf_model_path = convert_checkpoint(actor_path, output_path=output_path)
-            print(f"HuggingFace model saved to: {hf_model_path}")
+        run_root = output_path.parent
+        converted: dict[str, Path] = {}
+
+        def _clear(path):
+            if path.is_symlink():
+                path.unlink()
+            elif path.exists():
+                shutil.rmtree(path)
+
+        def _convert(label, ckpt):
+            actor_path = ckpt / "actor"
+            if not actor_path.exists():
+                print(f"Warning: actor directory not found in {ckpt}; skipping {label}/")
+                return
+            dest = run_root / label
+            _clear(dest)
+            print(f"\nConverting {label} checkpoint: {ckpt.name}")
+            converted[label] = Path(convert_checkpoint(actor_path, output_path=dest))
+            print(f"HuggingFace model saved to: {converted[label]}")
+
+        if best_ckpt is not None:
+            _convert("best", best_ckpt)
+
+        if best_ckpt is not None and best_ckpt == last_ckpt and "best" in converted:
+            # The final step also won; copying beats merging the same shards twice.
+            dest = run_root / "last"
+            _clear(dest)
+            shutil.copytree(converted["best"], dest)
+            converted["last"] = dest
+            print(f"last/ is the same checkpoint as best/ ({last_ckpt.name}); copied")
         else:
-            print(f"Warning: actor directory not found in {latest_checkpoint}")
+            _convert("last", last_ckpt)
+
+        # model/ is what method.rl_model_path resolves to, so point it at the
+        # checkpoint the run should be judged on and leave the other beside it.
+        primary = "best" if "best" in converted else ("last" if "last" in converted else None)
+        if primary is not None:
+            _clear(output_path)
+            output_path.symlink_to(primary, target_is_directory=True)
+            hf_model_path = output_path
+            print(f"model/ -> {primary}/")
 
     # Cleanup checkpoints if requested (rollouts are preserved for analysis)
     if cleanup_checkpoints and not keep_state:

@@ -1057,6 +1057,8 @@ class RayPPOTrainer:
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
 
+        self._last_saved_step = self.global_steps
+
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
             return 0
@@ -1470,6 +1472,18 @@ class RayPPOTrainer:
                         if esi_close_to_expiration:
                             print("Force saving checkpoint: ESI instance expiration approaching.")
                         with marked_timer("save_checkpoint", timing_raw, color="green"):
+                            self._save_checkpoint()
+
+                    # The final checkpoint has to exist even when periodic saving
+                    # is off, since that is what becomes last/. Skip it if this
+                    # step was already saved as a new best.
+                    if (
+                        is_last_step
+                        and self.config.trainer.get("save_last", False)
+                        and getattr(self, "_last_saved_step", None) != self.global_steps
+                    ):
+                        with marked_timer("save_checkpoint", timing_raw, color="green"):
+                            print(f"save_last: saving final checkpoint at step {self.global_steps}")
                             self._save_checkpoint()
 
                 steps_duration = timing_raw["step"]
