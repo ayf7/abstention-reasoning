@@ -337,6 +337,11 @@ def cmd_train_rl(args):
         keep_state=args.keep_state,
         reward_kwargs_overrides=reward_kwargs_overrides,
         shuffle_seed=args.shuffle_seed,
+        overwrite=args.overwrite,
+        continue_run=args.continue_run,
+        save_best=args.save_best,
+        best_metric=args.best_metric,
+        max_ckpt_to_keep=args.max_ckpt_to_keep,
     )
 
 
@@ -532,7 +537,7 @@ def main():
     p.add_argument("--total-steps", type=int, default=400, help="Total training steps")
     p.add_argument("--kl-coef", type=float, default=0.001, help="KL divergence coefficient")
     p.add_argument("--n-samples", type=int, default=16, help="Number of samples per prompt (group size)")
-    p.add_argument("--save-freq", type=int, default=25, help="Checkpoint save frequency")
+    p.add_argument("--save-freq", type=int, default=None, help="Checkpoint save frequency (default: 25, or off when --save-best is set)")
     p.add_argument("--test-freq", type=int, default=None, help="Validation/logging frequency (default: same as save-freq)")
     p.add_argument("--max-prompt-length", type=int, default=2048, help="Maximum prompt length in tokens")
     p.add_argument("--max-response-length", type=int, default=2048, help="Maximum response length in tokens")
@@ -543,6 +548,11 @@ def main():
     p.add_argument("--experiment-name", help="Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})")
     p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     p.add_argument("--resume", help="Path to resume from existing run")
+    p.add_argument("--overwrite", action="store_true", help="Discard an existing run at this run-id and train from scratch")
+    p.add_argument("--continue-run", action="store_true", help="Resume the existing run at this run-id from its latest checkpoint")
+    p.add_argument("--save-best", action="store_true", help="Checkpoint only when validation improves, and convert that checkpoint at the end")
+    p.add_argument("--best-metric", default="auto", help="Validation metric selecting the best checkpoint (default: auto, verl's headline val-core scalar)")
+    p.add_argument("--max-ckpt-to-keep", type=int, default=1, help="Checkpoints to retain during training")
     p.add_argument("--keep-checkpoints", action="store_true", help="Keep checkpoints and rollouts after training (by default they are deleted)")
     p.add_argument("--keep-state", action="store_true", help="Keep the last optimizer state checkpoint after training")
     p.add_argument("--reward-kwargs", nargs="*", metavar="KEY=VALUE", help="Override reward kwargs (e.g., --reward-kwargs hint_penalty=0.05 hint_bonus=0.1)")

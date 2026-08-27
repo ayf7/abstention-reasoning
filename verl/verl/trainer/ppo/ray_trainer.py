@@ -919,6 +919,81 @@ class RayPPOTrainer:
                 worker_group=self.actor_rollout_wg,
             )
 
+    def _resolve_best_metric(self, val_metrics: dict):
+        """Pick the scalar that decides whether a checkpoint is the best so far.
+
+        trainer.best_ckpt_metric names a key from _validate() directly; "auto"
+        takes verl's own headline validation scalar, which is mean accuracy when
+        the reward function reports one and mean reward otherwise.
+        """
+        key = self.config.trainer.get("best_ckpt_metric", "auto")
+        if key != "auto":
+            if key not in val_metrics:
+                raise KeyError(
+                    f"best_ckpt_metric '{key}' is not a validation metric. "
+                    f"Available: {sorted(val_metrics)}"
+                )
+            return key, float(val_metrics[key])
+
+        candidates = [k for k in val_metrics if k.startswith("val-core/") and "/mean@" in k]
+        if not candidates:
+            candidates = [k for k in val_metrics if k.startswith("val-core/")]
+        if not candidates:
+            return None, None
+        key = sorted(candidates)[0]
+        return key, float(val_metrics[key])
+
+    def _maybe_save_best_checkpoint(self, val_metrics: dict):
+        """Checkpoint only when validation improves, and record which step won.
+
+        verl has no notion of a best checkpoint: it saves on a fixed cadence and
+        prunes by recency. Driving the save from the validation score instead
+        means the run keeps the checkpoint worth keeping rather than the most
+        recent one, and best_checkpoint.json tells the caller which that was.
+        """
+        if not self.config.trainer.get("save_best", False):
+            return
+
+        key, score = self._resolve_best_metric(val_metrics)
+        if key is None:
+            print("save_best: validation produced no usable metric; not saving")
+            return
+
+        best_path = os.path.join(self.config.trainer.default_local_dir, "best_checkpoint.json")
+        if not hasattr(self, "_best_val_score"):
+            # A resumed run must not treat its first validation as a new best.
+            self._best_val_score, self._best_val_step = None, None
+            if os.path.exists(best_path):
+                try:
+                    with open(best_path) as f:
+                        record = json.load(f)
+                    self._best_val_score = float(record["score"])
+                    self._best_val_step = int(record["step"])
+                    print(
+                        f"save_best: resuming with best {record.get('metric', key)}="
+                        f"{self._best_val_score:.4f} from step {self._best_val_step}"
+                    )
+                except (ValueError, KeyError, TypeError, OSError) as exc:
+                    print(f"save_best: ignoring unreadable {best_path}: {exc}")
+
+        if self._best_val_score is not None and score <= self._best_val_score:
+            print(
+                f"save_best: {key}={score:.4f} at step {self.global_steps} did not beat "
+                f"{self._best_val_score:.4f} at step {self._best_val_step}"
+            )
+            return
+
+        previous, previous_step = self._best_val_score, self._best_val_step
+        self._best_val_score = score
+        self._best_val_step = self.global_steps
+        self._save_checkpoint()
+        with open(best_path, "w") as f:
+            json.dump({"step": self.global_steps, "metric": key, "score": score}, f)
+        print(
+            f"save_best: new best {key}={score:.4f} at step {self.global_steps}"
+            + (f" (previous {previous:.4f} at step {previous_step})" if previous is not None else "")
+        )
+
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
 
@@ -1381,6 +1456,7 @@ class RayPPOTrainer:
                             if is_last_step:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
+                        self._maybe_save_best_checkpoint(val_metrics)
 
                     esi_close_to_expiration = should_save_ckpt_esi(
                         max_steps_duration=self.max_steps_duration,

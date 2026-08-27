@@ -345,6 +345,72 @@ def train_sft(
     return output_path
 
 
+def _guard_existing_run(
+    run_dir: Path | None,
+    checkpoints_dir: Path | None,
+    output_path: Path | None,
+    rollouts_dir: Path | None,
+    *,
+    overwrite: bool,
+    continue_run: bool,
+) -> None:
+    """Refuse to start a fresh run on top of an existing one.
+
+    Two ways a rerun silently destroys work. A finished run has had its
+    checkpoints cleaned up but still holds model/ and rollouts/, so verl finds
+    nothing to resume, trains from scratch, and the final conversion overwrites
+    the old model/. An interrupted run still has checkpoints, so resume_mode=auto
+    picks it up mid-flight under whatever hyperparameters this invocation passed.
+    Neither is ever what a fresh run wants, so both require saying so explicitly.
+    """
+    import re
+    import shutil
+
+    ckpts = []
+    if checkpoints_dir is not None and checkpoints_dir.is_dir():
+        ckpts = sorted(
+            (d for d in checkpoints_dir.iterdir()
+             if d.is_dir() and re.fullmatch(r"global_step_\d+", d.name)),
+            key=lambda d: int(d.name.rsplit("_", 1)[1]),
+        )
+
+    found = []
+    if output_path is not None and output_path.is_dir() and any(output_path.iterdir()):
+        found.append(f"final model  {output_path}")
+    if ckpts:
+        found.append(f"{len(ckpts)} checkpoint(s)  {checkpoints_dir} (latest {ckpts[-1].name})")
+    if rollouts_dir is not None and rollouts_dir.is_dir() and any(rollouts_dir.iterdir()):
+        found.append(f"rollouts     {rollouts_dir}")
+
+    if continue_run:
+        if not ckpts:
+            raise FileNotFoundError(
+                f"--continue-run passed but no checkpoints to resume in {checkpoints_dir}.\n"
+                f"  A completed run has its checkpoints cleaned up; only --overwrite "
+                f"or a new --run-id can proceed."
+            )
+        print(f"Continuing existing run from {ckpts[-1].name}")
+        return
+
+    if not found:
+        return
+
+    if overwrite:
+        print(f"--overwrite: clearing existing run at {run_dir}")
+        for path in (checkpoints_dir, output_path, rollouts_dir):
+            if path is not None and path.is_dir():
+                shutil.rmtree(path)
+                print(f"  removed {path}")
+        return
+
+    listing = "\n".join(f"    {item}" for item in found)
+    raise FileExistsError(
+        f"run directory already holds results: {run_dir}\n{listing}\n"
+        f"  Training here would overwrite them. Pick a new --run-id, or pass\n"
+        f"  --overwrite to discard them, or --continue-run to resume in place."
+    )
+
+
 def train_rl(
     task_name: str,
     method_name: str | None = None,
@@ -361,7 +427,7 @@ def train_rl(
     total_steps: int = 400,
     kl_coef: float = 0.001,
     n_samples: int = 16,
-    save_freq: int = 25,
+    save_freq: int | None = None,
     test_freq: int | None = None,
     max_prompt_length: int = 2048,
     max_response_length: int = 2048,
@@ -376,6 +442,11 @@ def train_rl(
     keep_state: bool = False,
     reward_kwargs_overrides: dict | None = None,
     shuffle_seed: int | None = None,
+    overwrite: bool = False,
+    continue_run: bool = False,
+    save_best: bool = False,
+    best_metric: str = "auto",
+    max_ckpt_to_keep: int = 1,
 ) -> Path:
     """
     Train RL model using verl (GRPO algorithm).
@@ -431,6 +502,17 @@ def train_rl(
     if base_model is not None and sft_model_path is not None:
         raise ValueError("Cannot specify both --base-model and --sft-model")
 
+    # Frequencies. With --save-best the periodic save is off by default: the only
+    # checkpoints worth keeping are the ones validation picked, and an explicit
+    # --save-freq still wins. test_freq must not inherit a disabled save_freq or
+    # validation would switch itself off along with it.
+    if save_freq is None:
+        save_freq = -1 if save_best else 25
+    if test_freq is None:
+        test_freq = save_freq if save_freq > 0 else 25
+    if save_best and test_freq <= 0:
+        raise ValueError("--save-best needs validation enabled; --test-freq must be > 0")
+
     # Default paths from method
     if method is not None:
         if train_prompts_path is None:
@@ -466,6 +548,12 @@ def train_rl(
         checkpoints_dir = run_dir / "checkpoints"
         rollouts_dir = run_dir / "rollouts"
         output_path = run_dir / "model"
+
+    if resume_path is None:
+        _guard_existing_run(
+            run_dir, checkpoints_dir, output_path, rollouts_dir,
+            overwrite=overwrite, continue_run=continue_run,
+        )
 
     # Validate required paths
     if train_prompts_path is None:
@@ -641,14 +729,19 @@ def train_rl(
         f"trainer.n_gpus_per_node={tensor_parallel_size}",
         "trainer.nnodes=1",
         f"trainer.save_freq={save_freq}",
-        f"trainer.test_freq={test_freq if test_freq is not None else save_freq}",
-        "trainer.resume_mode=auto",
-        "trainer.max_actor_ckpt_to_keep=1",
+        f"trainer.test_freq={test_freq}",
+        f"trainer.resume_mode={'auto' if (continue_run or resume_path is not None) else 'disable'}",
+        f"trainer.max_actor_ckpt_to_keep={max_ckpt_to_keep}",
         f"trainer.project_name={project_name}",
         f"trainer.experiment_name={experiment_name}",
         f"trainer.total_training_steps={total_steps}",
         f"trainer.rollout_data_dir={rollouts_dir}",
     ]
+
+    # Best-checkpoint selection (vendored verl extension)
+    if save_best:
+        cmd.append("+trainer.save_best=True")
+        cmd.append(f"+trainer.best_ckpt_metric={best_metric}")
 
     # Shuffle seed for training data ordering
     if shuffle_seed is not None:
@@ -729,7 +822,31 @@ def train_rl(
             match = re.search(r"global_step_(\d+)", d.name)
             return int(match.group(1)) if match else 0
 
-        latest_checkpoint = max(checkpoint_dirs, key=get_step)
+        # With --save-best the trainer records which step won; without it the
+        # record is absent and the newest checkpoint is the right one.
+        import json
+        best_step = None
+        best_record = checkpoints_dir / "best_checkpoint.json"
+        if best_record.exists():
+            try:
+                best_step = int(json.loads(best_record.read_text())["step"])
+            except (ValueError, KeyError, TypeError, OSError) as exc:
+                print(f"Warning: could not read {best_record}: {exc}")
+
+        latest_checkpoint = None
+        if best_step is not None:
+            latest_checkpoint = next(
+                (d for d in checkpoint_dirs if get_step(d) == best_step), None
+            )
+            if latest_checkpoint is None:
+                print(
+                    f"Warning: best checkpoint global_step_{best_step} was recorded "
+                    f"but is no longer on disk; falling back to the newest"
+                )
+            else:
+                print(f"Best checkpoint by validation: global_step_{best_step}")
+        if latest_checkpoint is None:
+            latest_checkpoint = max(checkpoint_dirs, key=get_step)
         actor_path = latest_checkpoint / "actor"
 
         if actor_path.exists():
