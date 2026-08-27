@@ -928,12 +928,23 @@ class RayPPOTrainer:
         """
         key = self.config.trainer.get("best_ckpt_metric", "auto")
         if key != "auto":
-            if key not in val_metrics:
+            if key in val_metrics:
+                return key, float(val_metrics[key])
+            # The "@n" suffix is the validation sample count, which follows
+            # val_kwargs.n rather than anything the caller sets directly. Let
+            # the metric be named without it as long as that stays unambiguous.
+            suffixed = sorted(k for k in val_metrics if k.startswith(key + "@"))
+            if len(suffixed) == 1:
+                return suffixed[0], float(val_metrics[suffixed[0]])
+            if len(suffixed) > 1:
                 raise KeyError(
-                    f"best_ckpt_metric '{key}' is not a validation metric. "
-                    f"Available: {sorted(val_metrics)}"
+                    f"best_ckpt_metric '{key}' is ambiguous; it matches {suffixed}. "
+                    f"Name one of them in full."
                 )
-            return key, float(val_metrics[key])
+            raise KeyError(
+                f"best_ckpt_metric '{key}' is not a validation metric. "
+                f"Available: {sorted(val_metrics)}"
+            )
 
         candidates = [k for k in val_metrics if k.startswith("val-core/") and "/mean@" in k]
         if not candidates:
