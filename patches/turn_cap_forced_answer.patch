@@ -1,0 +1,15 @@
+--- a/verl/verl/workers/rollout/vllm_rollout/vllm_rollout_spmd.py
++++ b/verl/verl/workers/rollout/vllm_rollout/vllm_rollout_spmd.py
+@@ agentic_loop, immediately before the _force_answers call @@
++        # A rollout still incomplete when the turn loop ends spent its last
++        # turn on a hint and had none left to answer in. That exhausts a budget
++        # just as running out of tokens does, so flag it for forcing too:
++        # leaving it unflagged scored every max_turns-hint rollout 0 for being
++        # malformed -- a structural penalty falling only on the heaviest hint
++        # users, which is the same bias the forced answers exist to remove.
++        for idx, done in enumerate(completed_indices):
++            if not done:
++                idx_to_truncation[idx] = 1
++
+         self._force_answers(idx_to_partials, idx_to_masks, idx_to_truncation,
+                             idx_to_forced, loop_sampling_params)
