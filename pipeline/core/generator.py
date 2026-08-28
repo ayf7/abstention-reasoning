@@ -42,27 +42,40 @@ def _close_think_for_request(text: str, transition: str | None) -> str:
     nothing before <request></request> signals that a hint is coming -- the
     request has to be predicted from the state of the reasoning, not from a
     memorised cue.
+
+    Only the turn currently being generated is rewritten. Everything up to the
+    <think> that reopened reasoning after the last injected <response> is
+    committed transcript: rewriting into it would delete earlier hint exchanges.
     """
-    had_think = "</think>" in text
+    split = 0
+    resp = text.rfind("</response>")
+    if resp >= 0:
+        split = resp + len("</response>")
+    open_think = text.find("<think>", split)
+    if open_think >= 0:
+        split = open_think + len("<think>")
+    head, tail = text[:split], text[split:]
+
+    had_think = "</think>" in tail
     for tag in ("<answer>", "</think>"):
-        pos = text.rfind(tag)
+        pos = tail.rfind(tag)
         if pos >= 0:
-            text = text[:pos]
+            tail = tail[:pos]
 
     # A rollout stopped mid-sentence by the token cap never closed its thinking,
     # so back it up to the last clean boundary rather than cutting mid-word.
     # Without a transition this applies to every path: a request that follows a
     # *concluded* thought is its own giveaway, so the thought is left unfinished.
     if not had_think or transition is None:
-        period = text.rfind(". ")
-        paragraph = text.rfind("\n\n")
+        period = tail.rfind(". ")
+        paragraph = tail.rfind("\n\n")
         cut = max(period + 1 if period >= 0 else -1, paragraph if paragraph >= 0 else -1)
         if cut > 0:
-            text = text[:cut]
+            tail = tail[:cut]
 
     if transition is not None:
-        return text + transition + "</think>"
-    return text.rstrip() + "\n</think>"
+        return head + tail + transition + "</think>"
+    return head + tail.rstrip() + "\n</think>"
 
 
 DEFAULT_STOP_STRINGS = ["</answer>", "</think>\n\n<abstain>"]
