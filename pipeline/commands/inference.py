@@ -551,6 +551,7 @@ def generate(
         verbose=verbose,
         stop_strings=stop_strings,
         seed=seed,
+        hint_transition=method.hint_transition if method else True,
     )
     generator = Generator(config)
     output_path.parent.mkdir(parents=True, exist_ok=True)

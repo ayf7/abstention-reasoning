@@ -28,6 +28,43 @@ HINT_TRANSITION_PHRASES = [
 ]
 
 
+def _pick_transition(rng, enabled: bool) -> str | None:
+    """A canned lead-in phrase, or None to request with no lead-in at all."""
+    return rng.choice(HINT_TRANSITION_PHRASES) if enabled else None
+
+
+def _close_think_for_request(text: str, transition: str | None) -> str:
+    """Close the CoT so a forced <request></request> can follow it.
+
+    With a transition phrase the reasoning keeps whatever conclusion it reached
+    and the phrase announces the request. With transition=None the reasoning is
+    instead cut back to its last sentence boundary and closed silently, so
+    nothing before <request></request> signals that a hint is coming -- the
+    request has to be predicted from the state of the reasoning, not from a
+    memorised cue.
+    """
+    had_think = "</think>" in text
+    for tag in ("<answer>", "</think>"):
+        pos = text.rfind(tag)
+        if pos >= 0:
+            text = text[:pos]
+
+    # A rollout stopped mid-sentence by the token cap never closed its thinking,
+    # so back it up to the last clean boundary rather than cutting mid-word.
+    # Without a transition this applies to every path: a request that follows a
+    # *concluded* thought is its own giveaway, so the thought is left unfinished.
+    if not had_think or transition is None:
+        period = text.rfind(". ")
+        paragraph = text.rfind("\n\n")
+        cut = max(period + 1 if period >= 0 else -1, paragraph if paragraph >= 0 else -1)
+        if cut > 0:
+            text = text[:cut]
+
+    if transition is not None:
+        return text + transition + "</think>"
+    return text.rstrip() + "\n</think>"
+
+
 DEFAULT_STOP_STRINGS = ["</answer>", "</think>\n\n<abstain>"]
 
 
@@ -45,6 +82,7 @@ class GenerationConfig:
     verbose: bool = False
     seed: int | None = 42  # Set seed for reproducibility
     stop_strings: list[str] | None = None  # None = use DEFAULT_STOP_STRINGS
+    hint_transition: bool = True  # Splice a canned phrase before forced hint requests
 
 
 class Generator:
@@ -662,9 +700,9 @@ class Generator:
     def _inject_forced_hint(self, state: dict, idx: int, hints: list[str], rng=None):
         """Inject a forced hint request + response into the accumulated text.
 
-        Inserts a natural transition phrase before </think> to make the hint
-        request look like a deliberate decision rather than an abrupt cutoff.
         Forced hints always use sequential selection (no reasoning to analyze).
+        How the CoT is closed before the request depends on config.hint_transition;
+        see _close_think_for_request.
         """
         prev_last = state["last_given_index"][idx]
         hint_idx = prev_last + 1
@@ -678,19 +716,13 @@ class Generator:
         state["last_given_index"][idx] = hint_idx
         state["num_hints_used"][idx] += 1
 
-        # Pick a transition phrase
         if rng is None:
             import random as _random
             rng = _random.Random(42 + idx + hint_idx)
-        transition = rng.choice(HINT_TRANSITION_PHRASES)
-
-        # Insert transition before </think>
-        text = state["accumulated_text"][idx]
-        think_pos = text.rfind("</think>")
-        if think_pos >= 0:
-            state["accumulated_text"][idx] = text[:think_pos] + transition + text[think_pos:]
-        else:
-            state["accumulated_text"][idx] = text + transition + "</think>"
+        state["accumulated_text"][idx] = _close_think_for_request(
+            state["accumulated_text"][idx],
+            _pick_transition(rng, self.config.hint_transition),
+        )
 
         # Append hint request + response
         forced = f"\n<request></request>\n<response>{hint}</response>\n<think>\n"
@@ -1218,15 +1250,10 @@ class AsyncGenerator:
 
                 if answer_tag in accumulated_text:
                     if prompt_force > 0 and num_hints_used < prompt_force and last_given_index + 1 < len(hints):
-                        ans_pos = accumulated_text.rfind("<answer>")
-                        if ans_pos >= 0:
-                            accumulated_text = accumulated_text[:ans_pos]
-                        transition = force_rng.choice(HINT_TRANSITION_PHRASES)
-                        think_pos = accumulated_text.rfind("</think>")
-                        if think_pos >= 0:
-                            accumulated_text = accumulated_text[:think_pos] + transition + accumulated_text[think_pos:]
-                        else:
-                            accumulated_text += transition + "</think>"
+                        accumulated_text = _close_think_for_request(
+                            accumulated_text,
+                            _pick_transition(force_rng, self.config.hint_transition),
+                        )
                         next_idx = last_given_index + 1
                         hint = hints[next_idx]
                         last_given_index = next_idx
@@ -1244,10 +1271,10 @@ class AsyncGenerator:
 
                 if prompt_force > 0 and think_tag in generated_text and request_tag not in generated_text:
                     if num_hints_used < prompt_force and last_given_index + 1 < len(hints):
-                        transition = force_rng.choice(HINT_TRANSITION_PHRASES)
-                        think_pos = accumulated_text.rfind("</think>")
-                        if think_pos >= 0:
-                            accumulated_text = accumulated_text[:think_pos] + transition + accumulated_text[think_pos:]
+                        accumulated_text = _close_think_for_request(
+                            accumulated_text,
+                            _pick_transition(force_rng, self.config.hint_transition),
+                        )
                         next_idx = last_given_index + 1
                         hint = hints[next_idx]
                         last_given_index = next_idx
@@ -1265,14 +1292,10 @@ class AsyncGenerator:
 
                 if prompt_force > 0 and final_output.outputs[0].finish_reason == "length":
                     if num_hints_used < prompt_force and last_given_index + 1 < len(hints):
-                        period_cut = accumulated_text.rfind('. ')
-                        newline_cut = accumulated_text.rfind('\n\n')
-                        cut = max(period_cut + 1 if period_cut >= 0 else -1,
-                                  newline_cut if newline_cut >= 0 else -1)
-                        if cut > 0:
-                            accumulated_text = accumulated_text[:cut]
-                        transition = force_rng.choice(HINT_TRANSITION_PHRASES)
-                        accumulated_text += transition + "</think>\n"
+                        accumulated_text = _close_think_for_request(
+                            accumulated_text,
+                            _pick_transition(force_rng, self.config.hint_transition),
+                        )
                         next_idx = last_given_index + 1
                         hint = hints[next_idx]
                         last_given_index = next_idx

@@ -13,9 +13,11 @@ def _register_tasks():
     """Import tasks to populate registry."""
     from .countdown.task import CountdownTask
     from .competition_math.task import CompetitionMathTask
+    from .competition_math_v2.task import CompetitionMathV2Task
     from .code_output.task import CodeOutputTask
     TASKS["countdown"] = CountdownTask
     TASKS["competition_math"] = CompetitionMathTask
+    TASKS["competition_math_v2"] = CompetitionMathV2Task
     TASKS["code_output"] = CodeOutputTask
 
 

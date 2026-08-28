@@ -68,6 +68,10 @@ class Method:
     max_hints: int | None = None  # Maximum number of hints to give during RL rollout (None = unlimited)
     reward_manager: str = "naive"  # Reward manager type: "naive" or "batch"
     stop_strings: list[str] | None = None  # Custom stop strings for generation (None = default)
+    hint_transition: bool = True  # Splice a canned "I'm stuck..." phrase before each
+                                  # forced hint request during SFT data generation. False
+                                  # cuts the CoT silently instead, so nothing before
+                                  # <request></request> telegraphs the request.
     deprecated: bool = False  # Retired method: loadable for reproducing old results, not for new work
     deprecated_note: str | None = None  # Why it was retired / what replaced it
 
@@ -133,6 +137,7 @@ class Method:
             max_hints=data.get("max_hints"),
             reward_manager=data.get("reward_manager", "naive"),
             stop_strings=data.get("stop_strings"),
+            hint_transition=data.get("hint_transition", True),
             deprecated=data.get("deprecated", False),
             deprecated_note=data.get("deprecated_note"),
         )
