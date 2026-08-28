@@ -552,6 +552,7 @@ def generate(
         stop_strings=stop_strings,
         seed=seed,
         hint_transition=method.hint_transition if method else True,
+        nested_request=method.nested_request if method else False,
     )
     generator = Generator(config)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1012,6 +1013,9 @@ def evaluate(
         output_path: Where to save results (default: artifacts/{task}/{method}/results/eval_{model}.json)
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
         use_async: Use async generation for optimal throughput.
+        no_hints: Counterfactual eval -- ban the hint request so the model must
+            answer on its own. Everything else about the eval is unchanged, so
+            the drop against a normal run measures what the hints were worth.
         ... generation config ...
 
     Returns:
@@ -1059,7 +1063,8 @@ def evaluate(
         from pipeline.core.method import model_short_name
         model_slug = model_short_name(output_model_name)
         samples_suffix = f"_{num_samples}s" if num_samples > 1 else ""
-        output_path = method.results_dir(task_name) / f"{split}_{model_slug}{samples_suffix}.json"
+        hint_suffix = "_nohint" if no_hints else ""
+        output_path = method.results_dir(task_name) / f"{split}_{model_slug}{samples_suffix}{hint_suffix}.json"
 
     # Load prompts
     prompts_data = load_json(prompts_path)
@@ -1079,6 +1084,7 @@ def evaluate(
         verbose=verbose,
         seed=seed,
         stop_strings=stop_strings,
+        ban_hint_requests=no_hints,
     )
     generator = Generator(config)
 
@@ -1092,6 +1098,8 @@ def evaluate(
         print("Async mode enabled (optimal throughput)")
     if multi_turn:
         print("Multi-turn mode enabled")
+    if no_hints:
+        print("Counterfactual mode: hint requests are blocked during decoding")
 
     # Async multi-turn generation
     if multi_turn and use_async:
@@ -1164,6 +1172,17 @@ def evaluate(
             print(f"Batch {batch_idx + 1}/{total_batches} complete")
 
         generations = generator.generate_batched(prompts, callback=progress_callback)
+
+    # The ban is enforced by the sampler, not by post-processing, so a surviving
+    # request means it silently failed to apply and the run measures nothing.
+    if no_hints:
+        flat = [g for gs in generations for g in (gs if isinstance(gs, list) else [gs])]
+        leaked = sum(1 for g in flat if "<request>" in (g or ""))
+        if leaked:
+            raise RuntimeError(
+                f"--no-hints did not hold: {leaked}/{len(flat)} generations contain <request>"
+            )
+        print(f"Hint ban held: 0/{len(flat)} generations requested a hint")
 
     # --- Multi-sample path (num_samples > 1) ---
     if num_samples > 1:

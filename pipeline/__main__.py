@@ -227,6 +227,7 @@ def cmd_evaluate(args):
         multi_turn=args.multi_turn,  # None = use method config
         use_async=getattr(args, "use_async", False),
         seed=args.seed,
+        no_hints=args.no_hints,
     )
 
 
@@ -481,6 +482,7 @@ def main():
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput)")
     p.add_argument("--seed", type=int, default=42, help="Random seed for generation (default: 42)")
+    p.add_argument("--no-hints", action="store_true", help="Counterfactual eval: block hint requests during decoding so the model must answer alone")
     p.set_defaults(func=cmd_evaluate)
 
     # analyze

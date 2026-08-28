@@ -4,8 +4,5 @@ Solve this math problem.
 
 You have access to a hint system. You can request up to 6 progressive hints. Each hint reveals more of the solution approach. If you get stuck, request a hint.
 
-To request a hint, close your thinking with </think> and then use <request></request>.
-The system will respond with a hint in <response>...</response> tags.
-After receiving a hint, continue reasoning in <think>...</think> tags.
-
-Think through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and IMMEDIATELY provide your final answer in <answer> </answer> tags with no text in between.
+Do all of your reasoning inside a single <think> </think> block. To request a hint, write <request></request> without leaving the think block.
+The system will respond with a hint in <response>...</response> tags, and you continue reasoning in the same think block.

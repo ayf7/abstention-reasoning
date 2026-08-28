@@ -797,6 +797,10 @@ def train_rl(
         cmd.append(f"+actor_rollout_ref.rollout.max_hints={max_hints}")
     # Add max_turns for loop bound (model gets extra turns after hints exhausted)
     cmd.append(f"+actor_rollout_ref.rollout.max_turns={max_turns}")
+    # Inline <request></request>: the rollout keeps the think block open across
+    # hint exchanges instead of closing and reopening it around each one.
+    if method is not None and method.nested_request:
+        cmd.append("+actor_rollout_ref.rollout.nested_request=True")
 
     # Add custom stop strings for rollout if specified in method config
     if method is not None and method.stop_strings is not None:

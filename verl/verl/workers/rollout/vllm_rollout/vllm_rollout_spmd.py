@@ -94,6 +94,15 @@ def _repeat_interleave(value: Union[torch.Tensor, np.ndarray], repeats: int) -> 
         return np.repeat(value, repeats, axis=0)
 
 
+def _hint_injection(hint_text: str, nested: bool) -> str:
+    """The environment's turn: the hint, plus a reopened <think> when the request
+    was made outside the block. Inline requests never left it, so reopening one
+    there would nest a second block and fail the structure validator."""
+    if nested:
+        return "\n<response>" + hint_text + "</response>\n"
+    return "\n<response>" + hint_text + "</response>\n<think>\n"
+
+
 class vLLMRollout(BaseRollout):
     def __init__(self, model_path: str, config: DictConfig, tokenizer, model_hf_config, **kwargs):
         """A vLLM rollout. It requires the module is supported by the vllm.
@@ -214,6 +223,10 @@ class vLLMRollout(BaseRollout):
 
         self.tokenizer = tokenizer
         self.allow_hint = config.allow_hint
+        # Inline requests live inside the <think> block, so </think> is reached
+        # exactly once, right before <answer>. Stop strings are unchanged --
+        # </request> still ends the turn, it just does not end the thought.
+        self.nested_request = bool(config.get("nested_request", False))
         if self.allow_hint:
             kwargs["stop"].append("</request>")
             kwargs["stop"].append("</response>")  # Stop if model tries to generate its own response
@@ -339,6 +352,8 @@ class vLLMRollout(BaseRollout):
     # completion is only worth anything if it lands somewhere that accepts.
     _TAG_PATTERN = r'(</think>|<think>|<request>|</request>|<response>|</response>|<answer>|</answer>|<abstain>)'
     _HINT_CYCLE = ['<request>', '</request>', '<response>', '</response>', '<think>']
+    # Inline requests never close the think block, so no reopening tag follows.
+    _NESTED_HINT_CYCLE = ['<request>', '</request>', '<response>', '</response>']
 
     def _answer_scaffold(self, text):
         """Text to append so a truncated rollout can open a valid <answer>.
@@ -350,6 +365,9 @@ class vLLMRollout(BaseRollout):
         # rejects the response on a tightness check before it parses any tags.
         if text.count('<request>') != len(re.findall(r'<request></request>', text)):
             return None
+
+        if self.nested_request:
+            return self._answer_scaffold_nested(text)
 
         tags = re.findall(self._TAG_PATTERN, text)
         i, n = 0, len(tags)
@@ -379,6 +397,40 @@ class vLLMRollout(BaseRollout):
                 # cycle so the tag sequence stays parseable.
                 return "<response>No more hints available.</response>\n<think>\n</think>\n\n<answer>"
             return None
+
+    def _answer_scaffold_nested(self, text):
+        """_answer_scaffold for inline requests: one think block, closed once.
+
+        The tightness check on <request> has already run in the caller.
+        """
+        tags = re.findall(self._TAG_PATTERN, text)
+        i, n = 0, len(tags)
+
+        while i < n and tags[i] == '<request>':
+            j = 0
+            while j < len(self._NESTED_HINT_CYCLE) and i < n and tags[i] == self._NESTED_HINT_CYCLE[j]:
+                i += 1
+                j += 1
+            if j == len(self._NESTED_HINT_CYCLE):
+                continue                    # a whole hint exchange, keep walking
+            if i == n and j == 2:
+                # Out of budget between asking and being answered. Close the
+                # exchange so the tag sequence stays parseable.
+                return "<response>No more hints available.</response>\n</think>\n\n<answer>"
+            return None
+
+        if i == n:
+            # Still inside the think block -- where nearly every truncation lands.
+            return "\n</think>\n\n<answer>"
+        if tags[i] != '</think>':
+            return None
+        i += 1
+        if i == n:
+            return "\n<answer>"            # think closed, branch not chosen yet
+        if tags[i] == '<answer>':
+            # Mid-answer: let it finish; the caller appends </answer>.
+            return "" if i + 1 == n else None
+        return None
 
     def _force_answers(self, idx_to_partials, idx_to_masks, idx_to_truncation,
                        idx_to_forced, sampling_params):
@@ -688,10 +740,10 @@ class vLLMRollout(BaseRollout):
                 hint_text, new_last_given = hint_result
                 idx_to_last_given[curr_idx] = new_last_given
 
-                # Add the hint response in <response>...</response> format, followed by <think> to continue reasoning
+                # Hand back the hint in <response>...</response> so the model resumes reasoning
                 partial_tokens = idx_to_partials[curr_idx]
                 partial_masks = idx_to_masks[curr_idx]
-                hint_injection_str = "\n<response>" + hint_text + "</response>\n<think>\n"
+                hint_injection_str = _hint_injection(hint_text, self.nested_request)
                 doc_tokens = list(self.tokenizer(hint_injection_str, add_special_tokens=False)['input_ids'])
 
                 # Debug: show hint injection
@@ -1150,6 +1202,7 @@ class vLLMAsyncAgenticRollout(BaseRollout):
         self.max_hints = config.get("max_hints", 6)
         self.max_turns = config.get("max_turns", self.max_hints + 1)
         self.allow_hint = config.allow_hint
+        self.nested_request = bool(config.get("nested_request", False))
         self.n = config.n
 
         # Smart hint selection
@@ -1350,10 +1403,10 @@ class vLLMAsyncAgenticRollout(BaseRollout):
                 except:
                     hints = []
 
-            # Pre-tokenize hints (include <think> to guide model to continue reasoning)
+            # Pre-tokenize hints in the form they will be injected in
             hint_tokens_list = []
             for hint in hints:
-                hint_response = f"\n<response>{hint}</response>\n<think>\n"
+                hint_response = _hint_injection(hint, self.nested_request)
                 hint_tokens_list.append(
                     list(self.tokenizer(hint_response, add_special_tokens=False)['input_ids'])
                 )
@@ -1468,7 +1521,7 @@ class vLLMAsyncAgenticRollout(BaseRollout):
                             if hint_text is not None:
                                 state.last_given_index = new_last
                                 # Tokenize the selected hint text
-                                hint_response = f"\n<response>{hint_text}</response>\n<think>\n"
+                                hint_response = _hint_injection(hint_text, self.nested_request)
                                 hint_tokens = list(self.tokenizer(hint_response, add_special_tokens=False)['input_ids'])
                             else:
                                 # Fallback to sequential

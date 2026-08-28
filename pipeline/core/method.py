@@ -72,6 +72,9 @@ class Method:
                                   # forced hint request during SFT data generation. False
                                   # cuts the CoT silently instead, so nothing before
                                   # <request></request> telegraphs the request.
+    nested_request: bool = False  # Keep <request></request> inside the <think> block
+                                  # instead of after it, so </think> stays the single
+                                  # irreversible commit point right before <answer>.
     deprecated: bool = False  # Retired method: loadable for reproducing old results, not for new work
     deprecated_note: str | None = None  # Why it was retired / what replaced it
 
@@ -138,6 +141,7 @@ class Method:
             reward_manager=data.get("reward_manager", "naive"),
             stop_strings=data.get("stop_strings"),
             hint_transition=data.get("hint_transition", True),
+            nested_request=data.get("nested_request", False),
             deprecated=data.get("deprecated", False),
             deprecated_note=data.get("deprecated_note"),
         )

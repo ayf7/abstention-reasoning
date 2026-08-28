@@ -33,27 +33,34 @@ def _pick_transition(rng, enabled: bool) -> str | None:
     return rng.choice(HINT_TRANSITION_PHRASES) if enabled else None
 
 
-def _close_think_for_request(text: str, transition: str | None) -> str:
-    """Close the CoT so a forced <request></request> can follow it.
+def _close_think_for_request(text: str, transition: str | None, nested: bool = False) -> str:
+    """Prepare the CoT so a forced <request></request> can follow it.
 
-    With a transition phrase the reasoning keeps whatever conclusion it reached
-    and the phrase announces the request. With transition=None the reasoning is
-    instead cut back to its last sentence boundary and closed silently, so
-    nothing before <request></request> signals that a hint is coming -- the
-    request has to be predicted from the state of the reasoning, not from a
-    memorised cue.
+    nested=False puts the request outside the think block, so the block is
+    closed first: with a canned transition phrase when one is given, otherwise
+    silently after trimming the reasoning back to its last sentence boundary,
+    so nothing before the request signals that a hint is coming.
+
+    nested=True leaves the block open and the request is written inline. Any
+    </think> or <answer> the model already produced this turn is stripped --
+    it chose to answer, and the forced request replaces that choice -- and the
+    reasoning is trimmed the same way. No phrase is spliced in: inline, there
+    is no boundary left for a lead-in to announce.
 
     Only the turn currently being generated is rewritten. Everything up to the
-    <think> that reopened reasoning after the last injected <response> is
-    committed transcript: rewriting into it would delete earlier hint exchanges.
+    last injected <response> is committed transcript: rewriting into it would
+    delete earlier hint exchanges.
     """
     split = 0
     resp = text.rfind("</response>")
     if resp >= 0:
         split = resp + len("</response>")
-    open_think = text.find("<think>", split)
-    if open_think >= 0:
-        split = open_think + len("<think>")
+    if not nested:
+        # Flat transcripts reopen reasoning with <think> after each hint; that
+        # tag is the real start of the current turn. Inline ones never close.
+        open_think = text.find("<think>", split)
+        if open_think >= 0:
+            split = open_think + len("<think>")
     head, tail = text[:split], text[split:]
 
     had_think = "</think>" in tail
@@ -66,16 +73,24 @@ def _close_think_for_request(text: str, transition: str | None) -> str:
     # so back it up to the last clean boundary rather than cutting mid-word.
     # Without a transition this applies to every path: a request that follows a
     # *concluded* thought is its own giveaway, so the thought is left unfinished.
-    if not had_think or transition is None:
+    if nested or not had_think or transition is None:
         period = tail.rfind(". ")
         paragraph = tail.rfind("\n\n")
         cut = max(period + 1 if period >= 0 else -1, paragraph if paragraph >= 0 else -1)
         if cut > 0:
             tail = tail[:cut]
 
+    if nested:
+        return head + tail.rstrip()
     if transition is not None:
         return head + tail + transition + "</think>"
     return head + tail.rstrip() + "\n</think>"
+
+
+def _hint_injection(hint: str, nested: bool) -> str:
+    """The environment's turn: the hint, plus a reopened think block if the
+    request lives outside one. Inline requests never left the block."""
+    return f"\n<response>{hint}</response>\n" if nested else f"\n<response>{hint}</response>\n<think>\n"
 
 
 DEFAULT_STOP_STRINGS = ["</answer>", "</think>\n\n<abstain>"]
@@ -96,9 +111,33 @@ class GenerationConfig:
     seed: int | None = 42  # Set seed for reproducibility
     stop_strings: list[str] | None = None  # None = use DEFAULT_STOP_STRINGS
     hint_transition: bool = True  # Splice a canned phrase before forced hint requests
+    nested_request: bool = False  # Keep <request></request> inside the <think> block
+    ban_hint_requests: bool = False  # Counterfactual eval: make asking for a hint
+                                     # impossible, so the model has to answer alone
 
 
-class Generator:
+class _SamplingParams:
+    """Mixin: builds SamplingParams from a GenerationConfig."""
+
+    def _sampling_params(self, **kwargs):
+        """SamplingParams with the generator's global constraints applied.
+
+        ban_hint_requests blocks the token "request" outright rather than the
+        string "<request>": vLLM's bad_words bans the *last* token of a phrase
+        only when the preceding tokens match exactly, and "<request>" tokenises
+        as "<", "request", ">" while generation actually emits "></" as one
+        token there -- so the phrase form matches nothing and silently never
+        fires. "request" is a single token, so banning it is unconditional.
+        The word is otherwise absent from the prompt's own vocabulary of
+        reasoning, and callers assert no <request> survives in the output.
+        """
+        from vllm import SamplingParams
+        if self.config.ban_hint_requests:
+            kwargs["bad_words"] = ["request"]
+        return SamplingParams(**kwargs)
+
+
+class Generator(_SamplingParams):
     """VLLM-based batched text generator."""
 
     def __init__(self, config: GenerationConfig):
@@ -132,7 +171,7 @@ class Generator:
         from vllm import SamplingParams
 
         stop = self.config.stop_strings if self.config.stop_strings is not None else DEFAULT_STOP_STRINGS
-        sampling_params = SamplingParams(
+        sampling_params = self._sampling_params(
             temperature=self.config.temperature,
             top_p=self.config.top_p,
             max_tokens=self.config.max_new_tokens,
@@ -360,7 +399,7 @@ class Generator:
                     all_tokens.extend(segment)
                 formatted_prompts.append({"prompt_token_ids": all_tokens})
                 remaining = max(max_budget - state["model_token_count"][idx], 1)
-                params_list.append(SamplingParams(
+                params_list.append(self._sampling_params(
                     temperature=self.config.temperature,
                     top_p=self.config.top_p,
                     max_tokens=remaining,
@@ -410,18 +449,18 @@ class Generator:
                             state["num_hints_used"][idx] += 1
 
                             # Inject hint — tokenize independently (matches RL splicing)
-                            hint_response = f"\n<response>{hint_text}</response>\n<think>\n"
+                            hint_response = _hint_injection(hint_text, self.config.nested_request)
                             hint_tokens = tokenizer.encode(hint_response, add_special_tokens=False)
                             state["accumulated_text"][idx] += hint_response
                             state["accumulated_tokens"][idx].append(hint_tokens)
                         else:
-                            warning = "\n<response>No more hints available.</response>\n<think>\n"
+                            warning = _hint_injection("No more hints available.", self.config.nested_request)
                             warning_tokens = tokenizer.encode(warning, add_special_tokens=False)
                             state["accumulated_text"][idx] += warning
                             state["accumulated_tokens"][idx].append(warning_tokens)
                             state["num_hints_used"][idx] += 1
                     else:
-                        warning = "\n<response>No more hints available.</response>\n<think>\n"
+                        warning = _hint_injection("No more hints available.", self.config.nested_request)
                         warning_tokens = tokenizer.encode(warning, add_special_tokens=False)
                         state["accumulated_text"][idx] += warning
                         state["accumulated_tokens"][idx].append(warning_tokens)
@@ -530,7 +569,7 @@ class Generator:
                     max_budget - _count_model_tokens(state["accumulated_text"][idx], tokenizer)
                     for idx in forcing_indices
                 )
-                forcing_params = SamplingParams(
+                forcing_params = self._sampling_params(
                     temperature=self.config.temperature,
                     top_p=self.config.top_p,
                     max_tokens=min(cap, max(min_remaining, 1)),
@@ -547,7 +586,7 @@ class Generator:
                     max_budget - _count_model_tokens(state["accumulated_text"][idx], tokenizer)
                     for idx in normal_indices
                 )
-                normal_params = SamplingParams(
+                normal_params = self._sampling_params(
                     temperature=self.config.temperature,
                     top_p=self.config.top_p,
                     max_tokens=max(min_remaining, 1),
@@ -639,7 +678,7 @@ class Generator:
                                 state["last_given_index"][idx] = new_last
                                 state["num_hints_used"][idx] += 1
 
-                                hint_response = f"\n<response>{hint_text}</response>\n<think>\n"
+                                hint_response = _hint_injection(hint_text, self.config.nested_request)
                                 state["accumulated_text"][idx] += hint_response
 
                                 messages = state["current_messages"][idx]
@@ -651,7 +690,7 @@ class Generator:
                                         "content": generated_text + hint_response,
                                     })
                             else:
-                                warning = "\n<response>No more hints available.</response>\n<think>\n"
+                                warning = _hint_injection("No more hints available.", self.config.nested_request)
                                 state["accumulated_text"][idx] += warning
                                 state["num_hints_used"][idx] += 1
 
@@ -664,7 +703,7 @@ class Generator:
                                         "content": generated_text + warning,
                                     })
                         else:
-                            warning = "\n<response>No more hints available.</response>\n<think>\n"
+                            warning = _hint_injection("No more hints available.", self.config.nested_request)
                             state["accumulated_text"][idx] += warning
                             state["num_hints_used"][idx] += 1
 
@@ -735,10 +774,11 @@ class Generator:
         state["accumulated_text"][idx] = _close_think_for_request(
             state["accumulated_text"][idx],
             _pick_transition(rng, self.config.hint_transition),
+            nested=self.config.nested_request,
         )
 
         # Append hint request + response
-        forced = f"\n<request></request>\n<response>{hint}</response>\n<think>\n"
+        forced = "\n<request></request>" + _hint_injection(hint, self.config.nested_request)
         state["accumulated_text"][idx] += forced
 
     def _rebuild_messages(self, state: dict, idx: int, original_prompt: list[dict]):
@@ -814,7 +854,7 @@ class Generator:
         return all_results
 
 
-class AsyncGenerator:
+class AsyncGenerator(_SamplingParams):
     """
     Async VLLM-based generator for multi-turn hint generation.
 
@@ -906,7 +946,7 @@ class AsyncGenerator:
 
         # Sampling params
         stop = self.config.stop_strings if self.config.stop_strings is not None else DEFAULT_STOP_STRINGS
-        sampling_params = SamplingParams(
+        sampling_params = self._sampling_params(
             temperature=self.config.temperature,
             top_p=self.config.top_p,
             max_tokens=self.config.max_new_tokens,
@@ -1064,7 +1104,7 @@ class AsyncGenerator:
                     finish_reason = "length"
                     break
 
-                params = SamplingParams(
+                params = self._sampling_params(
                     temperature=self.config.temperature,
                     top_p=self.config.top_p,
                     max_tokens=remaining,
@@ -1117,7 +1157,7 @@ class AsyncGenerator:
                             num_hints_used += 1
 
                             # Inject hint — tokenize independently (matches RL splicing)
-                            hint_response = f"\n<response>{hint_text}</response>\n<think>\n"
+                            hint_response = _hint_injection(hint_text, self.config.nested_request)
                             hint_tokens = tokenizer.encode(hint_response, add_special_tokens=False)
                             accumulated_text += hint_response
                             accumulated_tokens.append(hint_tokens)
@@ -1125,13 +1165,13 @@ class AsyncGenerator:
                             if self.config.verbose:
                                 print(f"Prompt {idx + 1} got hint (last_given={new_last}), continuing...")
                         else:
-                            warning = "\n<response>No more hints available.</response>\n<think>\n"
+                            warning = _hint_injection("No more hints available.", self.config.nested_request)
                             warning_tokens = tokenizer.encode(warning, add_special_tokens=False)
                             accumulated_text += warning
                             accumulated_tokens.append(warning_tokens)
                             num_hints_used += 1
                     else:
-                        warning = "\n<response>No more hints available.</response>\n<think>\n"
+                        warning = _hint_injection("No more hints available.", self.config.nested_request)
                         warning_tokens = tokenizer.encode(warning, add_special_tokens=False)
                         accumulated_text += warning
                         accumulated_tokens.append(warning_tokens)
@@ -1224,7 +1264,7 @@ class AsyncGenerator:
                 needs_forcing = prompt_force > 0 and num_hints_used < prompt_force and last_given_index + 1 < len(hints)
                 if needs_forcing:
                     cap = force_rng.randint(force_hint_token_range[0], force_hint_token_range[1])
-                    params = SamplingParams(
+                    params = self._sampling_params(
                         temperature=self.config.temperature,
                         top_p=self.config.top_p,
                         max_tokens=min(cap, remaining),
@@ -1234,7 +1274,7 @@ class AsyncGenerator:
                         seed=self.config.seed,
                     )
                 else:
-                    params = SamplingParams(
+                    params = self._sampling_params(
                         temperature=self.config.temperature,
                         top_p=self.config.top_p,
                         max_tokens=remaining,
@@ -1266,12 +1306,13 @@ class AsyncGenerator:
                         accumulated_text = _close_think_for_request(
                             accumulated_text,
                             _pick_transition(force_rng, self.config.hint_transition),
+                            nested=self.config.nested_request,
                         )
                         next_idx = last_given_index + 1
                         hint = hints[next_idx]
                         last_given_index = next_idx
                         num_hints_used += 1
-                        forced = f"\n<request></request>\n<response>{hint}</response>\n<think>\n"
+                        forced = "\n<request></request>" + _hint_injection(hint, self.config.nested_request)
                         accumulated_text += forced
                         messages = copy.deepcopy(prompts[idx])
                         if messages and messages[-1]["role"] == "assistant":
@@ -1287,12 +1328,13 @@ class AsyncGenerator:
                         accumulated_text = _close_think_for_request(
                             accumulated_text,
                             _pick_transition(force_rng, self.config.hint_transition),
+                            nested=self.config.nested_request,
                         )
                         next_idx = last_given_index + 1
                         hint = hints[next_idx]
                         last_given_index = next_idx
                         num_hints_used += 1
-                        forced = f"\n<request></request>\n<response>{hint}</response>\n<think>\n"
+                        forced = "\n<request></request>" + _hint_injection(hint, self.config.nested_request)
                         accumulated_text += forced
                         messages = copy.deepcopy(prompts[idx])
                         if messages and messages[-1]["role"] == "assistant":
@@ -1308,12 +1350,13 @@ class AsyncGenerator:
                         accumulated_text = _close_think_for_request(
                             accumulated_text,
                             _pick_transition(force_rng, self.config.hint_transition),
+                            nested=self.config.nested_request,
                         )
                         next_idx = last_given_index + 1
                         hint = hints[next_idx]
                         last_given_index = next_idx
                         num_hints_used += 1
-                        forced = f"\n<request></request>\n<response>{hint}</response>\n<think>\n"
+                        forced = "\n<request></request>" + _hint_injection(hint, self.config.nested_request)
                         accumulated_text += forced
                         messages = copy.deepcopy(prompts[idx])
                         if messages and messages[-1]["role"] == "assistant":
@@ -1333,7 +1376,7 @@ class AsyncGenerator:
                             last_given_index = new_last
                             num_hints_used += 1
 
-                            hint_response = f"\n<response>{hint_text}</response>\n<think>\n"
+                            hint_response = _hint_injection(hint_text, self.config.nested_request)
                             accumulated_text += hint_response
 
                             if messages and messages[-1]["role"] == "assistant":
@@ -1347,7 +1390,7 @@ class AsyncGenerator:
                             if self.config.verbose:
                                 print(f"Prompt {idx + 1} got hint (last_given={new_last}), continuing...")
                         else:
-                            warning = "\n<response>No more hints available.</response>\n<think>\n"
+                            warning = _hint_injection("No more hints available.", self.config.nested_request)
                             accumulated_text += warning
                             num_hints_used += 1
                             messages = copy.deepcopy(prompts[idx])
@@ -1356,7 +1399,7 @@ class AsyncGenerator:
                             else:
                                 messages.append({"role": "assistant", "content": accumulated_text})
                     else:
-                        warning = "\n<response>No more hints available.</response>\n<think>\n"
+                        warning = _hint_injection("No more hints available.", self.config.nested_request)
                         accumulated_text += warning
                         num_hints_used += 1
                         messages = copy.deepcopy(prompts[idx])
