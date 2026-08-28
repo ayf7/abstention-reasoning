@@ -159,6 +159,11 @@ def compute_score(
         print(f"Correct answer: {correct_answer}")
         print(f"Solution: {solution_str[:500]}...")
 
+    # Counted before the malformed check: a truncated rollout still consumed
+    # whatever hints it was given, and reporting 0 for it makes the logged
+    # hint-usage rate track the malformed rate instead of actual hint use.
+    num_hints = get_num_hints(solution_str)
+
     # Structural validation: verify entire tag sequence is well-formed
     if has_malformed_structure(solution_str):
         if do_print:
@@ -166,13 +171,11 @@ def compute_score(
         return {
             "score": 0,
             "score_wo_hint_penalty": 0,
-            "num_hints": 0,
+            "num_hints": num_hints,
             "abstained": False,
             "correct": False,
             "malformed": True,
         }
-
-    num_hints = get_num_hints(solution_str)
 
     # Check for abstention first (always detect, but only assign
     # abstention_score when reward_abstain is True)
