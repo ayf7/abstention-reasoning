@@ -1000,6 +1000,7 @@ def evaluate(
     multi_turn: bool | None = None,
     use_async: bool = False,
     seed: int | None = 42,
+    no_hints: bool = False,
 ) -> Path:
     """
     Evaluate a model on prompts and compute metrics.
@@ -1084,6 +1085,7 @@ def evaluate(
         verbose=verbose,
         seed=seed,
         stop_strings=stop_strings,
+        nested_request=method.nested_request if method else False,
         ban_hint_requests=no_hints,
     )
     generator = Generator(config)
@@ -1173,16 +1175,54 @@ def evaluate(
 
         generations = generator.generate_batched(prompts, callback=progress_callback)
 
-    # The ban is enforced by the sampler, not by post-processing, so a surviving
-    # request means it silently failed to apply and the run measures nothing.
+    # The ban is enforced by the sampler, not by post-processing, so this checks
+    # afterwards that it actually took. What invalidates the run is a graded hint
+    # reaching the model, and only the exact </request> tag makes the environment
+    # deliver one -- so that is the hard failure. Near-misses like <_request> are
+    # the model trying to route around the ban and getting nothing back; they are
+    # worth counting, not worth discarding the run over.
     if no_hints:
-        flat = [g for gs in generations for g in (gs if isinstance(gs, list) else [gs])]
-        leaked = sum(1 for g in flat if "<request>" in (g or ""))
-        if leaked:
+        import re as _re
+
+        def _texts(items):
+            """Every generated string in `generations`, whatever shape it came in.
+
+            The shape depends on the mode: bare strings, a list of samples per
+            prompt, or the {"text": ...} sample dicts the async paths return.
+            Reading the wrong one is not a loud failure -- `"<tag>" in some_dict`
+            tests keys and quietly answers False -- so this walks all three.
+            """
+            out = []
+            for item in items:
+                if isinstance(item, str):
+                    out.append(item)
+                elif isinstance(item, dict):
+                    if isinstance(item.get("text"), str):
+                        out.append(item["text"])
+                elif isinstance(item, (list, tuple)):
+                    out.extend(_texts(item))
+            return out
+
+        flat = _texts(generations)
+        if not flat:
             raise RuntimeError(
-                f"--no-hints did not hold: {leaked}/{len(flat)} generations contain <request>"
+                "--no-hints could not read any generation text, so the ban is unverified"
             )
-        print(f"Hint ban held: 0/{len(flat)} generations requested a hint")
+        served = sum(1 for g in flat if "</request>" in g)
+        if served:
+            raise RuntimeError(
+                f"--no-hints did not hold: {served}/{len(flat)} generations emitted "
+                "</request>, so the environment served real hints"
+            )
+        # Blocked from asking, some models write a request-shaped tag the
+        # environment ignores, then answer their own <response>. Those hints are
+        # invented rather than graded, so the run stays hint-free -- but it is
+        # fabrication, and the rate belongs in the log beside the accuracy it made.
+        near_miss = sum(1 for g in flat if _re.search(r"<[^<>]*request[^<>]*>", g))
+        fabricated = sum(1 for g in flat if "<response>" in g)
+        print(f"Hint ban held: 0/{len(flat)} generations were served a hint"
+              + (f"; {near_miss} wrote a request-shaped tag anyway" if near_miss else "")
+              + (f"; {fabricated} invented their own <response>" if fabricated else ""))
 
     # --- Multi-sample path (num_samples > 1) ---
     if num_samples > 1:
