@@ -306,6 +306,49 @@ def test_unrescuable_rollout_is_left_alone():
     assert states[0].forced == 0.0
 
 
+class RecordingEngine(ScriptedEngine):
+    """Remembers the prompt lengths the forced-answer pass actually submitted."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.answer_prompts = []
+
+    def generate_batch(self, prompts, max_tokens, mode="turn"):
+        if mode == "answer":
+            self.answer_prompts.extend(len(p) for p in prompts)
+        return super().generate_batch(prompts, max_tokens, mode)
+
+
+def test_forced_answer_skips_a_tape_that_fills_the_context_window():
+    """A tape truncated by the response budget still carries the prompt and any
+    injected hints, so tape + scaffold can reach max_model_len. Submitting that
+    makes vLLM reject the whole batch, so the rollout has to be left alone.
+    """
+    engine = RecordingEngine({0: ["reasoning that never ends" + "z" * 300]},
+                             answers={0: "7"})
+    # 3-token prompt + 120 generated + a 19-token scaffold = 142 >= 140.
+    loop = make_loop(engine, max_model_len=140, max_response_len=120,
+                     answer_budget=32)
+    states = loop.make_states([prompt_for(0)], [["hint"]])
+    loop.run_rounds(states)
+    loop.force_answers(states)
+
+    st = states[0]
+    assert st.truncated == 1.0, "the rollout must be a forcing candidate"
+    assert st.forced == 0.0, "no answer can be forced onto an over-length tape"
+    assert engine.answer_prompts == [], "nothing over-length was submitted"
+
+
+def test_forced_answer_still_fires_when_the_window_has_room():
+    """The guard above must not switch forcing off in the normal case."""
+    script = {0: ["reasoning that never ends" + "z" * 300]}
+    states, _, _ = run(
+        "run_rounds", script, answers={0: "7"},
+        max_response_len=120, answer_budget=32, max_model_len=4096,
+    )
+    assert states[0].forced == 1.0
+
+
 def test_nested_scaffold_does_not_reopen_the_think_block():
     script = {0: ["<request></request>", "more thought" + "z" * 400]}
     states, _, _ = run(

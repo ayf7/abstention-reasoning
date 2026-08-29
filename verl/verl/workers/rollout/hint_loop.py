@@ -414,7 +414,20 @@ class HintLoop:
             scaffold = self.answer_scaffold(self.tokenizer.decode(generated))
             if scaffold is None:
                 continue
-            targets.append((st, self._encode(scaffold) if scaffold else []))
+            scaffold_tokens = self._encode(scaffold) if scaffold else []
+            # The tape plus the scaffold is what gets submitted, and vLLM
+            # rejects a prompt at max_model_len for the whole batch. Nothing
+            # bounds this sum: generations are capped by the response budget
+            # and injected hints are exempt from it, so both grow the tape
+            # while only the context window says stop. Skipping leaves the
+            # rollout scored as truncated, exactly as it is with no forcing.
+            if st.total_len() + len(scaffold_tokens) >= self.config.max_model_len:
+                self._sample_log(4, lambda: (
+                    f"No room to force an answer: {st.total_len()} tokens plus "
+                    f"a {len(scaffold_tokens)}-token scaffold reaches "
+                    f"max_model_len {self.config.max_model_len}"))
+                continue
+            targets.append((st, scaffold_tokens))
 
         if not targets:
             return 0
