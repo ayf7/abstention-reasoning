@@ -68,6 +68,13 @@ from verl import DataProto
 from verl.utils.debug import GPUMemoryLogger
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from verl.workers.rollout.base import BaseRollout
+from verl.workers.rollout.hint_loop import (
+    Generation,
+    HintLoop,
+    HintLoopConfig,
+    LoopEngine,
+    hint_injection,
+)
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -94,13 +101,63 @@ def _repeat_interleave(value: Union[torch.Tensor, np.ndarray], repeats: int) -> 
         return np.repeat(value, repeats, axis=0)
 
 
-def _hint_injection(hint_text: str, nested: bool) -> str:
-    """The environment's turn: the hint, plus a reopened <think> when the request
-    was made outside the block. Inline requests never left it, so reopening one
-    there would nest a second block and fail the structure validator."""
-    if nested:
-        return "\n<response>" + hint_text + "</response>\n"
-    return "\n<response>" + hint_text + "</response>\n<think>\n"
+class _VLLMLoopEngine(LoopEngine):
+    """LoopEngine backed by a vLLM LLM.
+
+    ``generate_batch`` is LLM.generate. ``submit``/``step`` drive llm_engine
+    directly, which is the same mechanism -- LLM._run_engine is itself a
+    has_unfinished_requests/step loop -- with only the barrier at the end of a
+    round removed.
+    """
+
+    def __init__(self, llm, turn_params, answer_params):
+        self.llm = llm
+        self.turn_params = turn_params
+        self.answer_params = answer_params
+        self._ids = {}
+
+    def _params(self, mode, max_tokens):
+        params = copy.deepcopy(self.answer_params if mode == "answer" else self.turn_params)
+        params.max_tokens = max_tokens
+        return params
+
+    @staticmethod
+    def _generation(output):
+        completion = output.outputs[0]
+        return Generation(text=completion.text, token_ids=list(completion.token_ids))
+
+    def generate_batch(self, prompts, max_tokens, mode="turn"):
+        if self._ids:
+            # A continuous run that ended early would otherwise leave requests
+            # in the engine, and LLM.generate blocks on every unfinished one.
+            self.llm.llm_engine.abort_request(list(self._ids))
+            self._ids.clear()
+        inputs = [{"prompt_token_ids": list(prompt)} for prompt in prompts]
+        params = [self._params(mode, budget) for budget in max_tokens]
+        outputs = self.llm.generate(inputs, sampling_params=params, use_tqdm=False)
+        return [self._generation(output) for output in outputs]
+
+    def submit(self, request_id, prompt, max_tokens):
+        # Namespaced because LLM.generate restarts its own request counter from
+        # zero on every call, and both share one engine.
+        vllm_id = f"hint-{request_id}"
+        self._ids[vllm_id] = request_id
+        self.llm.llm_engine.add_request(
+            vllm_id, {"prompt_token_ids": list(prompt)}, self._params("turn", max_tokens)
+        )
+
+    def step(self):
+        finished = []
+        for output in self.llm.llm_engine.step():
+            if not output.finished:
+                continue
+            request_id = self._ids.pop(output.request_id, None)
+            if request_id is not None:
+                finished.append((request_id, self._generation(output)))
+        return finished
+
+    def busy(self):
+        return self.llm.llm_engine.has_unfinished_requests()
 
 
 class vLLMRollout(BaseRollout):
@@ -231,9 +288,6 @@ class vLLMRollout(BaseRollout):
             kwargs["stop"].append("</request>")
             kwargs["stop"].append("</response>")  # Stop if model tries to generate its own response
 
-        # Smart hint selection
-        self.hint_selector = None
-
         self.n = config.n
 
         kwargs["detokenize"] = True
@@ -297,529 +351,93 @@ class vLLMRollout(BaseRollout):
         else:
             return self.regular_generate_sequences(prompts, **kwargs)
 
-    def construct_partial_inputs(self, prompt_ids, partial_completion):
-        """Construct vLLM input from original token segments (no re-tokenization).
-
-        Returns a dict with prompt_token_ids so vLLM uses exact original tokens,
-        avoiding tokenization boundary mismatches between rollout and training.
-        """
-        if len(partial_completion) == 0:
-            token_ids = list(prompt_ids) if not isinstance(prompt_ids, list) else prompt_ids
-        else:
-            token_ids = []
-            for tokens in partial_completion:
-                token_ids.extend(tokens)
-        return {"prompt_token_ids": token_ids}
-
-    def batched_hint(self, hint_indices, idx_to_last_given, hint_list_dups, decoded_texts=None):
-        """Select hints for a batch of prompts.
-
-        Args:
-            hint_indices: Indices of prompts requesting hints
-            idx_to_last_given: Per-prompt last given hint index (-1 = none)
-            hint_list_dups: Per-prompt hint lists
-            decoded_texts: Per-prompt decoded generation text (for smart selection)
-
-        Returns:
-            List of (hint_text, new_last_given_index) tuples
-        """
-        if self.hint_selector is not None and decoded_texts is not None:
-            # Smart hint selection
-            partial_gens = [decoded_texts[idx] for idx in hint_indices]
-            hints_batch = [hint_list_dups[idx] for idx in hint_indices]
-            last_given_batch = [int(idx_to_last_given[idx]) for idx in hint_indices]
-
-            results = self.hint_selector.select_hints_batch_sync(
-                partial_gens, hints_batch, last_given_batch,
-            )
-            return results
-
-        # Sequential fallback
-        hint_results = []
-        for curr_idx in hint_indices:
-            last_given = int(idx_to_last_given[curr_idx])
-            next_idx = last_given + 1
-            hints = hint_list_dups[curr_idx]
-            if next_idx < len(hints):
-                hint_results.append((hints[next_idx], next_idx))
-            else:
-                hint_results.append(("No more hints available.", last_given))
-
-        return hint_results
-
-    # Structural tags recognised by the task's reward validator. Kept in sync
-    # with has_malformed_structure in recipe/*/reward_function.py -- a forced
-    # completion is only worth anything if it lands somewhere that accepts.
-    _TAG_PATTERN = r'(</think>|<think>|<request>|</request>|<response>|</response>|<answer>|</answer>|<abstain>)'
-    _HINT_CYCLE = ['<request>', '</request>', '<response>', '</response>', '<think>']
-    # Inline requests never close the think block, so no reopening tag follows.
-    _NESTED_HINT_CYCLE = ['<request>', '</request>', '<response>', '</response>']
-
-    def _answer_scaffold(self, text):
-        """Text to append so a truncated rollout can open a valid <answer>.
-
-        Returns None when the rollout cannot be rescued, in which case it is
-        left truncated and scores zero exactly as it did before.
-        """
-        # A <request> with anything inside is unrecoverable: the validator
-        # rejects the response on a tightness check before it parses any tags.
-        if text.count('<request>') != len(re.findall(r'<request></request>', text)):
-            return None
-
-        if self.nested_request:
-            return self._answer_scaffold_nested(text)
-
-        tags = re.findall(self._TAG_PATTERN, text)
-        i, n = 0, len(tags)
-        while True:
-            if i == n:
-                # Still inside a think block -- the assistant prefix opens one,
-                # and this is where the great majority of truncations land.
-                return "\n</think>\n\n<answer>"
-            if tags[i] != '</think>':
-                return None
-            i += 1
-            if i == n:
-                return "\n<answer>"        # think closed, branch not chosen yet
-            if tags[i] == '<answer>':
-                # Mid-answer: let it finish; the caller appends </answer>.
-                return "" if i + 1 == n else None
-            if tags[i] != '<request>':
-                return None                 # <abstain>, or already terminal
-            j = 0
-            while j < len(self._HINT_CYCLE) and i < n and tags[i] == self._HINT_CYCLE[j]:
-                i += 1
-                j += 1
-            if j == len(self._HINT_CYCLE):
-                continue                    # a whole hint cycle, keep walking
-            if i == n and j == 2:
-                # Out of budget between asking and being answered. Close the
-                # cycle so the tag sequence stays parseable.
-                return "<response>No more hints available.</response>\n<think>\n</think>\n\n<answer>"
-            return None
-
-    def _answer_scaffold_nested(self, text):
-        """_answer_scaffold for inline requests: one think block, closed once.
-
-        The tightness check on <request> has already run in the caller.
-        """
-        tags = re.findall(self._TAG_PATTERN, text)
-        i, n = 0, len(tags)
-
-        while i < n and tags[i] == '<request>':
-            j = 0
-            while j < len(self._NESTED_HINT_CYCLE) and i < n and tags[i] == self._NESTED_HINT_CYCLE[j]:
-                i += 1
-                j += 1
-            if j == len(self._NESTED_HINT_CYCLE):
-                continue                    # a whole hint exchange, keep walking
-            if i == n and j == 2:
-                # Out of budget between asking and being answered. Close the
-                # exchange so the tag sequence stays parseable.
-                return "<response>No more hints available.</response>\n</think>\n\n<answer>"
-            return None
-
-        if i == n:
-            # Still inside the think block -- where nearly every truncation lands.
-            return "\n</think>\n\n<answer>"
-        if tags[i] != '</think>':
-            return None
-        i += 1
-        if i == n:
-            return "\n<answer>"            # think closed, branch not chosen yet
-        if tags[i] == '<answer>':
-            # Mid-answer: let it finish; the caller appends </answer>.
-            return "" if i + 1 == n else None
-        return None
-
-    def _force_answers(self, idx_to_partials, idx_to_masks, idx_to_truncation,
-                       idx_to_forced, sampling_params):
-        """Give each truncated rollout a short, separate budget to answer in.
-
-        Without this, running out of room mid-thought scores 0 from the
-        structural validator -- a cliff rather than a gradient, charging the
-        same whether the model was one token or a thousand from an answer.
-        Asking for a hint pushes a rollout toward that cliff, so the cliff
-        shows up in training as a penalty on hint-seeking even when the
-        configured hint_penalty is zero.
-        """
-        if self.answer_budget <= 0:
-            return
-
-        tp_rank = vllm_ps.get_tensor_model_parallel_rank()
-        if tp_rank == 0:
-            targets = []
-            for idx, truncated in enumerate(idx_to_truncation):
-                # An empty partial means this index was cut before it ever
-                # generated; there is no prompt recorded to continue from.
-                if not truncated or not idx_to_partials[idx]:
-                    continue
-                generated = []
-                for tokens in idx_to_partials[idx][1:]:
-                    generated.extend(tokens)
-                scaffold = self._answer_scaffold(self.tokenizer.decode(generated))
-                if scaffold is None:
-                    continue
-                scaffold_tokens = (
-                    list(self.tokenizer(scaffold, add_special_tokens=False)['input_ids'])
-                    if scaffold else []
-                )
-                targets.append((idx, scaffold_tokens))
-            broadcast_data = {'targets': targets}
-        else:
-            broadcast_data = None
-
-        targets = vllm_ps._TP.broadcast_object(broadcast_data, src=0)['targets']
-        if not targets:
-            return
-
-        # Mutate on every rank so the partials stay identical across TP.
-        for idx, scaffold_tokens in targets:
-            if scaffold_tokens:
-                idx_to_partials[idx].append(scaffold_tokens)
-                idx_to_masks[idx].append([0] * len(scaffold_tokens))
-
-        answer_params = copy.deepcopy(sampling_params)
-        answer_params.n = 1
-        answer_params.max_tokens = self.answer_budget
-        answer_params.stop = ["</answer>"]
-        answer_params.include_stop_str_in_output = False
-
-        inputs = [self.construct_partial_inputs(None, idx_to_partials[idx]) for idx, _ in targets]
-        outputs = self.inference_engine.generate(inputs, sampling_params=answer_params, use_tqdm=False)
-
-        closing_tokens = list(self.tokenizer("</answer>", add_special_tokens=False)['input_ids'])
-        for (idx, _), output in zip(targets, outputs):
-            # Only the sampled answer tokens are trained on; the scaffold and
-            # the closing tag were forced, not chosen by the policy.
-            gen_tokens = list(output.outputs[0].token_ids)
-            if gen_tokens:
-                idx_to_partials[idx].append(gen_tokens)
-                idx_to_masks[idx].append([1] * len(gen_tokens))
-            # include_stop_str_in_output=False trims the stop string from the
-            # text but leaves it in token_ids, so the model hitting </answer>
-            # on its own already carries the tag. Appending unconditionally
-            # produced "</answer></answer>", which the structure validator
-            # rejects -- the forced answers were scored 0 for being malformed,
-            # the exact failure this forcing exists to prevent.
-            if not self.tokenizer.decode(gen_tokens).rstrip().endswith("</answer>"):
-                idx_to_partials[idx].append(closing_tokens)
-                idx_to_masks[idx].append([0] * len(closing_tokens))
-            idx_to_forced[idx] = 1.0
-
-        if random.randint(1, 8) == 1:
-            print(f"Forced an answer for {len(targets)} truncated rollout(s)")
-
     def agentic_loop(self, prompts, sampling_params, hint_list, **kwargs):
-        """
-        Multi-turn agentic loop for hint-based generation.
+        """Multi-turn hint rollout.
 
-        All rollouts can ask for hints (up to max_hints). The model generates,
-        can request hints via </request>, receives responses, and continues.
+        The turn rules live in HintLoop; this only builds the sampling params
+        and hands back the per-rollout lists the caller expects. Which driver
+        runs them is a scheduling choice: rounds generate every live rollout,
+        wait for the slowest, then start the next turn, so the batch shrinks as
+        rollouts finish; continuous resubmits each rollout the moment its turn
+        comes back, keeping the engine full. Both consume the same HintLoop, so
+        they cannot drift apart.
         """
         raw_prompt_ids = _repeat_interleave(prompts.non_tensor_batch["raw_prompt_ids"], sampling_params.n)
-        # These are countdown-specific; other tasks may not have them
-        targets = _repeat_interleave(prompts.non_tensor_batch.get("target", [None] * len(raw_prompt_ids)), sampling_params.n)
-        numbers = [nos for nos in prompts.non_tensor_batch.get("numbers", [None] * len(raw_prompt_ids)) for _ in range(sampling_params.n)]
-
-        num_outputs = len(raw_prompt_ids)
-        self.max_hints = self.config.get("max_hints", 6)
-        self.max_turns = self.config.get("max_turns", self.max_hints + 1)
-
-        idx_to_partials = [[] for _ in range(num_outputs)]
-        idx_to_masks = [[] for _ in range(num_outputs)]
-        idx_to_num_hints = [0.0 for _ in range(num_outputs)]
-        idx_to_last_given = [-1 for _ in range(num_outputs)]  # Track last given hint index
-        idx_to_truncation = [0.0 for _ in range(num_outputs)]
-        idx_to_forced = [0.0 for _ in range(num_outputs)]  # Answer was budget-forced
-        idx_to_malformed = [False for _ in range(num_outputs)]  # Track malformed requests
-        idx_to_response_len = [0 for _ in range(num_outputs)]  # Track cumulative response tokens
-        completed_indices = [False for _ in range(num_outputs)]
         hint_list_dups = [h for h in hint_list for _ in range(sampling_params.n)]
+
         # Decode budget for the model's own tokens. answer_budget is held back
         # from it and spent only on a forced answer, so a rollout that thinks
         # right up to the limit still gets the same room to answer in as one
         # that stopped early. response_length remains the width of the response
         # tensor and must additionally cover injected hint text.
-        self.answer_budget = int(self.config.get("answer_budget", 0) or 0)
         think_budget = self.config.get("think_budget", None)
-        max_response_len = int(think_budget) if think_budget else self.config.response_length
+        max_hints = self.config.get("max_hints", 6)
+        config = HintLoopConfig(
+            max_hints=max_hints,
+            max_turns=self.config.get("max_turns", max_hints + 1),
+            max_model_len=self.max_model_len,
+            max_response_len=int(think_budget) if think_budget else self.config.response_length,
+            answer_budget=int(self.config.get("answer_budget", 0) or 0),
+            nested_request=self.nested_request,
+        )
+        continuous = bool(self.config.get("continuous_hints", False))
         if not getattr(self, "_logged_budgets", False):
-            print(f"[agentic_loop] think budget {max_response_len} + answer budget "
-                  f"{self.answer_budget}, response tensor {self.config.response_length}")
+            print(f"[agentic_loop] {'continuous' if continuous else 'round'} driver, "
+                  f"think budget {config.max_response_len} + answer budget "
+                  f"{config.answer_budget}, response tensor {self.config.response_length}")
             self._logged_budgets = True
 
-        # Pattern for valid hint request: exactly <request></request> with nothing inside
-        valid_request_pattern = r'<request></request>'
-        # Pattern to detect any request tag (for malformed detection)
-        any_request_pattern = r'</request>'
-        answer_pattern = r'<answer>(.*?)</answer>'
+        # n=1: the expansion already happened via repeat_interleave. The answer
+        # params stop at </answer> and drop it from the text so the forced
+        # closing tag is not doubled.
+        turn_params = copy.deepcopy(sampling_params)
+        turn_params.n = 1
+        answer_params = copy.deepcopy(turn_params)
+        answer_params.stop = ["</answer>"]
+        answer_params.include_stop_str_in_output = False
 
-        # Single sampling params for all rollouts (n=1 since expansion already done)
-        loop_sampling_params = copy.deepcopy(sampling_params)
-        loop_sampling_params.n = 1  # Expansion already done via repeat_interleave
+        loop = HintLoop(
+            engine=_VLLMLoopEngine(self.inference_engine, turn_params, answer_params),
+            tokenizer=self.tokenizer,
+            config=config,
+            log=print,
+        )
+        states = loop.make_states([list(ids) for ids in raw_prompt_ids], hint_list_dups)
 
-        for attempt in range(self.max_turns):
-            tp_rank = vllm_ps.get_tensor_model_parallel_rank()
+        if continuous:
+            loop.run_continuous(states)
+        else:
+            loop.run_rounds(states)
+        loop.force_answers(states)
 
-            # Get all incomplete indices
-            if tp_rank == 0:
-                curr_indices = [idx for idx, completed in enumerate(completed_indices) if not completed]
-                inputs = [self.construct_partial_inputs(raw_prompt_ids[idx], idx_to_partials[idx]) for idx in curr_indices]
+        return states
 
-                # Early length checks:
-                # 1. Prompt length check: prevent vLLM error when prompt > max_model_len
-                # 2. Response budget check: skip samples that have used up their response budget
-                valid_indices = []
-                valid_inputs = []
-                min_generation_buffer = 64  # Minimum tokens needed to make generation worthwhile
-                for idx, inp in zip(curr_indices, inputs):
-                    input_len = len(inp["prompt_token_ids"])
-                    remaining_response_budget = max_response_len - idx_to_response_len[idx]
+    def process_agentic_outputs(self, prompts, states, device):
+        """Flatten each rollout's tape into the response tensor and its mask.
 
-                    # Check 1: prompt too long for model context
-                    if input_len > self.max_model_len - min_generation_buffer:
-                        completed_indices[idx] = True
-                        idx_to_truncation[idx] = 1.0
-                        if random.randint(1, 32) == 1:
-                            print(f"Early truncation: prompt length {input_len} exceeds max_model_len {self.max_model_len}")
-                    # Check 2: response budget exhausted
-                    elif remaining_response_budget < min_generation_buffer:
-                        completed_indices[idx] = True
-                        idx_to_truncation[idx] = 1.0
-                        if random.randint(1, 32) == 1:
-                            print(f"Early truncation: response budget exhausted ({idx_to_response_len[idx]}/{max_response_len})")
-                    else:
-                        valid_indices.append(idx)
-                        valid_inputs.append(inp)
-
-                curr_indices = valid_indices
-                inputs = valid_inputs
-                broadcast_data = {'curr_indices': curr_indices, 'inputs': inputs}
-            else:
-                broadcast_data = None
-
-            broadcast_data = vllm_ps._TP.broadcast_object(broadcast_data, src=0)
-            curr_indices, inputs = broadcast_data['curr_indices'], broadcast_data['inputs']
-
-            # Skip if all completed
-            if len(curr_indices) == 0:
-                break
-
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-
-            # Debug: print prompt on turn 2+ to verify hint injection format
-            if attempt > 0 and len(inputs) > 0:
-                # Always print on turn 2+ (1 in 8 chance to reduce spam)
-                if random.randint(1, 8) == 1:
-                    print(f"\n{'='*60}")
-                    print(f"=== TURN {attempt} PROMPT (1/{len(inputs)} samples) ===")
-                    print(f"{'='*60}")
-                    decoded_prompt = self.tokenizer.decode(inputs[0]["prompt_token_ids"])
-                    print(f"Last 800 chars of prompt:")
-                    print(repr(decoded_prompt[-800:]))
-                    print(f"{'='*60}\n")
-
-            # Cap each request at its own remaining think budget. Passing one
-            # shared sampling_params let a single turn run to max_tokens (the
-            # full response width), so max_response_len was only ever checked
-            # after the fact: a rollout could fill the whole response tensor in
-            # one turn, leaving no room for the forced answer, which
-            # process_agentic_outputs then trimmed straight back off.
-            turn_sampling_params = []
-            for idx in curr_indices:
-                per_req = copy.deepcopy(loop_sampling_params)
-                per_req.max_tokens = max(1, max_response_len - idx_to_response_len[idx])
-                turn_sampling_params.append(per_req)
-
-            # Single generate call for all incomplete prompts
-            outputs = self.inference_engine.generate(inputs, sampling_params=turn_sampling_params, use_tqdm=True)
-
-            # Process the generated text
-            hint_indices = []
-            for curr_idx, output in zip(curr_indices, outputs):
-                partial_tokens = idx_to_partials[curr_idx]
-                partial_masks = idx_to_masks[curr_idx]
-
-                # First append prompt if this is the first generation
-                if len(partial_tokens) == 0:
-                    partial_tokens.append(output.prompt_token_ids)
-
-                output_text = output.outputs[0].text
-                gen_tokens = output.outputs[0].token_ids
-                partial_tokens.append(gen_tokens)
-                partial_masks.append([1] * len(gen_tokens))
-
-                # Update cumulative response length (model-generated tokens only)
-                idx_to_response_len[curr_idx] += len(gen_tokens)
-
-                # Check if cumulative response exceeds budget
-                if idx_to_response_len[curr_idx] >= max_response_len:
-                    completed_indices[curr_idx] = True
-                    idx_to_truncation[curr_idx] = 1.0
-                    if random.randint(1, 32) == 1:
-                        print(f"Response length {idx_to_response_len[curr_idx]} exceeds max {max_response_len}, marking complete")
-                    continue  # Skip further processing for this index
-
-                # Check if model tried to generate its own response (malformed)
-                if '</response>' in output_text:
-                    idx_to_malformed[curr_idx] = True
-                    completed_indices[curr_idx] = True
-                    if random.randint(1, 8) == 1:
-                        print(f"\n!!! MODEL GENERATED </response> !!!")
-                        print(f"Output text (last 500 chars): {repr(output_text[-500:])}")
-                    continue
-
-                # Check for any </request> tag in output
-                has_request_tag = any_request_pattern in output_text
-                valid_request_matches = re.findall(valid_request_pattern, output_text)
-                answer_matches = re.findall(answer_pattern, output_text, re.DOTALL)
-
-                # Debug: show what was generated when there's a request tag
-                if has_request_tag and random.randint(1, 8) == 1:
-                    print(f"\n--- Generated output with request tag (attempt {attempt}) ---")
-                    print(f"Valid matches: {len(valid_request_matches)}")
-                    print(f"Output ending (last 300 chars): {repr(output_text[-300:])}")
-
-                if has_request_tag:
-                    # Check if it's a valid request (exactly <request></request>)
-                    if len(valid_request_matches) > 0:
-                        # Valid hint request
-                        idx_to_num_hints[curr_idx] += 1
-
-                        if idx_to_num_hints[curr_idx] > self.max_hints:
-                            # Add the failure message but let model continue to produce an answer
-                            hint_result = "\n<response>No more hints available.</response>\n"
-                            doc_tokens = list(self.tokenizer(hint_result, add_special_tokens=False)['input_ids'])
-                            partial_tokens.append(doc_tokens)
-                            partial_masks.append([0] * len(doc_tokens))
-
-                            # Truncation check - only terminate if we've run out of token budget
-                            if self.exceeds_vllm_length(partial_tokens) or idx_to_response_len[curr_idx] >= max_response_len:
-                                idx_to_truncation[curr_idx] = 1
-                                completed_indices[curr_idx] = True
-                        else:
-                            hint_indices.append(curr_idx)
-                    else:
-                        # Malformed request (has </request> but not exactly <request></request>)
-                        # Mark as completed - reward function will give 0
-                        idx_to_malformed[curr_idx] = True
-                        completed_indices[curr_idx] = True
-                        if random.randint(1, 64) == 1:
-                            print(f"Malformed <request> tag detected in output: {output_text[:200]}...")
-
-                elif len(answer_matches) != 0:
-                    completed_indices[curr_idx] = True
-
-                else:
-                    # No hint request or answer - model failed to produce valid output
-                    # Mark as completed and let reward function score it (will get low score)
-                    completed_indices[curr_idx] = True
-
-            # Build decoded texts for smart hint selection
-            if tp_rank == 0:
-                decoded_texts = {}
-                if self.hint_selector is not None:
-                    for curr_idx in hint_indices:
-                        all_tokens = []
-                        for tokens in idx_to_partials[curr_idx][1:]:  # Skip prompt tokens
-                            all_tokens.extend(tokens)
-                        decoded_texts[curr_idx] = self.tokenizer.decode(all_tokens)
-
-                hint_results = self.batched_hint(hint_indices, idx_to_last_given, hint_list_dups, decoded_texts if decoded_texts else None)
-                broadcast_data = {
-                    'hint_results': hint_results,
-                }
-            else:
-                broadcast_data = None
-            hint_results = vllm_ps._TP.broadcast_object(broadcast_data, src=0)['hint_results'] # broadcast tool call results across tp
-
-            for curr_idx, hint_result in zip(hint_indices, hint_results):
-                # hint_result is now (hint_text, new_last_given_index) tuple
-                hint_text, new_last_given = hint_result
-                idx_to_last_given[curr_idx] = new_last_given
-
-                # Hand back the hint in <response>...</response> so the model resumes reasoning
-                partial_tokens = idx_to_partials[curr_idx]
-                partial_masks = idx_to_masks[curr_idx]
-                hint_injection_str = _hint_injection(hint_text, self.nested_request)
-                doc_tokens = list(self.tokenizer(hint_injection_str, add_special_tokens=False)['input_ids'])
-
-                # Debug: show hint injection
-                if random.randint(1, 8) == 1:
-                    print(f"\n+++ INJECTING HINT +++")
-                    print(f"Hint: {hint_result}")
-                    print(f"Injection string: {repr(hint_injection_str)}")
-                    print(f"Decoded tokens: {repr(self.tokenizer.decode(doc_tokens))}")
-                    print(f"Num tokens: {len(doc_tokens)}")
-
-                partial_tokens.append(doc_tokens)
-                partial_masks.append([0] * len(doc_tokens))
-
-                # Injected hint text is environment-provided, not decoded by the
-                # policy, so it does not consume the response budget -- charging
-                # it made requesting a hint cost budget twice over (the hint text
-                # plus the reasoning it prompts) and pushed hint-using rollouts
-                # into truncation. exceeds_vllm_length below still bounds the
-                # real context window.
-
-                # Early truncation: check both vLLM context and response budget
-                if self.exceeds_vllm_length(partial_tokens):
-                    completed_indices[curr_idx] = True
-                    idx_to_truncation[curr_idx] = 1
-                elif idx_to_response_len[curr_idx] >= max_response_len:
-                    completed_indices[curr_idx] = True
-                    idx_to_truncation[curr_idx] = 1
-
-        # A rollout still incomplete when the turn loop ends spent its last
-        # turn on a hint and had none left to answer in. That exhausts a budget
-        # just as running out of tokens does, so flag it for forcing too:
-        # leaving it unflagged scored every max_turns-hint rollout 0 for being
-        # malformed -- a structural penalty falling only on the heaviest hint
-        # users, which is the same bias the forced answers exist to remove.
-        for idx, done in enumerate(completed_indices):
-            if not done:
-                idx_to_truncation[idx] = 1
-
-        self._force_answers(idx_to_partials, idx_to_masks, idx_to_truncation,
-                            idx_to_forced, loop_sampling_params)
-
-        return idx_to_partials, idx_to_masks, idx_to_num_hints, idx_to_truncation, idx_to_malformed, idx_to_forced
-
-    def process_agentic_outputs(self, prompts, idx_to_partials, idx_to_masks, idx_to_truncation, device):
-        # Get the vllm response and document mask tokens; pad them
+        partials[0] is the prompt, which the response tensor does not carry, so
+        the masks line up with partials[1:].
+        """
         response = []
         document_mask = []
         decoded_responses = []
-        for idx, (partial_tokens, partial_masks) in enumerate(zip(idx_to_partials, idx_to_masks)):
+        width = self.config.response_length
+        for st in states:
             curr_tokens = []
             curr_masks = []
-            for tokens, masks in zip(partial_tokens[1:], partial_masks):
+            for tokens, masks in zip(st.partials[1:], st.masks):
                 curr_tokens += tokens
                 curr_masks += masks
 
-            num_tokens = len(curr_tokens)
-            response.append(curr_tokens[:self.config.response_length])
-            document_mask.append(curr_masks[:self.config.response_length])
-            decoded_responses.append(self.tokenizer.decode(curr_tokens[:self.config.response_length]))
-            if num_tokens > self.config.response_length:
-                idx_to_truncation[idx] = 1
-            
+            response.append(curr_tokens[:width])
+            document_mask.append(curr_masks[:width])
+            decoded_responses.append(self.tokenizer.decode(curr_tokens[:width]))
+
         response = pad_2d_list_to_length(response, self.pad_token_id).to(device)
         document_mask = pad_2d_list_to_length(document_mask, 0).to(device)
         prompts.non_tensor_batch["completions"] = np.array(decoded_responses, dtype='object')
 
         return response, document_mask
-
-    def exceeds_vllm_length(self, partial_tokens):
-        # Guards the real context window only. The response budget is enforced
-        # separately and counts decoded tokens alone, so measuring against
-        # prompt_length + response_length here would re-charge injected hint
-        # text against a budget it is deliberately exempt from.
-        total_len = sum(len(tokens) for tokens in partial_tokens)
-        return total_len >= self.max_model_len
-
 
     def agentic_generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
         # Carry over from veRL
@@ -881,13 +499,13 @@ class vLLMRollout(BaseRollout):
                                                     use_tqdm=False,
                                                 )"""
             #import debugpy; debugpy.breakpoint()
-            idx_to_partials, idx_to_masks, idx_to_num_hints, idx_to_truncation, idx_to_malformed, idx_to_forced = self.agentic_loop(prompts, self.sampling_params, hint_list=hint_list)
+            states = self.agentic_loop(prompts, self.sampling_params, hint_list=hint_list)
 
-            response, document_mask = self.process_agentic_outputs(prompts, idx_to_partials, idx_to_masks, idx_to_truncation, idx.device)
+            response, document_mask = self.process_agentic_outputs(prompts, states, idx.device)
 
             # Already one entry per rollout (batch * n), so it is not part of
             # the repeat_interleave fixups below.
-            non_tensor_batch["forced_answer"] = np.array(idx_to_forced, dtype=object)
+            non_tensor_batch["forced_answer"] = np.array([st.forced for st in states], dtype=object)
 
             # TODO(sgm): disable logprob when recompute_log_prob is enable
             # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
@@ -974,19 +592,6 @@ class vLLMRollout(BaseRollout):
         attention_mask_with_documents = torch.cat([attention_mask, document_mask], dim=-1)
 
         # all the tp ranks should contain the same data here. data in all ranks are valid
-        """batch = TensorDict(
-            {
-                "prompts": idx,
-                "responses": response,
-                "input_ids": seq,  # here input_ids become the whole sentences
-                "attention_mask": full_attention_mask,
-                "document_mask": attention_mask_with_documents,
-                "position_ids": position_ids,
-                "num_hints": idx_to_num_hints
-            },
-            batch_size=batch_size,
-        )"""
-
         batch_dict = {
                 "prompts": idx,
                 "responses": response,
@@ -994,7 +599,7 @@ class vLLMRollout(BaseRollout):
                 "attention_mask": full_attention_mask,
                 "document_mask": attention_mask_with_documents,
                 "position_ids": position_ids,
-                "num_hints": torch.Tensor(idx_to_num_hints)
+                "num_hints": torch.Tensor([st.num_hints for st in states])
             }
         """if self.config.calculate_log_probs:
             # we will recompute old log prob with actor
@@ -1406,7 +1011,7 @@ class vLLMAsyncAgenticRollout(BaseRollout):
             # Pre-tokenize hints in the form they will be injected in
             hint_tokens_list = []
             for hint in hints:
-                hint_response = _hint_injection(hint, self.nested_request)
+                hint_response = hint_injection(hint, self.nested_request)
                 hint_tokens_list.append(
                     list(self.tokenizer(hint_response, add_special_tokens=False)['input_ids'])
                 )
@@ -1521,7 +1126,7 @@ class vLLMAsyncAgenticRollout(BaseRollout):
                             if hint_text is not None:
                                 state.last_given_index = new_last
                                 # Tokenize the selected hint text
-                                hint_response = _hint_injection(hint_text, self.nested_request)
+                                hint_response = hint_injection(hint_text, self.nested_request)
                                 hint_tokens = list(self.tokenizer(hint_response, add_special_tokens=False)['input_ids'])
                             else:
                                 # Fallback to sequential
