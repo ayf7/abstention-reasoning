@@ -55,7 +55,18 @@ class Tracking:
             settings = None
             if config and config["trainer"].get("wandb_proxy", None):
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
-            wandb.init(project=project_name, name=experiment_name, config=config, settings=settings)
+            # A resumed training run has to land back in the wandb run it already
+            # owns. wandb.init() mints a fresh id per process, so every preemption,
+            # requeue or relaunch used to fork the curve into a separate run.
+            run_id = config["trainer"].get("wandb_run_id", None) if config else None
+            wandb.init(
+                project=project_name,
+                name=experiment_name,
+                config=config,
+                settings=settings,
+                id=run_id,
+                resume="allow" if run_id else None,
+            )
             self.logger["wandb"] = wandb
 
         if "mlflow" in default_backend:

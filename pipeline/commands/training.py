@@ -345,6 +345,28 @@ def train_sft(
     return output_path
 
 
+def _wandb_run_id(run_dir: Path | None) -> str | None:
+    """Return a stable wandb run id for this run directory, minting one if absent.
+
+    verl calls wandb.init() once per process, so a run that gets preempted,
+    resumed after an allocation expires, or relaunched by hand shows up in wandb
+    as several disconnected runs. Pinning the id to the run directory makes every
+    launch of the same run_id append to one curve. --overwrite clears the run
+    directory and therefore the id, which is the intended behaviour: a discarded
+    run should not keep writing to the old wandb run.
+    """
+    if run_dir is None:
+        return None
+    id_file = run_dir / "wandb_run_id"
+    if id_file.exists():
+        return id_file.read_text().strip() or None
+    import wandb.util
+
+    run_id = wandb.util.generate_id()
+    id_file.write_text(run_id + "\n")
+    return run_id
+
+
 def _guard_existing_run(
     run_dir: Path | None,
     checkpoints_dir: Path | None,
@@ -762,6 +784,12 @@ def train_rl(
         f"trainer.total_training_steps={total_steps}",
         f"trainer.rollout_data_dir={rollouts_dir}",
     ]
+
+    # Resume into this run's own wandb run rather than forking a new one. Read
+    # by the vendored verl tracking.Tracking; harmless when wandb is off.
+    wandb_run_id = _wandb_run_id(run_dir) if wandb else None
+    if wandb_run_id:
+        cmd.append(f"+trainer.wandb_run_id={wandb_run_id}")
 
     # Checkpoint selection (vendored verl extensions). save_last guarantees the
     # final step is on disk regardless of the periodic save cadence.
