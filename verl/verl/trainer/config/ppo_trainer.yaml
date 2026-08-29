@@ -409,7 +409,7 @@ actor_rollout_ref:
     # turn before starting the next, so the batch drains as rollouts complete.
     continuous_hints: false
 
-    # sync: LLM, async: AsyncLLM, async_agentic: AsyncLLM with independent multi-turn tasks
+    # sync: LLM, async: AsyncLLM
     mode: sync
 
     # Sampling temperature for rollout.
