@@ -43,6 +43,7 @@ import zmq
 from filelock import FileLock
 from omegaconf import DictConfig, OmegaConf
 from vllm import LLM, SamplingParams
+from vllm.sampling_params import RequestOutputKind
 from vllm.distributed import parallel_state as vllm_ps
 
 # vLLM 0.15+ moved SamplingMetadata to vllm.v1.sample.metadata
@@ -108,6 +109,12 @@ class _VLLMLoopEngine(LoopEngine):
     def _params(self, mode, max_tokens):
         params = copy.deepcopy(self.answer_params if mode == "answer" else self.turn_params)
         params.max_tokens = max_tokens
+        # add_request keeps SamplingParams' CUMULATIVE default, under which the
+        # engine rebuilds a RequestOutput -- including a fresh copy of the whole
+        # decoded text so far -- for every live request on every step, and step()
+        # throws all of them away. LLM.generate sets this itself, so the batch
+        # driver already had it.
+        params.output_kind = RequestOutputKind.FINAL_ONLY
         return params
 
     @staticmethod

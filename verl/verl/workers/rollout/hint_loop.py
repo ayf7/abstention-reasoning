@@ -380,7 +380,12 @@ class HintLoop:
                 # Rollouts are pending but nothing is running: the engine
                 # dropped a request. Stop rather than block on a step that will
                 # never return; the sweep below flags whatever never finished
-                # as truncated.
+                # as truncated. Say so, because those rollouts are scored zero
+                # and nothing downstream would show where the zeros came from.
+                self._log(
+                    f"!!! ENGINE DROPPED REQUESTS !!! engine idle with "
+                    f"{len(pending)} rollout(s) still pending; flagging them "
+                    f"truncated")
                 break
             for request_id, gen in self.engine.step():
                 st = pending.pop(request_id, None)
