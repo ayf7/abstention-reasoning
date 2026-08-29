@@ -406,8 +406,9 @@ actor_rollout_ref:
 
     # Schedule hint turns continuously instead of round by round. Same turn
     # rules either way; the round driver waits for every rollout to finish its
-    # turn before starting the next, so the batch drains as rollouts complete.
-    continuous_hints: false
+    # turn before starting the next, so the batch drains as rollouts complete
+    # and the GPU idles. Set false to get that round-synchronized driver back.
+    continuous_hints: true
 
     # sync: LLM, async: AsyncLLM
     mode: sync
