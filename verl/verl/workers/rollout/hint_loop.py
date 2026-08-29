@@ -46,7 +46,7 @@ from __future__ import annotations
 import random
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 __all__ = [
     "Generation",
