@@ -459,6 +459,7 @@ def generate(
     retry_incorrect: bool = False,
     retry_truncated: bool = False,
     max_retries: int = 10,
+    answer_budget: int = 0,
     seed: int | None = 42,
     multi_turn: bool | None = None,
     use_async: bool = False,
@@ -481,6 +482,10 @@ def generate(
         output_path: Where to save dataset (default: artifacts/{task}/{method}/datasets/{split}_{model}.json)
         split: Which split to generate from (default: sft)
         retry_incorrect: If True, re-run incorrect examples
+        answer_budget: Tokens held back for a forced answer. A generation that runs
+            out of room mid-thought gets </think> closed for it and this many tokens
+            to answer in, matching what RL does at rollout time. 0 disables forcing.
+            Async single-turn generation only.
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
         use_async: Use async generation for optimal throughput.
         force_hints_distribution: Distribution of forced hint counts. Maps number of hints
@@ -553,6 +558,7 @@ def generate(
         seed=seed,
         hint_transition=method.hint_transition if method else True,
         nested_request=method.nested_request if method else False,
+        answer_budget=answer_budget,
     )
     generator = Generator(config)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -782,6 +788,7 @@ def generate(
                             "token_count": best_sample["token_count"],
                             "metadata": best_sample["metadata"],
                             "extracted_hints": extract_generation_hints(best_sample["text"]),
+                            "forced_answer": best_sample.get("forced_answer", False),
                         }
 
                         records_by_index[prompt_data["index"]] = record
@@ -791,7 +798,9 @@ def generate(
 
                     correct = sum(1 for r in records if r["correct"])
                     truncated_count = sum(1 for r in records if r.get("finish_reason") == "length")
-                    print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%), {truncated_count} truncated")
+                    forced_count = sum(1 for r in records if r.get("forced_answer"))
+                    forced_note = f", {forced_count} forced" if forced_count else ""
+                    print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%), {truncated_count} truncated{forced_note}")
                     _print_verify_metrics(records)
                     print(f"Saved dataset to {output_path}")
 
@@ -1175,12 +1184,13 @@ def evaluate(
 
         generations = generator.generate_batched(prompts, callback=progress_callback)
 
-    # The ban is enforced by the sampler, not by post-processing, so this checks
-    # afterwards that it actually took. What invalidates the run is a graded hint
-    # reaching the model, and only the exact </request> tag makes the environment
-    # deliver one -- so that is the hard failure. Near-misses like <_request> are
-    # the model trying to route around the ban and getting nothing back; they are
-    # worth counting, not worth discarding the run over.
+    # The ban has two layers and this reports on both. The sampler suppresses the
+    # "request" token, which is best-effort -- bad_words bans a token id and BPE
+    # can spell the string another way. The guarantee is upstream of that: with
+    # ban_hint_requests set the generator swaps in an unmatchable request tag, so
+    # no tag the model writes can make the environment serve a hint. Emitting
+    # <request> is therefore a failed attempt, not a leak, and the rate is worth
+    # logging next to the accuracy it produced rather than aborting over.
     if no_hints:
         import re as _re
 
@@ -1208,20 +1218,16 @@ def evaluate(
             raise RuntimeError(
                 "--no-hints could not read any generation text, so the ban is unverified"
             )
-        served = sum(1 for g in flat if "</request>" in g)
-        if served:
-            raise RuntimeError(
-                f"--no-hints did not hold: {served}/{len(flat)} generations emitted "
-                "</request>, so the environment served real hints"
-            )
-        # Blocked from asking, some models write a request-shaped tag the
-        # environment ignores, then answer their own <response>. Those hints are
-        # invented rather than graded, so the run stays hint-free -- but it is
-        # fabrication, and the rate belongs in the log beside the accuracy it made.
+        # Blocked from asking, some models write a request-shaped tag anyway and
+        # then answer their own <response>. Nothing is served back, so the run
+        # stays hint-free -- but the model is now reading text it invented, and
+        # that rate belongs in the log beside the accuracy it produced.
+        asked = sum(1 for g in flat if "</request>" in g)
         near_miss = sum(1 for g in flat if _re.search(r"<[^<>]*request[^<>]*>", g))
         fabricated = sum(1 for g in flat if "<response>" in g)
         print(f"Hint ban held: 0/{len(flat)} generations were served a hint"
-              + (f"; {near_miss} wrote a request-shaped tag anyway" if near_miss else "")
+              + (f"; {asked} reached </request> anyway" if asked else "")
+              + (f"; {near_miss} wrote a request-shaped tag" if near_miss else "")
               + (f"; {fabricated} invented their own <response>" if fabricated else ""))
 
     # --- Multi-sample path (num_samples > 1) ---

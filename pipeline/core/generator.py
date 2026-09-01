@@ -87,6 +87,33 @@ def _close_think_for_request(text: str, transition: str | None, nested: bool = F
     return head + tail.rstrip() + "\n</think>"
 
 
+# A request tag no model can emit. vLLM's bad_words bans a token *id*, but BPE
+# lets one string be spelled by more than one token sequence, so a decoding-level
+# ban leaks: 6 of 1764 generations reached </request> and were served real hints.
+# Detection routed through a tag containing NUL -- which no tokenizer produces --
+# makes serving a hint impossible by construction rather than by luck.
+_UNMATCHABLE_REQUEST_TAG = "\x00hint-requests-banned\x00"
+
+
+def _request_tag_for(config, request_tag: str, any_forcing: bool) -> str:
+    """The tag hint injection triggers on, honouring ban_hint_requests.
+
+    Swapping the tag rather than guarding each of the seventeen injection sites
+    keeps the ban in one place, and it also fixes what the model does next: the
+    tag doubles as a stop string, so an unmatchable one lets a model that wrote
+    a stray <request> keep reasoning to its own answer instead of halting on a
+    request that will never be answered.
+    """
+    if not config.ban_hint_requests:
+        return request_tag
+    if any_forcing:
+        raise ValueError(
+            "ban_hint_requests and force_hints are contradictory: one forbids "
+            "hints, the other injects them unconditionally"
+        )
+    return _UNMATCHABLE_REQUEST_TAG
+
+
 def _hint_injection(hint: str, nested: bool) -> str:
     """The environment's turn: the hint, plus a reopened think block if the
     request lives outside one. Inline requests never left the block."""
@@ -94,6 +121,37 @@ def _hint_injection(hint: str, nested: bool) -> str:
 
 
 DEFAULT_STOP_STRINGS = ["</answer>", "</think>\n\n<abstain>"]
+
+# The tags a single-turn generation can legally emit. The assistant prefix opens
+# <think>, so a generation that never closes it carries no tags at all.
+_PLAIN_TAG_PATTERN = r"(</think>|<think>|<answer>|</answer>)"
+
+
+def _answer_scaffold(text: str) -> str | None:
+    """Text to append so a truncated generation can open a valid <answer>.
+
+    This is HintLoop.answer_scaffold from verl with the hint grammar removed --
+    the two must agree on what a rescuable truncation looks like, because RL
+    forces answers at rollout time and SFT data generated here is what teaches
+    the model that shape. Returns None when the generation cannot be rescued, in
+    which case it stays truncated and is filtered out exactly as before.
+    """
+    tags = re.findall(_PLAIN_TAG_PATTERN, text)
+    i, n = 0, len(tags)
+    if i == n:
+        # Still inside the think block the prefix opened -- where nearly every
+        # truncation lands.
+        return "\n</think>\n\n<answer>"
+    if tags[i] != "</think>":
+        return None
+    i += 1
+    if i == n:
+        return "\n<answer>"  # think closed, answer not opened yet
+    if tags[i] == "<answer>":
+        # Mid-answer: let it finish; the caller appends </answer>.
+        return "" if i + 1 == n else None
+    return None
+
 
 
 @dataclass
@@ -114,6 +172,8 @@ class GenerationConfig:
     nested_request: bool = False  # Keep <request></request> inside the <think> block
     ban_hint_requests: bool = False  # Counterfactual eval: make asking for a hint
                                      # impossible, so the model has to answer alone
+    answer_budget: int = 0  # Tokens held back for a forced answer when a generation
+                            # runs out of room mid-thought. 0 disables forcing.
 
 
 class _SamplingParams:
@@ -122,14 +182,18 @@ class _SamplingParams:
     def _sampling_params(self, **kwargs):
         """SamplingParams with the generator's global constraints applied.
 
-        ban_hint_requests blocks the token "request" outright rather than the
-        string "<request>": vLLM's bad_words bans the *last* token of a phrase
-        only when the preceding tokens match exactly, and "<request>" tokenises
-        as "<", "request", ">" while generation actually emits "></" as one
-        token there -- so the phrase form matches nothing and silently never
-        fires. "request" is a single token, so banning it is unconditional.
-        The word is otherwise absent from the prompt's own vocabulary of
-        reasoning, and callers assert no <request> survives in the output.
+        ban_hint_requests blocks the token "request" rather than the string
+        "<request>": vLLM's bad_words bans the *last* token of a phrase only
+        when the preceding tokens match exactly, and "<request>" tokenises as
+        "<", "request", ">" while generation actually emits "></" as one token
+        there -- so the phrase form matches nothing and silently never fires.
+
+        This suppresses request attempts; it does not eliminate them. bad_words
+        bans a token id, and BPE can spell the same string another way, so a
+        determined model still reaches "<request>" a fraction of a percent of
+        the time. What guarantees no hint is *served* is _request_tag_for,
+        which makes the injection trigger unmatchable; this ban is the cheaper
+        first layer that keeps the attempt rate near zero.
         """
         from vllm import SamplingParams
         if self.config.ban_hint_requests:
@@ -308,6 +372,8 @@ class Generator(_SamplingParams):
                 except (ValueError, SyntaxError):
                     hints_expr = []
             hints_list.append(hints_expr)
+
+        request_tag = _request_tag_for(self.config, request_tag, any_forcing)
 
         if any_forcing:
             # Forced hints require text manipulation — use legacy text-based path
@@ -986,10 +1052,80 @@ class AsyncGenerator(_SamplingParams):
         tasks = [process_single_prompt(idx) for idx in range(num_prompts)]
         await asyncio.gather(*tasks)
 
+        if self.config.answer_budget > 0:
+            await self._force_answers(engine, tokenizer, prompts, results)
+
         if self.config.verbose:
             print(f"Async generation complete: {num_prompts} prompts")
 
         return results
+
+    async def _force_answers(self, engine, tokenizer, prompts, results) -> int:
+        """Give each truncated sample a short, separate budget to answer in.
+
+        Running out of room mid-thought otherwise costs the sample entirely: the
+        SFT filter keeps only correct generations, and a truncated one cannot be
+        correct. That silently biases the training set toward the problems the
+        teacher happened to solve briefly, and biases it hardest on exactly the
+        hard problems the model most needs examples of.
+
+        RL already does this at rollout time (HintLoop.force_answers). Doing it
+        here as well means the SFT model has seen the shape RL will impose on it,
+        rather than meeting a forced </think> for the first time under GRPO.
+        """
+        import uuid
+
+        targets = []
+        for pi, samples in enumerate(results):
+            for si, sample in enumerate(samples):
+                if sample.get("finish_reason") != "length":
+                    continue
+                scaffold = _answer_scaffold(sample["text"])
+                if scaffold is None:
+                    continue
+                targets.append((pi, si, scaffold))
+
+        if not targets:
+            return 0
+
+        params = self._sampling_params(
+            temperature=self.config.temperature,
+            top_p=self.config.top_p,
+            max_tokens=self.config.answer_budget,
+            n=1,
+            seed=self.config.seed,
+            stop=["</answer>"],
+            include_stop_str_in_output=True,
+        )
+
+        async def finish(pi: int, si: int, scaffold: str):
+            sample = results[pi][si]
+            prefix = self._format_prompt(prompts[pi], tokenizer) + sample["text"] + scaffold
+            request_id = f"force_{pi}_{si}_{uuid.uuid4().hex[:8]}"
+            tail, tail_tokens = "", 0
+            async for output in engine.generate(prefix, params, request_id):
+                for completion in output.outputs:
+                    if completion.finish_reason is not None:
+                        tail = completion.text
+                        tail_tokens = len(completion.token_ids)
+
+            text = sample["text"] + scaffold + tail
+            # include_stop_str_in_output keeps </answer> when the model emitted it
+            # itself; appending unconditionally yields "</answer></answer>", which
+            # the structure check rejects -- the exact failure forcing prevents.
+            if not text.rstrip().endswith("</answer>"):
+                text += "</answer>"
+            sample["text"] = text
+            sample["token_count"] += tail_tokens
+            # The sample is complete now, so downstream truncation handling --
+            # --retry-truncated above all -- must stop treating it as unfinished.
+            # forced_answer is what keeps the fact recoverable.
+            sample["finish_reason"] = "stop"
+            sample["forced_answer"] = True
+
+        await asyncio.gather(*[finish(*t) for t in targets])
+        print(f"Forced an answer for {len(targets)} truncated generation(s)")
+        return len(targets)
 
     async def generate_with_hints_async(
         self,
@@ -1039,6 +1175,8 @@ class AsyncGenerator(_SamplingParams):
         else:
             force_hints_per = force_hints
         any_forcing = any(f > 0 for f in force_hints_per)
+
+        request_tag = _request_tag_for(self.config, request_tag, any_forcing)
 
         if any_forcing:
             return await self._generate_with_hints_async_text_based(

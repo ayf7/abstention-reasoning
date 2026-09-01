@@ -194,6 +194,7 @@ def cmd_generate(args):
         retry_incorrect=args.retry_incorrect,
         retry_truncated=getattr(args, "retry_truncated", False),
         max_retries=getattr(args, "max_retries", 10),
+        answer_budget=getattr(args, "answer_budget", 0),
         seed=getattr(args, "seed", 42),
         multi_turn=args.multi_turn,  # None = use method config
         use_async=getattr(args, "use_async", False),
@@ -450,6 +451,7 @@ def main():
     p.add_argument("--retry-incorrect", action="store_true", help="Re-run incorrect examples from existing output")
     p.add_argument("--retry-truncated", action="store_true", help="Re-run truncated examples (finish_reason=length) with different seeds until all complete")
     p.add_argument("--max-retries", type=int, default=10, help="Max retry iterations for --retry-truncated (default: 10)")
+    p.add_argument("--answer-budget", type=int, default=0, help="Tokens held back to force an answer when a generation runs out of room mid-thought (0 = off, --async only)")
     p.add_argument("--seed", type=int, default=42, help="Starting seed for generation (default: 42)")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput, processes all prompts concurrently)")

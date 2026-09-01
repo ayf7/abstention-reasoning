@@ -1,0 +1,7 @@
+Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once.
+
+You have access to a hint system. Each hint reveals an intermediate expression of the solution. If you get stuck, request a hint.
+
+Do all of your reasoning inside a single <think> </think> block. To request a hint, write <request></request> without leaving the think block.
+The system will respond with a hint in <response>...</response> tags, and you continue reasoning in the same think block.
+When you have the answer, close with </think> and return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>.

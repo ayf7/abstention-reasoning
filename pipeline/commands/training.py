@@ -161,6 +161,8 @@ def train_sft(
             data,
             include_abstained=include_abstained,
             include_wrong_valid_format=include_wrong_valid_format,
+            **({"nested_request": True}
+               if method is not None and method.nested_request else {}),
         )
         # Count categories for logging
         num_correct = sum(1 for ex in filtered_examples if ex.get("correct", False))
@@ -655,6 +657,12 @@ def train_rl(
     if method is not None:
         reward_function_name = method.reward_function
         reward_kwargs = {**method.reward_kwargs}
+        # reward_kwargs is the only channel into the reward function, so a
+        # method flag the scorer needs has to travel on it. nested_request
+        # selects the inline-request grammar; without it the scorer validates
+        # against v1's and marks every rollout malformed.
+        if method.nested_request:
+            reward_kwargs["nested_request"] = True
         allow_hint = method.allow_hint
         interaction_name = method.interaction_name or (f"{task_name}_{method.name}" if method.multi_turn else None)
         max_turns = method.max_turns

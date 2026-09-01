@@ -18,8 +18,8 @@ Needs a GPU; not collected by pytest. It drives the same HintLoop and the same
 _VLLMLoopEngine the trainer uses, so what it measures is the shipped path.
 
     python tests/workers/rollout/bench_hint_loop.py \\
-        --model artifacts/competition_math_v2/hint/models/sft/qwen2.5-3b-up4x/model \\
-        --prompts artifacts/competition_math_v2/hint/prompts/eval.json \\
+        --model artifacts/competition_math/hint_ablations/models/sft/qwen2.5-3b-up4x/model \\
+        --prompts artifacts/competition_math/hint_ablations/prompts/eval.json \\
         --num-prompts 64 --n 8 --nested
 
 Two questions, two modes:

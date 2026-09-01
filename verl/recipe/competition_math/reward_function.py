@@ -117,6 +117,59 @@ def get_num_hints(solution_str: str) -> int:
     return len(responses)
 
 
+def has_malformed_structure_nested(solution_str: str) -> bool:
+    """Validate the tag structure of an inline-request response.
+
+    Used by methods with nested_request: the response starts inside an open
+    <think> block (from the assistant prefix) and stays there until the very
+    end, so </think> is reached exactly once, immediately before the answer.
+
+        ([text]<request></request><response>...</response>)*
+        [text]</think>(<answer>...</answer> | <abstain>)
+
+    A <think> tag anywhere in the response is malformed: the block is never
+    reopened because it is never closed. Contrast has_malformed_structure,
+    where the model leaves the think block to ask and re-enters it.
+
+    Returns:
+        True if the structure is malformed, False if valid.
+    """
+    # <request> tags must be tight (no content inside)
+    if solution_str.count('<request>') != len(re.findall(r'<request></request>', solution_str)):
+        return True
+
+    tag_pattern = r'(</think>|<think>|<request>|</request>|<response>|</response>|<answer>|</answer>|<abstain>)'
+    tags = re.findall(tag_pattern, solution_str)
+
+    if not tags:
+        return True
+
+    i, n = 0, len(tags)
+    while i < n and tags[i] == '<request>':
+        for expected_tag in ('<request>', '</request>', '<response>', '</response>'):
+            if i >= n or tags[i] != expected_tag:
+                return True
+            i += 1
+
+    if i >= n or tags[i] != '</think>':
+        return True
+    i += 1
+
+    if i >= n:
+        return True
+
+    if tags[i] == '<answer>':
+        if i + 1 >= n or tags[i + 1] != '</answer>':
+            return True
+        i += 2
+    elif tags[i] == '<abstain>':
+        i += 1
+    else:
+        return True
+
+    return i != n
+
+
 def compute_score(
     data_source,
     solution_str: str,
@@ -129,6 +182,7 @@ def compute_score(
     penalize_hint: bool = False,
     hint_penalty: float = 0.1,
     hint_bonus: float = 0.0,
+    nested_request: bool = False,
     **kwargs,
 ) -> dict:
     """
@@ -147,6 +201,8 @@ def compute_score(
         hint_penalty: Penalty per hint used (multiplicative)
         hint_bonus: Bonus added to format_score when hints were used and
             answer is wrong but formatted (default 0.0, no bonus)
+        nested_request: Score against the inline-request grammar, where
+            <request> sits inside <think> (default False)
 
     Returns:
         Dict with score and metadata
@@ -164,8 +220,12 @@ def compute_score(
     # hint-usage rate track the malformed rate instead of actual hint use.
     num_hints = get_num_hints(solution_str)
 
-    # Structural validation: verify entire tag sequence is well-formed
-    if has_malformed_structure(solution_str):
+    # Structural validation: verify entire tag sequence is well-formed.
+    # nested_request methods keep the request inside <think>, a different and
+    # incompatible grammar, so the validator is selected rather than patched.
+    validator = (has_malformed_structure_nested if nested_request
+                 else has_malformed_structure)
+    if validator(solution_str):
         if do_print:
             print(f"Malformed structure detected - awarding 0")
         return {
