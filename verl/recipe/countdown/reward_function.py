@@ -1,8 +1,19 @@
 import re
 import random
 import ast
+import importlib.util
 import operator
 from collections import Counter
+from pathlib import Path
+
+# The inline-request grammar is defined once, in verl/recipe/shared, because the
+# SFT filter and this scorer have to agree on what a valid nested response looks
+# like. Loaded by path: recipes are standalone files, not a package.
+_GRAMMAR_PATH = Path(__file__).resolve().parents[1] / "shared" / "nested_grammar.py"
+_spec = importlib.util.spec_from_file_location("nested_grammar", _GRAMMAR_PATH)
+_grammar = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_grammar)
+has_malformed_structure_nested = _grammar.has_malformed_structure_nested
 
 
 def extract_solution(solution_str):
@@ -139,7 +150,7 @@ def has_malformed_structure(solution_str):
     return True  # Ran out of tags without proper termination
 
 
-def compute_score(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., reward_abstain=False, abstention_score=0.3, penalize_hint=False, hint_penalty=0.2, hint_bonus=0.0, **kwargs):
+def compute_score(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., reward_abstain=False, abstention_score=0.3, penalize_hint=False, hint_penalty=0.2, hint_bonus=0.0, nested_request=False, **kwargs):
     """The scoring function for countdown
     """
     #format_score = 0
@@ -158,8 +169,12 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
         print(f"Extracted equation: {equation}")
         print(f"Solution string: {solution_str}")
 
-    # Structural validation: verify entire tag sequence is well-formed
-    if has_malformed_structure(solution_str):
+    # Structural validation: verify entire tag sequence is well-formed.
+    # nested_request methods keep the request inside <think>, a different and
+    # incompatible grammar, so the validator is selected rather than patched.
+    validator = (has_malformed_structure_nested if nested_request
+                 else has_malformed_structure)
+    if validator(solution_str):
         if do_print:
             print(f"Malformed structure detected - awarding 0")
         return {"score": 0, "score_wo_hint_penalty": 0, "num_hints": 0, "abstained": False, "malformed": True, "correct": False}

@@ -83,6 +83,30 @@ def extract_generation_hints(text: str) -> list[str]:
     return hints
 
 
+def classify_truncation(record: dict) -> str | None:
+    """Which stage the token budget cut off, or None if it did not.
+
+    - "think": ran out before </think>. Benign -- RL rollouts (and generate
+      with --answer-budget) close the block and force a short answer, so only
+      the reasoning is cut. Without forcing the sample is still malformed.
+    - "answer": the answer itself is cut. Ran out after </think>, or the
+      forced answer also ran out and the closing tag was appended. Nothing
+      downstream repairs this.
+    """
+    if record.get("answer_truncated"):
+        return "answer"
+    if record.get("forced_answer"):
+        return "think"
+    if record.get("finish_reason") != "length":
+        return None
+    return "answer" if "</think>" in record.get("generation", "") else "think"
+
+
+def count_truncation(records: list[dict]) -> dict[str, int]:
+    kinds = [classify_truncation(r) for r in records]
+    return {"think": kinds.count("think"), "answer": kinds.count("answer")}
+
+
 def compute_hint_metrics(details: list[dict]) -> dict:
     """
     Compute hint usage metrics for multi-turn evaluation.
@@ -459,6 +483,7 @@ def generate(
     retry_incorrect: bool = False,
     retry_truncated: bool = False,
     max_retries: int = 10,
+    answer_budget: int = 0,
     seed: int | None = 42,
     multi_turn: bool | None = None,
     use_async: bool = False,
@@ -481,6 +506,10 @@ def generate(
         output_path: Where to save dataset (default: artifacts/{task}/{method}/datasets/{split}_{model}.json)
         split: Which split to generate from (default: sft)
         retry_incorrect: If True, re-run incorrect examples
+        answer_budget: Tokens held back for a forced answer. A generation that runs
+            out of room mid-thought gets </think> closed for it and this many tokens
+            to answer in, matching what RL does at rollout time. 0 disables forcing.
+            Async single-turn generation only.
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
         use_async: Use async generation for optimal throughput.
         force_hints_distribution: Distribution of forced hint counts. Maps number of hints
@@ -551,6 +580,9 @@ def generate(
         verbose=verbose,
         stop_strings=stop_strings,
         seed=seed,
+        hint_transition=method.hint_transition if method else True,
+        nested_request=method.nested_request if method else False,
+        answer_budget=answer_budget,
     )
     generator = Generator(config)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -780,6 +812,8 @@ def generate(
                             "token_count": best_sample["token_count"],
                             "metadata": best_sample["metadata"],
                             "extracted_hints": extract_generation_hints(best_sample["text"]),
+                            "forced_answer": best_sample.get("forced_answer", False),
+                            "answer_truncated": best_sample.get("answer_truncated", False),
                         }
 
                         records_by_index[prompt_data["index"]] = record
@@ -789,7 +823,11 @@ def generate(
 
                     correct = sum(1 for r in records if r["correct"])
                     truncated_count = sum(1 for r in records if r.get("finish_reason") == "length")
-                    print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%), {truncated_count} truncated")
+                    forced_count = sum(1 for r in records if r.get("forced_answer"))
+                    forced_note = f", {forced_count} forced" if forced_count else ""
+                    trunc = count_truncation(records)
+                    print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%), "
+                          f"{trunc['think']} think-truncated, {trunc['answer']} answer-truncated{forced_note}")
                     _print_verify_metrics(records)
                     print(f"Saved dataset to {output_path}")
 
@@ -998,6 +1036,7 @@ def evaluate(
     multi_turn: bool | None = None,
     use_async: bool = False,
     seed: int | None = 42,
+    no_hints: bool = False,
 ) -> Path:
     """
     Evaluate a model on prompts and compute metrics.
@@ -1011,6 +1050,9 @@ def evaluate(
         output_path: Where to save results (default: artifacts/{task}/{method}/results/eval_{model}.json)
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
         use_async: Use async generation for optimal throughput.
+        no_hints: Counterfactual eval -- ban the hint request so the model must
+            answer on its own. Everything else about the eval is unchanged, so
+            the drop against a normal run measures what the hints were worth.
         ... generation config ...
 
     Returns:
@@ -1058,7 +1100,8 @@ def evaluate(
         from pipeline.core.method import model_short_name
         model_slug = model_short_name(output_model_name)
         samples_suffix = f"_{num_samples}s" if num_samples > 1 else ""
-        output_path = method.results_dir(task_name) / f"{split}_{model_slug}{samples_suffix}.json"
+        hint_suffix = "_nohint" if no_hints else ""
+        output_path = method.results_dir(task_name) / f"{split}_{model_slug}{samples_suffix}{hint_suffix}.json"
 
     # Load prompts
     prompts_data = load_json(prompts_path)
@@ -1078,6 +1121,8 @@ def evaluate(
         verbose=verbose,
         seed=seed,
         stop_strings=stop_strings,
+        nested_request=method.nested_request if method else False,
+        ban_hint_requests=no_hints,
     )
     generator = Generator(config)
 
@@ -1091,6 +1136,8 @@ def evaluate(
         print("Async mode enabled (optimal throughput)")
     if multi_turn:
         print("Multi-turn mode enabled")
+    if no_hints:
+        print("Counterfactual mode: hint requests are blocked during decoding")
 
     # Async multi-turn generation
     if multi_turn and use_async:
@@ -1163,6 +1210,52 @@ def evaluate(
             print(f"Batch {batch_idx + 1}/{total_batches} complete")
 
         generations = generator.generate_batched(prompts, callback=progress_callback)
+
+    # The ban has two layers and this reports on both. The sampler suppresses the
+    # "request" token, which is best-effort -- bad_words bans a token id and BPE
+    # can spell the string another way. The guarantee is upstream of that: with
+    # ban_hint_requests set the generator swaps in an unmatchable request tag, so
+    # no tag the model writes can make the environment serve a hint. Emitting
+    # <request> is therefore a failed attempt, not a leak, and the rate is worth
+    # logging next to the accuracy it produced rather than aborting over.
+    if no_hints:
+        import re as _re
+
+        def _texts(items):
+            """Every generated string in `generations`, whatever shape it came in.
+
+            The shape depends on the mode: bare strings, a list of samples per
+            prompt, or the {"text": ...} sample dicts the async paths return.
+            Reading the wrong one is not a loud failure -- `"<tag>" in some_dict`
+            tests keys and quietly answers False -- so this walks all three.
+            """
+            out = []
+            for item in items:
+                if isinstance(item, str):
+                    out.append(item)
+                elif isinstance(item, dict):
+                    if isinstance(item.get("text"), str):
+                        out.append(item["text"])
+                elif isinstance(item, (list, tuple)):
+                    out.extend(_texts(item))
+            return out
+
+        flat = _texts(generations)
+        if not flat:
+            raise RuntimeError(
+                "--no-hints could not read any generation text, so the ban is unverified"
+            )
+        # Blocked from asking, some models write a request-shaped tag anyway and
+        # then answer their own <response>. Nothing is served back, so the run
+        # stays hint-free -- but the model is now reading text it invented, and
+        # that rate belongs in the log beside the accuracy it produced.
+        asked = sum(1 for g in flat if "</request>" in g)
+        near_miss = sum(1 for g in flat if _re.search(r"<[^<>]*request[^<>]*>", g))
+        fabricated = sum(1 for g in flat if "<response>" in g)
+        print(f"Hint ban held: 0/{len(flat)} generations were served a hint"
+              + (f"; {asked} reached </request> anyway" if asked else "")
+              + (f"; {near_miss} wrote a request-shaped tag" if near_miss else "")
+              + (f"; {fabricated} invented their own <response>" if fabricated else ""))
 
     # --- Multi-sample path (num_samples > 1) ---
     if num_samples > 1:
@@ -1251,12 +1344,16 @@ def evaluate(
             "correct": is_correct,
             "finish_reason": finish_reason,
             "token_count": token_count,
+            "forced_answer": gen_result.get("forced_answer", False),
+            "answer_truncated": gen_result.get("answer_truncated", False),
             "generation": gen_result["text"],
             "predicted_answer": meta.get("predicted_answer"),
             "ground_truth": prompt_data["ground_truth"],
             "error": meta.get("error"),
             **{k: v for k, v in meta.items() if k not in ("predicted_answer", "error")},
         }
+
+        detail["truncation"] = classify_truncation(detail)
 
         # Add multi-turn specific fields
         if "num_hints" in gen_result:
@@ -1272,6 +1369,7 @@ def evaluate(
 
     # Compute metrics using task-specific logic
     metrics = task.compute_metrics(details)
+    metrics["truncation"] = count_truncation(details)
 
     # Compute hint metrics if multi-turn
     hint_metrics = None
@@ -1301,6 +1399,9 @@ def evaluate(
 
     # Print summary using task-specific formatting
     print(task.format_metrics(metrics, model_name))
+    trunc = metrics["truncation"]
+    print(f"Truncated: {trunc['think']} in think (benign, forced-answer rescuable), "
+          f"{trunc['answer']} in answer (malignant) of {len(details)}")
 
     # Print hint analysis if multi-turn
     if hint_metrics:

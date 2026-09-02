@@ -1,9 +1,21 @@
 """Countdown task implementation."""
 
+import importlib.util
 import re
+from pathlib import Path
 
 from pipeline.tasks.base import BaseTask
 from pipeline.core.utils import safe_eval
+
+# The nested tag grammar is defined once, in verl/recipe/shared, so the SFT
+# filter below and the reward function verl scores rollouts with cannot drift
+# apart. Loaded by path because recipes are standalone files, not a package.
+_GRAMMAR_PATH = (Path(__file__).resolve().parents[3]
+                 / "verl" / "recipe" / "shared" / "nested_grammar.py")
+_spec = importlib.util.spec_from_file_location("nested_grammar", _GRAMMAR_PATH)
+_grammar = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_grammar)
+_has_malformed_structure_nested = _grammar.has_malformed_structure_nested
 
 
 class CountdownTask(BaseTask):
@@ -213,6 +225,54 @@ class CountdownTask(BaseTask):
                 "predicted_answer": answer,
                 "error": str(e),
             }
+
+    def filter_for_sft(
+        self,
+        examples: list[dict],
+        include_abstained: bool = True,
+        include_wrong_valid_format: bool = False,
+        nested_request: bool = False,
+    ) -> list[dict]:
+        """
+        Filter examples for SFT training.
+
+        When include_wrong_valid_format is True, includes incorrect examples
+        that used hints and gave an answer — valuable for teaching the hint
+        request/response protocol.
+
+        nested_request additionally drops generations that are correct but do
+        not match the inline-request grammar. check_correctness only parses the
+        <answer> expression, so it says nothing about tag structure: in the 14B
+        run it kept 156 of 1106 correct generations that closed </think> before
+        requesting a hint. Countdown produces far more of these than math does
+        (39% of asking generations against 2%) — its ask moment is a give-up
+        point in a long search, where the habit of ending reasoning with
+        </think> fires — so training on them would teach back the very pattern
+        the nested format exists to remove.
+        """
+        def is_abstained(ex):
+            return (ex.get("abstained", False)
+                    or ex.get("metadata", {}).get("abstained", False)
+                    or "</think>\n\n<abstain>" in ex.get("generation", ""))
+
+        def has_hints_and_answer(ex):
+            gen = ex.get("generation", "")
+            return "<request></request>" in gen and "<answer>" in gen
+
+        filtered = []
+        for ex in examples:
+            if ex.get("correct", False):
+                filtered.append(ex)
+            elif include_abstained and is_abstained(ex):
+                filtered.append(ex)
+            elif include_wrong_valid_format and has_hints_and_answer(ex):
+                filtered.append(ex)
+
+        if nested_request:
+            filtered = [ex for ex in filtered
+                        if not _has_malformed_structure_nested(ex.get("generation", ""))]
+
+        return filtered
 
     def _categorize_result(self, r: dict) -> str:
         """Categorize a single result into one of: correct, abstained, incomplete, wrong.

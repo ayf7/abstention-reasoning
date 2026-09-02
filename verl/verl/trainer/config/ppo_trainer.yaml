@@ -393,7 +393,24 @@ actor_rollout_ref:
 
     allow_hint: ${allow_hint}
 
-    # sync: LLM, async: AsyncLLM, async_agentic: AsyncLLM with independent multi-turn tasks
+    # Decode budget for the model's own tokens in the agentic loop. null falls
+    # back to response_length (the previous behaviour). Injected hint text is
+    # not charged against this, but does still occupy the response tensor, so
+    # response_length must cover think_budget + answer_budget + hint text.
+    think_budget: null
+
+    # Tokens held back from think_budget and spent only on a forced answer when
+    # a rollout runs out of thinking room. 0 disables forcing, in which case a
+    # truncated rollout is scored as malformed exactly as before.
+    answer_budget: 0
+
+    # Schedule hint turns continuously instead of round by round. Same turn
+    # rules either way; the round driver waits for every rollout to finish its
+    # turn before starting the next, so the batch drains as rollouts complete
+    # and the GPU idles. Set false to get that round-synchronized driver back.
+    continuous_hints: true
+
+    # sync: LLM, async: AsyncLLM
     mode: sync
 
     # Sampling temperature for rollout.

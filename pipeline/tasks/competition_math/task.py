@@ -8,9 +8,22 @@ Dataset: https://huggingface.co/datasets/qwedsacf/competition_math
 Hints come from each primitive's prefix_hints (6-hint progressive system).
 """
 
+import importlib.util
 import re
+from pathlib import Path
 
 from pipeline.tasks.base import BaseTask
+
+# The nested tag grammar is defined once, in the reward function verl scores
+# rollouts with. Loading it here keeps SFT filtering and RL scoring from
+# drifting apart; it is loaded by path because the recipe is a standalone file,
+# not a package.
+_REWARD_PATH = (Path(__file__).resolve().parents[3]
+                / "verl" / "recipe" / "competition_math" / "reward_function.py")
+_spec = importlib.util.spec_from_file_location("competition_math_reward", _REWARD_PATH)
+_reward = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_reward)
+_has_malformed_structure_nested = _reward.has_malformed_structure_nested
 
 
 class CompetitionMathTask(BaseTask):
@@ -383,6 +396,7 @@ class CompetitionMathTask(BaseTask):
         examples: list[dict],
         include_abstained: bool = True,
         include_wrong_valid_format: bool = False,
+        nested_request: bool = False,
     ) -> list[dict]:
         """
         Filter examples for SFT training.
@@ -390,6 +404,14 @@ class CompetitionMathTask(BaseTask):
         When include_wrong_valid_format is True, includes incorrect examples
         that used hints and gave an answer — valuable for teaching the hint
         request/response protocol.
+
+        nested_request additionally drops generations that are correct but do
+        not match the inline-request grammar. Correctness alone is too weak a
+        filter there: in the full 14B run it let through 20 structurally
+        invalid generations, 4 of which closed </think> before requesting.
+        Training on those teaches back the very pattern the nested format
+        exists to remove, and a handful of examples is enough for the model to
+        learn that </think> is a legal place to stop and ask.
         """
         def is_abstained(ex):
             return (ex.get("abstained", False)
@@ -408,6 +430,10 @@ class CompetitionMathTask(BaseTask):
                 filtered.append(ex)
             elif include_wrong_valid_format and has_hints_and_answer(ex):
                 filtered.append(ex)
+
+        if nested_request:
+            filtered = [ex for ex in filtered
+                        if not _has_malformed_structure_nested(ex.get("generation", ""))]
 
         return filtered
 

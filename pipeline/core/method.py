@@ -1,6 +1,7 @@
 """Method configuration - bundles template variant + reward function + artifact paths."""
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,7 @@ class Method:
     - reward_function: Name of reward function for RL training
     - reward_kwargs: Additional arguments for reward function
     - multi_turn: Enable multi-turn hint generation in RL (default: False)
+    - deprecated: Retired method, kept loadable so old results stay reproducible
     - assistant_prefix: Prefix for assistant responses (used in SFT and RL)
     - mask_response_tokens: Mask <response>...</response> tokens during SFT (default: False)
 
@@ -66,6 +68,15 @@ class Method:
     max_hints: int | None = None  # Maximum number of hints to give during RL rollout (None = unlimited)
     reward_manager: str = "naive"  # Reward manager type: "naive" or "batch"
     stop_strings: list[str] | None = None  # Custom stop strings for generation (None = default)
+    hint_transition: bool = True  # Splice a canned "I'm stuck..." phrase before each
+                                  # forced hint request during SFT data generation. False
+                                  # cuts the CoT silently instead, so nothing before
+                                  # <request></request> telegraphs the request.
+    nested_request: bool = False  # Keep <request></request> inside the <think> block
+                                  # instead of after it, so </think> stays the single
+                                  # irreversible commit point right before <answer>.
+    deprecated: bool = False  # Retired method: loadable for reproducing old results, not for new work
+    deprecated_note: str | None = None  # Why it was retired / what replaced it
 
     # Backwards compatibility alias
     @property
@@ -108,6 +119,14 @@ class Method:
         with open(config_path) as f:
             data = yaml.safe_load(f)
 
+        if data.get("deprecated", False):
+            note = data.get("deprecated_note")
+            print(
+                f"warning: method '{data.get('name', name_or_path)}' ({task_name}) is deprecated"
+                + (f" - {note}" if note else ""),
+                file=sys.stderr,
+            )
+
         return cls(
             name=data.get("name", name_or_path),
             template_variant=data["template_variant"],
@@ -121,15 +140,41 @@ class Method:
             max_hints=data.get("max_hints"),
             reward_manager=data.get("reward_manager", "naive"),
             stop_strings=data.get("stop_strings"),
+            hint_transition=data.get("hint_transition", True),
+            nested_request=data.get("nested_request", False),
+            deprecated=data.get("deprecated", False),
+            deprecated_note=data.get("deprecated_note"),
         )
 
     @staticmethod
-    def list_methods(task_name: str) -> list[str]:
-        """List available methods for a task."""
+    def list_methods(task_name: str, include_deprecated: bool = True) -> list[str]:
+        """List available methods for a task, deprecated ones included by default."""
         methods_dir = CONFIGS_ROOT / task_name
         if not methods_dir.exists():
             return []
-        return [p.stem for p in methods_dir.glob("*.yaml")]
+        names = sorted(p.stem for p in methods_dir.glob("*.yaml"))
+        if include_deprecated:
+            return names
+        status = Method.method_status(task_name)
+        return [n for n in names if not status[n][0]]
+
+    @staticmethod
+    def method_status(task_name: str) -> dict[str, tuple[bool, str | None]]:
+        """Map method name -> (deprecated, note), read straight from the YAML.
+
+        Reads the configs directly rather than going through load() so that
+        listing methods does not emit a deprecation warning for every retired
+        config it enumerates.
+        """
+        methods_dir = CONFIGS_ROOT / task_name
+        if not methods_dir.exists():
+            return {}
+        out: dict[str, tuple[bool, str | None]] = {}
+        for path in sorted(methods_dir.glob("*.yaml")):
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+            out[path.stem] = (data.get("deprecated", False), data.get("deprecated_note"))
+        return out
 
     def get_template_path(self, task_name: str, split: str) -> Path:
         """Get the template path for a given split."""
@@ -190,8 +235,26 @@ class Method:
         Returns:
             Path to the run directory.
         """
-        # Already exists (real dir or symlink) -> leave as-is
-        if run_dir.exists() or run_dir.is_symlink():
+        # A convenience alias (models/rl/qwen3-4b -> qwen3-4b-g8) names a sibling
+        # run in the same directory, so the canonical size names resolve without
+        # renaming anything. Training through one would write into the run it
+        # points at and destroy it. Such aliases are relative and have no "/";
+        # the external-storage links created below and the artifacts_legacy
+        # links are absolute and remain valid resume targets.
+        if run_dir.is_symlink():
+            target = os.readlink(run_dir)
+            if "/" not in target:
+                raise FileExistsError(
+                    f"'{run_dir.name}' is a convenience symlink to sibling run "
+                    f"'{target}', not a run directory of its own. Training here "
+                    f"would overwrite that run.\n"
+                    f"  Use --run-id {target} to train or resume it, "
+                    f"or pick a new run id."
+                )
+            return run_dir
+
+        # Already exists -> leave as-is
+        if run_dir.exists():
             return run_dir
 
         # External storage configured -> create symlink

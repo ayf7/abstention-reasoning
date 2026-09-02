@@ -1,0 +1,8 @@
+Solve this math problem.
+
+{problem}
+
+You have access to a hint system. You can request up to 6 progressive hints. Each hint reveals more of the solution approach. If you get stuck, request a hint.
+
+Do all of your reasoning inside a single <think> </think> block. To request a hint, write <request></request> without leaving the think block.
+The system will respond with a hint in <response>...</response> tags, and you continue reasoning in the same think block.

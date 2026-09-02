@@ -21,7 +21,6 @@ _EXPORTS = {
     "Method": "method",
     "get_primitives_path": "method",
     "ARTIFACTS_ROOT": "method",
-    "DataCollatorForHintInterleavedLM": "collators",
 }
 
 __all__ = list(_EXPORTS)
@@ -31,7 +30,6 @@ if TYPE_CHECKING:  # keep static analysis and editors working
     from .utils import extract_answer, extract_think, safe_eval, model_short_name, tokenize_with_response_mask
     from .generator import Generator, GenerationConfig
     from .method import Method, get_primitives_path, ARTIFACTS_ROOT
-    from .collators import DataCollatorForHintInterleavedLM
 
 
 def __getattr__(name: str):

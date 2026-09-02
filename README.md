@@ -174,7 +174,7 @@ pipeline/
 ├── __main__.py              # CLI entrypoint
 ├── commands/                # data, inference, training
 ├── configs/methods/{task}/  # method configs
-├── core/                    # io, generator (vLLM), method paths, collators
+├── core/                    # io, generator (vLLM), method paths
 └── tasks/{task}/            # task class + prompt templates
 verl/                        # modified verl trainer + reward functions
 ```

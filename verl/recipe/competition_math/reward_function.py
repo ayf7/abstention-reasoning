@@ -117,6 +117,84 @@ def get_num_hints(solution_str: str) -> int:
     return len(responses)
 
 
+# What the rollout loop answers a request with once the hints are used up
+# (verl/verl/workers/rollout/hint_loop.py). Kept literal here because this
+# module is loaded by file path and must not import from verl.
+NO_MORE_HINTS = "No more hints available."
+
+
+def get_num_exhausted_requests(solution_str: str) -> int:
+    """Count requests made after the hints ran out."""
+    responses = re.findall(r'<response>(.*?)</response>', solution_str, re.DOTALL)
+    return sum(r.strip() == NO_MORE_HINTS for r in responses)
+
+
+def apply_exhausted_penalty(
+    score: float,
+    num_exhausted: int,
+    exhausted_penalty: float,
+    max_exhausted_requests: int | None,
+) -> float:
+    """Charge exhausted_penalty per request made after the hints ran out;
+    more than max_exhausted_requests of them scores 0."""
+    if max_exhausted_requests is not None and num_exhausted > max_exhausted_requests:
+        return 0
+    return max(score - exhausted_penalty * num_exhausted, 0)
+
+
+def has_malformed_structure_nested(solution_str: str) -> bool:
+    """Validate the tag structure of an inline-request response.
+
+    Used by methods with nested_request: the response starts inside an open
+    <think> block (from the assistant prefix) and stays there until the very
+    end, so </think> is reached exactly once, immediately before the answer.
+
+        ([text]<request></request><response>...</response>)*
+        [text]</think>(<answer>...</answer> | <abstain>)
+
+    A <think> tag anywhere in the response is malformed: the block is never
+    reopened because it is never closed. Contrast has_malformed_structure,
+    where the model leaves the think block to ask and re-enters it.
+
+    Returns:
+        True if the structure is malformed, False if valid.
+    """
+    # <request> tags must be tight (no content inside)
+    if solution_str.count('<request>') != len(re.findall(r'<request></request>', solution_str)):
+        return True
+
+    tag_pattern = r'(</think>|<think>|<request>|</request>|<response>|</response>|<answer>|</answer>|<abstain>)'
+    tags = re.findall(tag_pattern, solution_str)
+
+    if not tags:
+        return True
+
+    i, n = 0, len(tags)
+    while i < n and tags[i] == '<request>':
+        for expected_tag in ('<request>', '</request>', '<response>', '</response>'):
+            if i >= n or tags[i] != expected_tag:
+                return True
+            i += 1
+
+    if i >= n or tags[i] != '</think>':
+        return True
+    i += 1
+
+    if i >= n:
+        return True
+
+    if tags[i] == '<answer>':
+        if i + 1 >= n or tags[i + 1] != '</answer>':
+            return True
+        i += 2
+    elif tags[i] == '<abstain>':
+        i += 1
+    else:
+        return True
+
+    return i != n
+
+
 def compute_score(
     data_source,
     solution_str: str,
@@ -129,6 +207,9 @@ def compute_score(
     penalize_hint: bool = False,
     hint_penalty: float = 0.1,
     hint_bonus: float = 0.0,
+    nested_request: bool = False,
+    exhausted_penalty: float = 0.0,
+    max_exhausted_requests: int | None = None,
     **kwargs,
 ) -> dict:
     """
@@ -147,6 +228,12 @@ def compute_score(
         hint_penalty: Penalty per hint used (multiplicative)
         hint_bonus: Bonus added to format_score when hints were used and
             answer is wrong but formatted (default 0.0, no bonus)
+        nested_request: Score against the inline-request grammar, where
+            <request> sits inside <think> (default False)
+        exhausted_penalty: Subtracted from the score for each request made
+            after the hints ran out, independent of hint_penalty (default 0.0)
+        max_exhausted_requests: More exhausted requests than this scores 0
+            (default None, no limit)
 
     Returns:
         Dict with score and metadata
@@ -159,20 +246,30 @@ def compute_score(
         print(f"Correct answer: {correct_answer}")
         print(f"Solution: {solution_str[:500]}...")
 
-    # Structural validation: verify entire tag sequence is well-formed
-    if has_malformed_structure(solution_str):
+    # Counted before the malformed check: a truncated rollout still consumed
+    # whatever hints it was given, and reporting 0 for it makes the logged
+    # hint-usage rate track the malformed rate instead of actual hint use.
+    num_hints = get_num_hints(solution_str)
+    num_exhausted = get_num_exhausted_requests(solution_str)
+    hints_used = num_hints - num_exhausted
+
+    # Structural validation: verify entire tag sequence is well-formed.
+    # nested_request methods keep the request inside <think>, a different and
+    # incompatible grammar, so the validator is selected rather than patched.
+    validator = (has_malformed_structure_nested if nested_request
+                 else has_malformed_structure)
+    if validator(solution_str):
         if do_print:
             print(f"Malformed structure detected - awarding 0")
         return {
             "score": 0,
             "score_wo_hint_penalty": 0,
-            "num_hints": 0,
+            "num_hints": num_hints,
+            "num_exhausted": num_exhausted,
             "abstained": False,
             "correct": False,
             "malformed": True,
         }
-
-    num_hints = get_num_hints(solution_str)
 
     # Check for abstention first (always detect, but only assign
     # abstention_score when reward_abstain is True)
@@ -184,6 +281,7 @@ def compute_score(
             "score": abs_score,
             "score_wo_hint_penalty": abs_score,
             "num_hints": num_hints,
+            "num_exhausted": num_exhausted,
             "abstained": True,
             "correct": False,
             "malformed": False,
@@ -199,6 +297,7 @@ def compute_score(
             "score": 0,
             "score_wo_hint_penalty": 0,
             "num_hints": num_hints,
+            "num_exhausted": num_exhausted,
             "abstained": False,
             "correct": False,
             "malformed": True,
@@ -211,33 +310,35 @@ def compute_score(
         if do_print:
             print(f"Correct! Predicted: {predicted}")
         base_score = score
-        if penalize_hint and num_hints > 0:
-            penalized_hints = min(num_hints, 5)
-            final_score = base_score * (1 - hint_penalty * penalized_hints)
-            final_score = max(final_score, 0)  # Don't go negative
-        else:
-            final_score = base_score
+        final_score = base_score
+        if penalize_hint:
+            final_score = max(base_score * (1 - hint_penalty * hints_used), 0)
+        final_score = apply_exhausted_penalty(
+            final_score, num_exhausted, exhausted_penalty, max_exhausted_requests)
         return {
             "score": final_score,
             "score_wo_hint_penalty": base_score,
             "num_hints": num_hints,
+            "num_exhausted": num_exhausted,
             "abstained": False,
             "correct": True,
             "malformed": False,
         }
     else:
         final_format_score = format_score
-        if hint_bonus > 0 and num_hints > 0:
-            penalized_hints = min(num_hints, 5)
-            final_format_score = format_score + hint_bonus * penalized_hints
+        if hint_bonus > 0:
+            final_format_score = format_score + hint_bonus * hints_used
+        final_score = apply_exhausted_penalty(
+            final_format_score, num_exhausted, exhausted_penalty, max_exhausted_requests)
         if do_print:
             print(f"Wrong. Predicted: {predicted}, Expected: {correct_answer}")
-            if hint_bonus > 0 and num_hints > 0:
-                print(f"  Hint bonus applied: {format_score} + {hint_bonus}*{num_hints} = {final_format_score}")
+            if hint_bonus > 0:
+                print(f"  Hint bonus applied: {format_score} + {hint_bonus}*{hints_used} = {final_format_score}")
         return {
-            "score": final_format_score,
+            "score": final_score,
             "score_wo_hint_penalty": final_format_score,
             "num_hints": num_hints,
+            "num_exhausted": num_exhausted,
             "abstained": False,
             "correct": False,
             "malformed": False,

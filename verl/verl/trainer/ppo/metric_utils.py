@@ -110,8 +110,17 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     abstained = None
     committed = None
     malformed = None
+    forced_answer = None
+    think_truncated = None
+    answer_truncated = None
+    if "think_truncated" in batch.non_tensor_batch:
+        think_truncated = batch.non_tensor_batch["think_truncated"]
+    if "answer_truncated" in batch.non_tensor_batch:
+        answer_truncated = batch.non_tensor_batch["answer_truncated"]
     if "num_hints" in batch.non_tensor_batch:
         num_hints = batch.non_tensor_batch["num_hints"]
+    if "forced_answer" in batch.non_tensor_batch:
+        forced_answer = batch.non_tensor_batch["forced_answer"]
     if "correct" in batch.non_tensor_batch:
         correct = batch.non_tensor_batch["correct"]
     if "abstained" in batch.non_tensor_batch:
@@ -223,6 +232,47 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         mask_6plus = (num_hints_arr >= 6)
         if mask_6plus.sum() > 0:
             metrics["rollout/num_hints/6plus_reward_avg"] = float(seq_reward_np[mask_6plus].mean())
+
+    # Outcomes split by whether the rollout asked for a hint. Aggregate accuracy
+    # cannot show whether hint-seeking is being rewarded or punished, which is
+    # the whole question these runs exist to answer; splitting it can.
+    if num_hints is not None and correct is not None and total_samples > 0:
+        used = np.array(num_hints, dtype=np.int64) > 0
+        correct_arr = np.array(correct, dtype=bool)
+        metrics["rollout/hint_split/pct_used"] = float(used.mean())
+        for label, mask in (("with_hint", used), ("no_hint", ~used)):
+            if mask.sum() > 0:
+                metrics[f"rollout/hint_split/acc_{label}"] = float(correct_arr[mask].mean())
+                metrics[f"rollout/hint_split/n_{label}"] = int(mask.sum())
+        if malformed is not None:
+            malformed_arr = np.array(malformed, dtype=bool)
+            for label, mask in (("with_hint", used), ("no_hint", ~used)):
+                if mask.sum() > 0:
+                    metrics[f"rollout/hint_split/malformed_{label}"] = float(malformed_arr[mask].mean())
+
+    # How often the response budget ran out and an answer had to be forced.
+    if forced_answer is not None:
+        forced_arr = np.array(forced_answer, dtype=np.float64)
+        if len(forced_arr) > 0:
+            metrics["rollout/forced_answer/rate"] = float(forced_arr.mean())
+            if correct is not None:
+                forced_mask = forced_arr > 0
+                if forced_mask.sum() > 0:
+                    metrics["rollout/forced_answer/acc"] = float(
+                        np.array(correct, dtype=bool)[forced_mask].mean()
+                    )
+
+    # Where the budget ran out. think: rescued by a forced answer that closed
+    # on its own (benign). answer: the answer itself is cut (malignant).
+    for label, flags in (("think", think_truncated), ("answer", answer_truncated)):
+        if flags is None or len(flags) == 0:
+            continue
+        arr = np.array(flags, dtype=np.float64)
+        metrics[f"rollout/truncation/{label}_rate"] = float(arr.mean())
+        if correct is not None and (arr > 0).sum() > 0:
+            metrics[f"rollout/truncation/{label}_acc"] = float(
+                np.array(correct, dtype=bool)[arr > 0].mean()
+            )
 
     # Accuracy metrics (overall and by hint count)
     if correct is not None:

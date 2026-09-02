@@ -60,15 +60,24 @@ def cmd_list_tasks(args):
 
 
 def cmd_list_methods(args):
-    """List available methods for a task."""
-    methods = Method.list_methods(args.task)
-    if methods:
-        print(f"Available methods for '{args.task}':")
-        for method in methods:
-            print(f"  - {method}")
-    else:
+    """List available methods for a task, separating active from deprecated."""
+    status = Method.method_status(args.task)
+    if not status:
         print(f"No methods found for task '{args.task}'")
         print(f"Create method configs in: pipeline/configs/methods/{args.task}/")
+        return
+
+    active = [n for n, (dep, _) in status.items() if not dep]
+    retired = [(n, note) for n, (dep, note) in status.items() if dep]
+
+    print(f"Available methods for '{args.task}':")
+    for name in active:
+        print(f"  - {name}")
+
+    if retired and not args.no_deprecated:
+        print(f"\nDeprecated (still loadable, for reproducing old results):")
+        for name, note in retired:
+            print(f"  - {name}" + (f"  ({note})" if note else ""))
 
 
 def cmd_create_primitives(args):
@@ -185,6 +194,7 @@ def cmd_generate(args):
         retry_incorrect=args.retry_incorrect,
         retry_truncated=getattr(args, "retry_truncated", False),
         max_retries=getattr(args, "max_retries", 10),
+        answer_budget=getattr(args, "answer_budget", 0),
         seed=getattr(args, "seed", 42),
         multi_turn=args.multi_turn,  # None = use method config
         use_async=getattr(args, "use_async", False),
@@ -218,6 +228,7 @@ def cmd_evaluate(args):
         multi_turn=args.multi_turn,  # None = use method config
         use_async=getattr(args, "use_async", False),
         seed=args.seed,
+        no_hints=args.no_hints,
     )
 
 
@@ -271,6 +282,7 @@ def cmd_train_sft(args):
         upsample_hint=args.upsample_hint,
         max_correct=args.max_correct,
         upsample_abstain=args.upsample_abstain,
+        completion_only_loss=args.completion_only_loss,
     )
 
 
@@ -327,7 +339,13 @@ def cmd_train_rl(args):
         cleanup_checkpoints=not args.keep_checkpoints,
         keep_state=args.keep_state,
         reward_kwargs_overrides=reward_kwargs_overrides,
+        extra_overrides=args.override,
         shuffle_seed=args.shuffle_seed,
+        overwrite=args.overwrite,
+        continue_run=args.continue_run,
+        save_best=args.save_best,
+        best_metric=args.best_metric,
+        max_ckpt_to_keep=args.max_ckpt_to_keep,
     )
 
 
@@ -355,6 +373,7 @@ def main():
 
     # list_methods
     p = subparsers.add_parser("list_methods", help="List available methods for a task")
+    p.add_argument("--no-deprecated", action="store_true", help="Hide deprecated methods")
     p.add_argument("--task", required=True, help="Task name")
     p.set_defaults(func=cmd_list_methods)
 
@@ -433,6 +452,7 @@ def main():
     p.add_argument("--retry-incorrect", action="store_true", help="Re-run incorrect examples from existing output")
     p.add_argument("--retry-truncated", action="store_true", help="Re-run truncated examples (finish_reason=length) with different seeds until all complete")
     p.add_argument("--max-retries", type=int, default=10, help="Max retry iterations for --retry-truncated (default: 10)")
+    p.add_argument("--answer-budget", type=int, default=0, help="Tokens held back to force an answer when a generation runs out of room mid-thought (0 = off, --async only)")
     p.add_argument("--seed", type=int, default=42, help="Starting seed for generation (default: 42)")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput, processes all prompts concurrently)")
@@ -465,6 +485,7 @@ def main():
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput)")
     p.add_argument("--seed", type=int, default=42, help="Random seed for generation (default: 42)")
+    p.add_argument("--no-hints", action="store_true", help="Counterfactual eval: block hint requests during decoding so the model must answer alone")
     p.set_defaults(func=cmd_evaluate)
 
     # analyze
@@ -502,6 +523,7 @@ def main():
     p.add_argument("--include-wrong-valid-format", action="store_true", help="Include wrong answers with valid format (task-specific, e.g., valid UCI but wrong move for chess)")
     p.add_argument("--upsample-hint", type=int, default=1, help="Upsample hint-containing examples by this factor (e.g., 4 = 4x copies)")
     p.add_argument("--max-correct", type=int, default=None, help="Downsample correct examples to at most this many (random subset, seed=42)")
+    p.add_argument("--completion-only-loss", action="store_true", help="Mask the prompt and the injected <response> hints out of the loss. Off by default: every RL parent was trained on the full sequence, and the masked ablation scored lower")
     p.add_argument("--upsample-abstain", type=int, default=1, help="Upsample abstained examples by this factor (e.g., 2 = 2x copies)")
     p.set_defaults(func=cmd_train_sft)
 
@@ -522,7 +544,7 @@ def main():
     p.add_argument("--total-steps", type=int, default=400, help="Total training steps")
     p.add_argument("--kl-coef", type=float, default=0.001, help="KL divergence coefficient")
     p.add_argument("--n-samples", type=int, default=16, help="Number of samples per prompt (group size)")
-    p.add_argument("--save-freq", type=int, default=25, help="Checkpoint save frequency")
+    p.add_argument("--save-freq", type=int, default=None, help="Checkpoint save frequency (default: 25, or off when --save-best is set)")
     p.add_argument("--test-freq", type=int, default=None, help="Validation/logging frequency (default: same as save-freq)")
     p.add_argument("--max-prompt-length", type=int, default=2048, help="Maximum prompt length in tokens")
     p.add_argument("--max-response-length", type=int, default=2048, help="Maximum response length in tokens")
@@ -533,9 +555,15 @@ def main():
     p.add_argument("--experiment-name", help="Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})")
     p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     p.add_argument("--resume", help="Path to resume from existing run")
+    p.add_argument("--overwrite", action="store_true", help="Discard an existing run at this run-id and train from scratch")
+    p.add_argument("--continue-run", action="store_true", help="Resume the existing run at this run-id from its latest checkpoint")
+    p.add_argument("--save-best", action="store_true", help="Also emit best/, the checkpoint with the highest validation score (last/ is always written)")
+    p.add_argument("--best-metric", default="auto", help="Validation metric selecting the best checkpoint (default: auto, verl's headline val-core scalar)")
+    p.add_argument("--max-ckpt-to-keep", type=int, default=None, help="Checkpoints to retain during training (default: 1, or 2 with --save-best so best and last both survive)")
     p.add_argument("--keep-checkpoints", action="store_true", help="Keep checkpoints and rollouts after training (by default they are deleted)")
     p.add_argument("--keep-state", action="store_true", help="Keep the last optimizer state checkpoint after training")
     p.add_argument("--reward-kwargs", nargs="*", metavar="KEY=VALUE", help="Override reward kwargs (e.g., --reward-kwargs hint_penalty=0.05 hint_bonus=0.1)")
+    p.add_argument("--override", nargs="*", default=None, metavar="KEY=VALUE", help="Raw hydra overrides appended verbatim (e.g., --override ray_init.num_cpus=8)")
     p.add_argument("--shuffle-seed", type=int, default=None, help="Seed for shuffling training data (default: 1, set to randomize order across runs)")
     p.set_defaults(func=cmd_train_rl)
 

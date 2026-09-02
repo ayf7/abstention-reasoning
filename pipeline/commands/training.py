@@ -48,6 +48,7 @@ def train_sft(
     upsample_hint: int = 1,
     max_correct: int | None = None,
     upsample_abstain: int = 1,
+    completion_only_loss: bool = False,
 ) -> Path:
     """
     Train an SFT model on generated dataset.
@@ -161,6 +162,8 @@ def train_sft(
             data,
             include_abstained=include_abstained,
             include_wrong_valid_format=include_wrong_valid_format,
+            **({"nested_request": True}
+               if method is not None and method.nested_request else {}),
         )
         # Count categories for logging
         num_correct = sum(1 for ex in filtered_examples if ex.get("correct", False))
@@ -313,6 +316,13 @@ def train_sft(
         learning_rate=learning_rate,
         warmup_ratio=warmup_ratio,
         max_length=max_length,
+        # TRL infers this from the dataset columns: the pre-tokenized
+        # mask_response_tokens path emits input_ids/completion_mask rather than
+        # prompt/completion, so it lands on False and the completion_mask is
+        # never applied. Passed explicitly so the choice is visible. Full
+        # sequence is the default because every RL parent was trained that
+        # way, and the masked ablation (qwen3-4b-up4x-tok) scored lower.
+        completion_only_loss=completion_only_loss,
         logging_steps=10,
         save_strategy="no",
         eval_strategy="no",
@@ -345,6 +355,109 @@ def train_sft(
     return output_path
 
 
+def _wandb_run_id(run_dir: Path | None) -> str | None:
+    """Return a stable wandb run id for this run directory, minting one if absent.
+
+    verl calls wandb.init() once per process, so a run that gets preempted,
+    resumed after an allocation expires, or relaunched by hand shows up in wandb
+    as several disconnected runs. Pinning the id to the run directory makes every
+    launch of the same run_id append to one curve. --overwrite clears the run
+    directory and therefore the id, which is the intended behaviour: a discarded
+    run should not keep writing to the old wandb run.
+    """
+    if run_dir is None:
+        return None
+    id_file = run_dir / "wandb_run_id"
+    if id_file.exists():
+        return id_file.read_text().strip() or None
+    import wandb.util
+
+    run_id = wandb.util.generate_id()
+    id_file.write_text(run_id + "\n")
+    return run_id
+
+
+def _guard_existing_run(
+    run_dir: Path | None,
+    checkpoints_dir: Path | None,
+    output_path: Path | None,
+    rollouts_dir: Path | None,
+    *,
+    overwrite: bool,
+    continue_run: bool,
+) -> None:
+    """Refuse to start a fresh run on top of an existing one.
+
+    Two ways a rerun silently destroys work. A finished run has had its
+    checkpoints cleaned up but still holds model/ and rollouts/, so verl finds
+    nothing to resume, trains from scratch, and the final conversion overwrites
+    the old model/. An interrupted run still has checkpoints, so resume_mode=auto
+    picks it up mid-flight under whatever hyperparameters this invocation passed.
+    Neither is ever what a fresh run wants, so both require saying so explicitly.
+    """
+    import re
+    import shutil
+
+    ckpts = []
+    if checkpoints_dir is not None and checkpoints_dir.is_dir():
+        ckpts = sorted(
+            (d for d in checkpoints_dir.iterdir()
+             if d.is_dir() and re.fullmatch(r"global_step_\d+", d.name)),
+            key=lambda d: int(d.name.rsplit("_", 1)[1]),
+        )
+
+    model_dirs = [
+        d for d in (
+            output_path,
+            (run_dir / "best") if run_dir is not None else None,
+            (run_dir / "last") if run_dir is not None else None,
+        )
+        if d is not None
+    ]
+
+    found = []
+    for path in model_dirs:
+        if path.is_symlink() or (path.is_dir() and any(path.iterdir())):
+            found.append(f"model        {path}")
+    if ckpts:
+        found.append(f"{len(ckpts)} checkpoint(s)  {checkpoints_dir} (latest {ckpts[-1].name})")
+    if rollouts_dir is not None and rollouts_dir.is_dir() and any(rollouts_dir.iterdir()):
+        found.append(f"rollouts     {rollouts_dir}")
+
+    if continue_run:
+        if not ckpts:
+            raise FileNotFoundError(
+                f"--continue-run passed but no checkpoints to resume in {checkpoints_dir}.\n"
+                f"  A completed run has its checkpoints cleaned up; only --overwrite "
+                f"or a new --run-id can proceed."
+            )
+        print(f"Continuing existing run from {ckpts[-1].name}")
+        return
+
+    if not found:
+        return
+
+    if overwrite:
+        print(f"--overwrite: clearing existing run at {run_dir}")
+        for path in [checkpoints_dir, rollouts_dir, *model_dirs]:
+            if path is None:
+                continue
+            if path.is_symlink():
+                path.unlink()
+                print(f"  removed {path}")
+            elif path.is_dir():
+                shutil.rmtree(path)
+                print(f"  removed {path}")
+        return
+
+    listing = "\n".join(f"    {item}" for item in found)
+    raise FileExistsError(
+        f"run directory already holds results: {run_dir}\n{listing}\n"
+        f"  Training here would overwrite them. Pick a new --run-id, or pass\n"
+        f"  --overwrite to discard them, or --continue-run to resume in place."
+    )
+
+
 def train_rl(
     task_name: str,
     method_name: str | None = None,
@@ -361,7 +474,7 @@ def train_rl(
     total_steps: int = 400,
     kl_coef: float = 0.001,
     n_samples: int = 16,
-    save_freq: int = 25,
+    save_freq: int | None = None,
     test_freq: int | None = None,
     max_prompt_length: int = 2048,
     max_response_length: int = 2048,
@@ -375,7 +488,13 @@ def train_rl(
     cleanup_checkpoints: bool = True,
     keep_state: bool = False,
     reward_kwargs_overrides: dict | None = None,
+    extra_overrides: list[str] | None = None,
     shuffle_seed: int | None = None,
+    overwrite: bool = False,
+    continue_run: bool = False,
+    save_best: bool = False,
+    best_metric: str = "auto",
+    max_ckpt_to_keep: int | None = None,
 ) -> Path:
     """
     Train RL model using verl (GRPO algorithm).
@@ -431,6 +550,26 @@ def train_rl(
     if base_model is not None and sft_model_path is not None:
         raise ValueError("Cannot specify both --base-model and --sft-model")
 
+    # Frequencies. With --save-best the periodic save is off by default: the only
+    # checkpoints worth keeping are the ones validation picked, and an explicit
+    # --save-freq still wins. test_freq must not inherit a disabled save_freq or
+    # validation would switch itself off along with it.
+    if save_freq is None:
+        save_freq = -1 if save_best else 25
+    if test_freq is None:
+        test_freq = save_freq if save_freq > 0 else 25
+    if save_best and test_freq <= 0:
+        raise ValueError("--save-best needs validation enabled; --test-freq must be > 0")
+
+    # verl prunes checkpoints by recency. Best-saves only ever happen at
+    # increasing steps and the final save is later still, so the two most recent
+    # survivors are exactly the best and the last -- but only if room for two.
+    if max_ckpt_to_keep is None:
+        max_ckpt_to_keep = 2 if save_best else 1
+    elif save_best and max_ckpt_to_keep < 2:
+        print("Note: --save-best needs room for the best and the final checkpoint; using --max-ckpt-to-keep 2")
+        max_ckpt_to_keep = 2
+
     # Default paths from method
     if method is not None:
         if train_prompts_path is None:
@@ -466,6 +605,12 @@ def train_rl(
         checkpoints_dir = run_dir / "checkpoints"
         rollouts_dir = run_dir / "rollouts"
         output_path = run_dir / "model"
+
+    if resume_path is None:
+        _guard_existing_run(
+            run_dir, checkpoints_dir, output_path, rollouts_dir,
+            overwrite=overwrite, continue_run=continue_run,
+        )
 
     # Validate required paths
     if train_prompts_path is None:
@@ -520,6 +665,12 @@ def train_rl(
     if method is not None:
         reward_function_name = method.reward_function
         reward_kwargs = {**method.reward_kwargs}
+        # reward_kwargs is the only channel into the reward function, so a
+        # method flag the scorer needs has to travel on it. nested_request
+        # selects the inline-request grammar; without it the scorer validates
+        # against v1's and marks every rollout malformed.
+        if method.nested_request:
+            reward_kwargs["nested_request"] = True
         allow_hint = method.allow_hint
         interaction_name = method.interaction_name or (f"{task_name}_{method.name}" if method.multi_turn else None)
         max_turns = method.max_turns
@@ -641,14 +792,27 @@ def train_rl(
         f"trainer.n_gpus_per_node={tensor_parallel_size}",
         "trainer.nnodes=1",
         f"trainer.save_freq={save_freq}",
-        f"trainer.test_freq={test_freq if test_freq is not None else save_freq}",
-        "trainer.resume_mode=auto",
-        "trainer.max_actor_ckpt_to_keep=1",
+        f"trainer.test_freq={test_freq}",
+        f"trainer.resume_mode={'auto' if (continue_run or resume_path is not None) else 'disable'}",
+        f"trainer.max_actor_ckpt_to_keep={max_ckpt_to_keep}",
         f"trainer.project_name={project_name}",
         f"trainer.experiment_name={experiment_name}",
         f"trainer.total_training_steps={total_steps}",
         f"trainer.rollout_data_dir={rollouts_dir}",
     ]
+
+    # Resume into this run's own wandb run rather than forking a new one. Read
+    # by the vendored verl tracking.Tracking; harmless when wandb is off.
+    wandb_run_id = _wandb_run_id(run_dir) if wandb else None
+    if wandb_run_id:
+        cmd.append(f"+trainer.wandb_run_id={wandb_run_id}")
+
+    # Checkpoint selection (vendored verl extensions). save_last guarantees the
+    # final step is on disk regardless of the periodic save cadence.
+    cmd.append("+trainer.save_last=True")
+    if save_best:
+        cmd.append("+trainer.save_best=True")
+        cmd.append(f"+trainer.best_ckpt_metric={best_metric}")
 
     # Shuffle seed for training data ordering
     if shuffle_seed is not None:
@@ -677,6 +841,10 @@ def train_rl(
         cmd.append(f"+actor_rollout_ref.rollout.max_hints={max_hints}")
     # Add max_turns for loop bound (model gets extra turns after hints exhausted)
     cmd.append(f"+actor_rollout_ref.rollout.max_turns={max_turns}")
+    # Inline <request></request>: the rollout keeps the think block open across
+    # hint exchanges instead of closing and reopening it around each one.
+    if method is not None and method.nested_request:
+        cmd.append("+actor_rollout_ref.rollout.nested_request=True")
 
     # Add custom stop strings for rollout if specified in method config
     if method is not None and method.stop_strings is not None:
@@ -690,13 +858,6 @@ def train_rl(
         for key, value in reward_kwargs.items():
             cmd.append(f"+custom_reward_function.reward_kwargs.{key}={value}")
 
-    # Warm swap config (for abstention_verify warm start)
-    if reward_kwargs and "warm_diversity_steps" in reward_kwargs:
-        ws_steps = int(reward_kwargs["warm_diversity_steps"])
-        if ws_steps > 0:
-            cmd.append(f"+warm_swap.steps={ws_steps}")
-            cmd.append(f"+warm_swap.rate=0.5")
-
     # Set reward manager type if non-default
     if method is not None and method.reward_manager != "naive":
         cmd.append(f"reward_model.reward_manager={method.reward_manager}")
@@ -705,6 +866,10 @@ def train_rl(
         if reward_kwargs:
             for key, value in reward_kwargs.items():
                 cmd.append(f"+reward_model.reward_kwargs.{key}={value}")
+
+    # Raw hydra overrides go last so they win over everything derived above.
+    if extra_overrides:
+        cmd.extend(extra_overrides)
 
     # Set environment variables
     env = os.environ.copy()
@@ -722,7 +887,9 @@ def train_rl(
 
     print(f"RL training complete. Checkpoints saved to {checkpoints_dir}")
 
-    # Find and convert the final checkpoint
+    # Convert checkpoints to HuggingFace format. last/ is whatever the run
+    # ended on and is always written; best/ appears when --save-best recorded
+    # a winning step.
     import re
     checkpoint_dirs = [
         d for d in checkpoints_dir.iterdir()
@@ -731,20 +898,74 @@ def train_rl(
 
     hf_model_path = output_path
     if checkpoint_dirs:
-        # Sort by step number and get the latest
         def get_step(d):
             match = re.search(r"global_step_(\d+)", d.name)
             return int(match.group(1)) if match else 0
 
-        latest_checkpoint = max(checkpoint_dirs, key=get_step)
-        actor_path = latest_checkpoint / "actor"
+        import json
+        import shutil
 
-        if actor_path.exists():
-            print(f"\nConverting final checkpoint: {latest_checkpoint.name}")
-            hf_model_path = convert_checkpoint(actor_path, output_path=output_path)
-            print(f"HuggingFace model saved to: {hf_model_path}")
+        best_step = None
+        best_record = checkpoints_dir / "best_checkpoint.json"
+        if best_record.exists():
+            try:
+                best_step = int(json.loads(best_record.read_text())["step"])
+            except (ValueError, KeyError, TypeError, OSError) as exc:
+                print(f"Warning: could not read {best_record}: {exc}")
+
+        last_ckpt = max(checkpoint_dirs, key=get_step)
+        best_ckpt = None
+        if best_step is not None:
+            best_ckpt = next((d for d in checkpoint_dirs if get_step(d) == best_step), None)
+            if best_ckpt is None:
+                print(
+                    f"Warning: best checkpoint global_step_{best_step} was recorded but is "
+                    f"no longer on disk; writing last/ only"
+                )
+            else:
+                print(f"Best checkpoint by validation: {best_ckpt.name}")
+
+        run_root = output_path.parent
+        converted: dict[str, Path] = {}
+
+        def _clear(path):
+            if path.is_symlink():
+                path.unlink()
+            elif path.exists():
+                shutil.rmtree(path)
+
+        def _convert(label, ckpt):
+            actor_path = ckpt / "actor"
+            if not actor_path.exists():
+                print(f"Warning: actor directory not found in {ckpt}; skipping {label}/")
+                return
+            dest = run_root / label
+            _clear(dest)
+            print(f"\nConverting {label} checkpoint: {ckpt.name}")
+            converted[label] = Path(convert_checkpoint(actor_path, output_path=dest))
+            print(f"HuggingFace model saved to: {converted[label]}")
+
+        if best_ckpt is not None:
+            _convert("best", best_ckpt)
+
+        if best_ckpt is not None and best_ckpt == last_ckpt and "best" in converted:
+            # The final step also won; copying beats merging the same shards twice.
+            dest = run_root / "last"
+            _clear(dest)
+            shutil.copytree(converted["best"], dest)
+            converted["last"] = dest
+            print(f"last/ is the same checkpoint as best/ ({last_ckpt.name}); copied")
         else:
-            print(f"Warning: actor directory not found in {latest_checkpoint}")
+            _convert("last", last_ckpt)
+
+        # model/ is what method.rl_model_path resolves to, so point it at the
+        # checkpoint the run should be judged on and leave the other beside it.
+        primary = "best" if "best" in converted else ("last" if "last" in converted else None)
+        if primary is not None:
+            _clear(output_path)
+            output_path.symlink_to(primary, target_is_directory=True)
+            hf_model_path = output_path
+            print(f"model/ -> {primary}/")
 
     # Cleanup checkpoints if requested (rollouts are preserved for analysis)
     if cleanup_checkpoints and not keep_state:
