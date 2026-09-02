@@ -48,6 +48,7 @@ def train_sft(
     upsample_hint: int = 1,
     max_correct: int | None = None,
     upsample_abstain: int = 1,
+    completion_only_loss: bool = False,
 ) -> Path:
     """
     Train an SFT model on generated dataset.
@@ -315,6 +316,13 @@ def train_sft(
         learning_rate=learning_rate,
         warmup_ratio=warmup_ratio,
         max_length=max_length,
+        # TRL infers this from the dataset columns: the pre-tokenized
+        # mask_response_tokens path emits input_ids/completion_mask rather than
+        # prompt/completion, so it lands on False and the completion_mask is
+        # never applied. Passed explicitly so the choice is visible. Full
+        # sequence is the default because every RL parent was trained that
+        # way, and the masked ablation (qwen3-4b-up4x-tok) scored lower.
+        completion_only_loss=completion_only_loss,
         logging_steps=10,
         save_strategy="no",
         eval_strategy="no",

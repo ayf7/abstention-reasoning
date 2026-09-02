@@ -282,6 +282,7 @@ def cmd_train_sft(args):
         upsample_hint=args.upsample_hint,
         max_correct=args.max_correct,
         upsample_abstain=args.upsample_abstain,
+        completion_only_loss=args.completion_only_loss,
     )
 
 
@@ -522,6 +523,7 @@ def main():
     p.add_argument("--include-wrong-valid-format", action="store_true", help="Include wrong answers with valid format (task-specific, e.g., valid UCI but wrong move for chess)")
     p.add_argument("--upsample-hint", type=int, default=1, help="Upsample hint-containing examples by this factor (e.g., 4 = 4x copies)")
     p.add_argument("--max-correct", type=int, default=None, help="Downsample correct examples to at most this many (random subset, seed=42)")
+    p.add_argument("--completion-only-loss", action="store_true", help="Mask the prompt and the injected <response> hints out of the loss. Off by default: every RL parent was trained on the full sequence, and the masked ablation scored lower")
     p.add_argument("--upsample-abstain", type=int, default=1, help="Upsample abstained examples by this factor (e.g., 2 = 2x copies)")
     p.set_defaults(func=cmd_train_sft)
 
