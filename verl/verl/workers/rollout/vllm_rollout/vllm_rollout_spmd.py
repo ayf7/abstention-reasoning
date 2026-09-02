@@ -289,8 +289,11 @@ class vLLMRollout(BaseRollout):
         kwargs["detokenize"] = True
 
         # supporting adding any sampling params from the config file
+        # `seed` is excluded: it is the engine seed (passed to the engine
+        # constructor) and must not become a per-request SamplingParams seed,
+        # which makes all n repeats of a prompt sample the identical sequence.
         for k in config.keys():
-            if hasattr(SamplingParams(), str(k)):
+            if k != "seed" and hasattr(SamplingParams(), str(k)):
                 kwargs[k] = config.get(k)
 
         print(f"kwargs: {kwargs}")
