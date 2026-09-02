@@ -19,3 +19,7 @@ nested_request: true
 reward_kwargs:
   hint_penalty: 0.1
   format_score: 0.1
+  # Requests made after the 5 hints ran out cost 0.2 each, whatever
+  # hint_penalty is; more than 2 of them scores 0.
+  exhausted_penalty: 0.2
+  max_exhausted_requests: 2
