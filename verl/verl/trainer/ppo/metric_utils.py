@@ -111,6 +111,12 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     committed = None
     malformed = None
     forced_answer = None
+    think_truncated = None
+    answer_truncated = None
+    if "think_truncated" in batch.non_tensor_batch:
+        think_truncated = batch.non_tensor_batch["think_truncated"]
+    if "answer_truncated" in batch.non_tensor_batch:
+        answer_truncated = batch.non_tensor_batch["answer_truncated"]
     if "num_hints" in batch.non_tensor_batch:
         num_hints = batch.non_tensor_batch["num_hints"]
     if "forced_answer" in batch.non_tensor_batch:
@@ -255,6 +261,18 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
                     metrics["rollout/forced_answer/acc"] = float(
                         np.array(correct, dtype=bool)[forced_mask].mean()
                     )
+
+    # Where the budget ran out. think: rescued by a forced answer that closed
+    # on its own (benign). answer: the answer itself is cut (malignant).
+    for label, flags in (("think", think_truncated), ("answer", answer_truncated)):
+        if flags is None or len(flags) == 0:
+            continue
+        arr = np.array(flags, dtype=np.float64)
+        metrics[f"rollout/truncation/{label}_rate"] = float(arr.mean())
+        if correct is not None and (arr > 0).sum() > 0:
+            metrics[f"rollout/truncation/{label}_acc"] = float(
+                np.array(correct, dtype=bool)[arr > 0].mean()
+            )
 
     # Accuracy metrics (overall and by hint count)
     if correct is not None:

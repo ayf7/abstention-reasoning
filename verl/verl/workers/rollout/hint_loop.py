@@ -152,6 +152,15 @@ class RolloutState:
     response_len: int = 0
     truncated: float = 0.0
     forced: float = 0.0
+    # Set by force_answers, mutually exclusive. ``think_truncated``: the
+    # response budget ran out before the answer closed and the forced answer
+    # then closed </answer> on its own -- benign, the tape carries a complete
+    # answer. ``answer_truncated``: the answer never closed by itself -- the
+    # forced answer also ran out (closing tag appended) or forcing was
+    # impossible (unrescuable tape, no room, no answer budget). The answer
+    # text is cut, and nothing downstream repairs that.
+    think_truncated: float = 0.0
+    answer_truncated: float = 0.0
     malformed: bool = False
     completed: bool = False
     # Generations spent. Capped at max_turns, matching one generation per
@@ -406,9 +415,14 @@ class HintLoop:
         up in training as a penalty on hint-seeking even when the configured
         hint_penalty is zero.
         """
-        if self.config.answer_budget <= 0:
-            return 0
+        forced = self._force_answers(states) if self.config.answer_budget > 0 else 0
+        # Whatever is still truncated after forcing carries no complete answer.
+        for st in states:
+            if st.truncated and not st.forced:
+                st.answer_truncated = 1.0
+        return forced
 
+    def _force_answers(self, states: Sequence[RolloutState]) -> int:
         targets: List[Tuple[RolloutState, List[int]]] = []
         for st in states:
             if not st.truncated or not st.generated_any:
@@ -456,8 +470,11 @@ class HintLoop:
             # produced "</answer></answer>", which the structure validator
             # rejects -- the forced answers were scored 0 for being malformed,
             # the exact failure this forcing exists to prevent.
-            if not self.tokenizer.decode(gen.token_ids).rstrip().endswith("</answer>"):
+            if self.tokenizer.decode(gen.token_ids).rstrip().endswith("</answer>"):
+                st.think_truncated = 1.0
+            else:
                 st.append(self._closing_tokens, trainable=False)
+                st.answer_truncated = 1.0
             st.forced = 1.0
 
         self._sample_log(8, lambda: f"Forced an answer for {len(targets)} truncated rollout(s)")

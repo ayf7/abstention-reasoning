@@ -505,6 +505,8 @@ class vLLMRollout(BaseRollout):
             # Already one entry per rollout (batch * n), so it is not part of
             # the repeat_interleave fixups below.
             non_tensor_batch["forced_answer"] = np.array([st.forced for st in states], dtype=object)
+            non_tensor_batch["think_truncated"] = np.array([st.think_truncated for st in states], dtype=object)
+            non_tensor_batch["answer_truncated"] = np.array([st.answer_truncated for st in states], dtype=object)
 
             # TODO(sgm): disable logprob when recompute_log_prob is enable
             # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)

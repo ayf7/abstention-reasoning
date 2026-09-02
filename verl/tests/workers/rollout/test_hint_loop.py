@@ -150,6 +150,8 @@ def snapshot(states):
             "response_len": st.response_len,
             "truncated": st.truncated,
             "forced": st.forced,
+            "think_truncated": st.think_truncated,
+            "answer_truncated": st.answer_truncated,
             "malformed": st.malformed,
             "completed": st.completed,
             "turns": st.turns,
@@ -295,6 +297,47 @@ def test_forcing_is_off_without_an_answer_budget():
     script = {0: ["reasoning" + "z" * 300]}
     states, _, _ = run("run_rounds", script, max_response_len=120, answer_budget=0)
     assert states[0].forced == 0.0
+    # Nothing rescued it, so the answer is missing: that is answer-truncation.
+    assert (states[0].think_truncated, states[0].answer_truncated) == (0.0, 1.0)
+
+
+# ---------------------------------------------------------- truncation kinds
+
+
+def test_forced_answer_that_closes_itself_is_think_truncation():
+    script = {0: ["reasoning" + "z" * 300]}
+    states, _, _ = run(
+        "run_rounds", script, answers={0: "7</answer>"},
+        max_response_len=120, answer_budget=32,
+    )
+    st = states[0]
+    assert st.forced == 1.0
+    assert (st.think_truncated, st.answer_truncated) == (1.0, 0.0)
+
+
+def test_forced_answer_that_runs_out_is_answer_truncation():
+    script = {0: ["reasoning" + "z" * 300]}
+    states, _, _ = run(
+        "run_rounds", script, answers={0: "7" * 40},  # never reaches </answer>
+        max_response_len=120, answer_budget=32,
+    )
+    st = states[0]
+    assert st.forced == 1.0
+    assert (st.think_truncated, st.answer_truncated) == (0.0, 1.0)
+    tape = TOKENIZER.decode([t for seg in st.partials[1:] for t in seg])
+    assert tape.endswith("7" * 32 + "</answer>")
+
+
+def test_unrescuable_rollout_is_answer_truncation():
+    script = {0: ["<request>help" + "z" * 300]}
+    states, _, _ = run("run_rounds", script, max_response_len=120, answer_budget=32)
+    assert (states[0].think_truncated, states[0].answer_truncated) == (0.0, 1.0)
+
+
+def test_completed_rollout_is_not_truncated():
+    states, _, _ = run("run_rounds", {0: ["<answer>7</answer>"]}, answer_budget=32)
+    st = states[0]
+    assert (st.truncated, st.think_truncated, st.answer_truncated) == (0.0, 0.0, 0.0)
 
 
 def test_unrescuable_rollout_is_left_alone():
