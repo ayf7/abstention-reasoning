@@ -83,6 +83,30 @@ def extract_generation_hints(text: str) -> list[str]:
     return hints
 
 
+def classify_truncation(record: dict) -> str | None:
+    """Which stage the token budget cut off, or None if it did not.
+
+    - "think": ran out before </think>. Benign -- RL rollouts (and generate
+      with --answer-budget) close the block and force a short answer, so only
+      the reasoning is cut. Without forcing the sample is still malformed.
+    - "answer": the answer itself is cut. Ran out after </think>, or the
+      forced answer also ran out and the closing tag was appended. Nothing
+      downstream repairs this.
+    """
+    if record.get("answer_truncated"):
+        return "answer"
+    if record.get("forced_answer"):
+        return "think"
+    if record.get("finish_reason") != "length":
+        return None
+    return "answer" if "</think>" in record.get("generation", "") else "think"
+
+
+def count_truncation(records: list[dict]) -> dict[str, int]:
+    kinds = [classify_truncation(r) for r in records]
+    return {"think": kinds.count("think"), "answer": kinds.count("answer")}
+
+
 def compute_hint_metrics(details: list[dict]) -> dict:
     """
     Compute hint usage metrics for multi-turn evaluation.
@@ -789,6 +813,7 @@ def generate(
                             "metadata": best_sample["metadata"],
                             "extracted_hints": extract_generation_hints(best_sample["text"]),
                             "forced_answer": best_sample.get("forced_answer", False),
+                            "answer_truncated": best_sample.get("answer_truncated", False),
                         }
 
                         records_by_index[prompt_data["index"]] = record
@@ -800,7 +825,9 @@ def generate(
                     truncated_count = sum(1 for r in records if r.get("finish_reason") == "length")
                     forced_count = sum(1 for r in records if r.get("forced_answer"))
                     forced_note = f", {forced_count} forced" if forced_count else ""
-                    print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%), {truncated_count} truncated{forced_note}")
+                    trunc = count_truncation(records)
+                    print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%), "
+                          f"{trunc['think']} think-truncated, {trunc['answer']} answer-truncated{forced_note}")
                     _print_verify_metrics(records)
                     print(f"Saved dataset to {output_path}")
 
@@ -1317,12 +1344,16 @@ def evaluate(
             "correct": is_correct,
             "finish_reason": finish_reason,
             "token_count": token_count,
+            "forced_answer": gen_result.get("forced_answer", False),
+            "answer_truncated": gen_result.get("answer_truncated", False),
             "generation": gen_result["text"],
             "predicted_answer": meta.get("predicted_answer"),
             "ground_truth": prompt_data["ground_truth"],
             "error": meta.get("error"),
             **{k: v for k, v in meta.items() if k not in ("predicted_answer", "error")},
         }
+
+        detail["truncation"] = classify_truncation(detail)
 
         # Add multi-turn specific fields
         if "num_hints" in gen_result:
@@ -1338,6 +1369,7 @@ def evaluate(
 
     # Compute metrics using task-specific logic
     metrics = task.compute_metrics(details)
+    metrics["truncation"] = count_truncation(details)
 
     # Compute hint metrics if multi-turn
     hint_metrics = None
@@ -1367,6 +1399,9 @@ def evaluate(
 
     # Print summary using task-specific formatting
     print(task.format_metrics(metrics, model_name))
+    trunc = metrics["truncation"]
+    print(f"Truncated: {trunc['think']} in think (benign, forced-answer rescuable), "
+          f"{trunc['answer']} in answer (malignant) of {len(details)}")
 
     # Print hint analysis if multi-turn
     if hint_metrics:

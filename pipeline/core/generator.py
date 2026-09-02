@@ -1113,7 +1113,10 @@ class AsyncGenerator(_SamplingParams):
             # include_stop_str_in_output keeps </answer> when the model emitted it
             # itself; appending unconditionally yields "</answer></answer>", which
             # the structure check rejects -- the exact failure forcing prevents.
-            if not text.rstrip().endswith("</answer>"):
+            # If the tag had to be appended, the answer budget ran out too:
+            # the answer is cut, not merely forced (see classify_truncation).
+            sample["answer_truncated"] = not text.rstrip().endswith("</answer>")
+            if sample["answer_truncated"]:
                 text += "</answer>"
             sample["text"] = text
             sample["token_count"] += tail_tokens
