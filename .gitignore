@@ -26,3 +26,6 @@ trivial_scripts/
 .vscode/
 CLAUDE.md
 commands.sh
+
+artifacts/
+SCOPE.md
