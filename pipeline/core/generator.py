@@ -164,6 +164,10 @@ class GenerationConfig:
     top_p: float = 0.9
     num_samples: int = 1
     tensor_parallel_size: int = 1
+    data_parallel_size: int = 1  # Independent model replicas; prompts are sharded
+                                 # across them. The cluster floor is 4 GPUs, so a
+                                 # small model wants DP=4 (4x throughput) rather
+                                 # than TP=4 (one replica, poor scaling).
     gpu_memory_utilization: float = 0.9
     verbose: bool = False
     seed: int | None = 42  # Set seed for reproducibility
@@ -214,6 +218,19 @@ class Generator(_SamplingParams):
         if self._model is None:
             from vllm import LLM
             print(f"Loading model: {self.config.model_name}")
+            # vLLM refuses data parallelism on the offline LLM class:
+            # "LLM(data_parallel_size=N) is not supported for single-process
+            # usage and may hang." The async engine spawns one EngineCore per
+            # replica and handles it fine, so send people there rather than
+            # letting vLLM raise mid-run after a model load.
+            if self.config.data_parallel_size > 1:
+                raise ValueError(
+                    f"data_parallel_size={self.config.data_parallel_size} is not "
+                    f"supported by the synchronous generator: vLLM only allows data "
+                    f"parallelism through the async engine. Add --async to use it "
+                    f"(the standard mode for this pipeline), or drop "
+                    f"--data-parallel-size and use --tensor-parallel-size instead."
+                )
             self._model = LLM(
                 model=self.config.model_name,
                 tensor_parallel_size=self.config.tensor_parallel_size,
@@ -950,10 +967,38 @@ class AsyncGenerator(_SamplingParams):
             engine_args = AsyncEngineArgs(
                 model=self.config.model_name,
                 tensor_parallel_size=self.config.tensor_parallel_size,
+                data_parallel_size=self.config.data_parallel_size,
                 gpu_memory_utilization=self.config.gpu_memory_utilization,
             )
             self._engine = AsyncLLMEngine.from_engine_args(engine_args)
         return self._engine
+
+    def close(self):
+        """Release the engine and its GPU memory.
+
+        vLLM holds the KV cache for the life of the engine, and with
+        data_parallel_size>1 that is one EngineCore process per replica. Anything
+        that builds a second engine in the same process -- the oversampling loop
+        rerunning generation -- otherwise dies at startup with "Free memory on
+        device cuda:N is less than desired GPU memory utilization". Safe to call
+        more than once.
+        """
+        engine, self._engine = self._engine, None
+        self._tokenizer = None
+        if engine is None:
+            return
+        try:
+            engine.shutdown()
+        except Exception as e:  # teardown must not mask the real error
+            print(f"Warning: engine shutdown raised {e!r}")
+        try:
+            import gc
+            import torch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     async def _get_tokenizer(self):
         """Get tokenizer from engine."""

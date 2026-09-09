@@ -2,6 +2,7 @@
 Training commands - SFT, RL, and checkpoint conversion.
 """
 
+import os
 import re
 from pathlib import Path
 
@@ -49,6 +50,7 @@ def train_sft(
     max_correct: int | None = None,
     upsample_abstain: int = 1,
     completion_only_loss: bool = False,
+    strip_think_tokens: bool = False,
 ) -> Path:
     """
     Train an SFT model on generated dataset.
@@ -125,10 +127,9 @@ def train_sft(
     # e.g., "simple_abstention-default-20240115"
     if experiment_name is None:
         from datetime import datetime
-        date_str = datetime.now().strftime("%Y%m%d")
         method_str = method_name if method_name else "default"
         run_id_str = run_id if run_id else "default"
-        experiment_name = f"{method_str}-{run_id_str}-{date_str}"
+        experiment_name = f"{method_str}-{run_id_str}"
 
     run_id_display = run_id or "default"
     print(f"=== SFT Training Configuration ===")
@@ -219,6 +220,47 @@ def train_sft(
     # Load tokenizer
     print(f"Loading tokenizer for {base_model}")
     tokenizer = AutoTokenizer.from_pretrained(base_model)
+
+    if strip_think_tokens:
+        # Qwen3 ships <think>/</think> as added tokens, so each is ONE id
+        # (151667/151668). Qwen2.5 has no such entries and encodes the same
+        # strings as ordinary text (6 ids for the pair). They are not marked
+        # `special`, so nothing is being silently dropped -- the problem is
+        # purely representational: the two base models would see structurally
+        # different inputs for identical data, and their SFT runs would not be
+        # comparable. Removing the entries makes Qwen3 tokenize the reasoning
+        # tags exactly the way Qwen2.5 does.
+        #
+        # The entries live in tokenizer.json AND tokenizer_config.json; dropping
+        # them from only one lets the reload put them back.
+        import json as _json
+        import tempfile as _tempfile
+        _d = _tempfile.mkdtemp(prefix="tok_nothink_")
+        tokenizer.save_pretrained(_d)
+        _removed = 0
+        _tj = os.path.join(_d, "tokenizer.json")
+        if os.path.exists(_tj):
+            _j = _json.load(open(_tj))
+            _before = len(_j.get("added_tokens", []))
+            _j["added_tokens"] = [a for a in _j.get("added_tokens", [])
+                                  if a.get("content") not in ("<think>", "</think>")]
+            _removed = _before - len(_j["added_tokens"])
+            _json.dump(_j, open(_tj, "w"))
+        _cf = os.path.join(_d, "tokenizer_config.json")
+        if os.path.exists(_cf):
+            _c = _json.load(open(_cf))
+            _c["added_tokens_decoder"] = {
+                k: v for k, v in _c.get("added_tokens_decoder", {}).items()
+                if v.get("content") not in ("<think>", "</think>")}
+            _json.dump(_c, open(_cf, "w"))
+        if _removed:
+            tokenizer = AutoTokenizer.from_pretrained(_d)
+            if tokenizer.pad_token_id is None:
+                tokenizer.pad_token_id = tokenizer.eos_token_id
+        print(f"  strip-think-tokens: removed {_removed} added-token entr"
+              f"{'y' if _removed == 1 else 'ies'}; "
+              f"'<think>' now encodes to "
+              f"{len(tokenizer.encode('<think>', add_special_tokens=False))} token(s)")
 
     # Check if we need response masking
     mask_response_tokens = method.mask_response_tokens if method else False
@@ -370,9 +412,21 @@ def _wandb_run_id(run_dir: Path | None) -> str | None:
     id_file = run_dir / "wandb_run_id"
     if id_file.exists():
         return id_file.read_text().strip() or None
-    import wandb.util
-
-    run_id = wandb.util.generate_id()
+    # wandb moved generate_id out of wandb.util (gone by 0.29; the lockfile pins
+    # 0.24.1, where it still exists). Try the current location first, fall back
+    # to the old one, and finally to a local id -- the value only has to be a
+    # stable unique string, so an outage in either API must not kill training.
+    run_id = None
+    try:
+        from wandb.sdk.lib.runid import generate_id as _gen
+        run_id = _gen()
+    except Exception:
+        try:
+            import wandb.util
+            run_id = wandb.util.generate_id()
+        except Exception:
+            import secrets
+            run_id = secrets.token_hex(4)
     id_file.write_text(run_id + "\n")
     return run_id
 
@@ -473,7 +527,7 @@ def train_rl(
     learning_rate: float = 1e-6,
     total_steps: int = 400,
     kl_coef: float = 0.001,
-    n_samples: int = 16,
+    n_samples: int = 8,
     save_freq: int | None = None,
     test_freq: int | None = None,
     max_prompt_length: int = 2048,
@@ -719,10 +773,9 @@ def train_rl(
     # Format: {method}-{run_id}-{YYYYMMDD}
     if experiment_name is None:
         from datetime import datetime
-        date_str = datetime.now().strftime("%Y%m%d")
         method_str = method_name if method_name else "default"
         run_id_str = run_id if run_id else "default"
-        experiment_name = f"{method_str}-{run_id_str}-{date_str}"
+        experiment_name = f"{method_str}-{run_id_str}"
 
     # Get task's system message and assistant prefix for runtime template application
     task = get_task(task_name)

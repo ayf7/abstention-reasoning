@@ -2,6 +2,7 @@
 Inference commands - generation and evaluation.
 """
 
+import random
 import re
 from datetime import datetime
 from pathlib import Path
@@ -393,12 +394,17 @@ def extract_cot_length(generation: str) -> int:
     return 0
 
 
+EXHAUSTED_MARKER = "No more hints available."
+
+
 def select_best_sample(
     samples: list[dict],
     task,
     primitive: dict,
     strategy: str = "shortest_cot",
-) -> dict:
+    exclude_exhausted: bool = False,
+    rng=None,
+) -> dict | None:
     """
     Select the best sample from multiple generations.
 
@@ -411,6 +417,12 @@ def select_best_sample(
     - "prefer_abstain": If any sample is correct, pick shortest correct CoT.
       Otherwise, prefer an abstaining sample (for hard problems the model should
       learn to abstain on). Falls back to shortest incorrect CoT.
+    - "random_correct": Pick uniformly at random among correct samples, and
+      return None when none are correct so the caller can drop the problem.
+      The other strategies all fall back to an incorrect sample, and the
+      argmax ones bias the result: "most_hints" keeps the hint-richest correct
+      sample, which pushes the achieved hint distribution above the scheduled
+      one. Random selection leaves the schedule's shape intact.
 
     Args:
         samples: List of generation results with 'text', 'finish_reason', 'token_count'
@@ -436,11 +448,30 @@ def select_best_sample(
             "_abstained": meta.get("abstained", False),
         })
 
+    # Drop samples that ran the hint pool dry before choosing. This matters most
+    # for strategy="most_hints", which maximises request count and would
+    # otherwise actively prefer an exhausted sample (one extra request, answered
+    # with the placeholder) over a clean one -- and the record-level filter would
+    # then discard the whole problem even though a usable sample existed.
+    # If every sample is exhausted, keep them: the record filter drops it, which
+    # is the right outcome.
+    if exclude_exhausted:
+        clean = [s for s in evaluated_samples if EXHAUSTED_MARKER not in s.get("text", "")]
+        if clean:
+            evaluated_samples = clean
+
     # Separate correct and incorrect
     correct_samples = [s for s in evaluated_samples if s["correct"]]
     incorrect_samples = [s for s in evaluated_samples if not s["correct"]]
 
-    if strategy == "prefer_abstain":
+    if strategy == "random_correct":
+        if not correct_samples:
+            return None  # caller drops the problem entirely
+        if rng is None:
+            import random as _random
+            rng = _random.Random(0)
+        best_sample = rng.choice(correct_samples)
+    elif strategy == "prefer_abstain":
         # Abstaining sample always wins if available
         abstained = [s for s in evaluated_samples if s["_abstained"]]
         if abstained:
@@ -461,7 +492,59 @@ def select_best_sample(
     del best_sample["_num_hints"]
     del best_sample["_abstained"]
 
+    # Fraction of samples that were correct. The selection strategies above all
+    # collapse to a single sample, which throws away how *reliably* the model
+    # solves this problem -- exactly the signal the difficulty probe needs.
+    best_sample["pass_rate"] = len(correct_samples) / len(evaluated_samples)
+    best_sample["num_correct_samples"] = len(correct_samples)
+    best_sample["num_samples"] = len(evaluated_samples)
+
     return best_sample
+
+
+from pipeline.core.hint_schedule import DEFAULT_BUCKETS as DEFAULT_HINT_BUCKETS
+
+
+def drop_exhausted_records(records: list[dict]) -> tuple[list[dict], int]:
+    """Remove generations that ran the hint pool dry.
+
+    When the model requests a hint past the last one available, the generator
+    serves the literal string "No more hints available." as the response. That
+    is fine at RL time -- the reward function prices exhausted requests via
+    exhausted_penalty -- but in SFT data it is training text, and keeping it
+    teaches the warm start to emit and expect the placeholder. It also inflates
+    `num_hints`, which counts requests served rather than real hints given.
+    """
+    keep = [r for r in records if EXHAUSTED_MARKER not in (r.get("generation") or "")]
+    return keep, len(records) - len(keep)
+
+
+def _maybe_write_profile(path, records, model, split, num_samples):
+    """Write a difficulty profile from generated records, if requested.
+
+    Phase 1 of the difficulty schedule. Records carry `pass_rate` when
+    --num-samples > 1; with a single sample the rate degenerates to 0.0/1.0,
+    which is a much noisier difficulty estimate, so warn rather than silently
+    produce a profile that buckets everything into the extremes.
+    """
+    if path is None:
+        return
+    from pipeline.core.hint_schedule import build_profile
+
+    if num_samples < 2:
+        print(f"WARNING: --difficulty-profile with --num-samples={num_samples}; "
+              f"pass rates will be 0.0 or 1.0 only. Use --num-samples 4+ for a "
+              f"usable difficulty signal.")
+    profile = build_profile(records, model=model, split=split, num_samples=num_samples)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_json(path, profile.to_dict())
+    rates = list(profile.pass_rates.values())
+    solved = sum(1 for r in rates if r >= 1.0)
+    never = sum(1 for r in rates if r <= 0.0)
+    print(f"Wrote difficulty profile to {path}")
+    print(f"  {len(rates)} problems | always solved: {solved} ({solved/len(rates):.1%}) "
+          f"| never solved: {never} ({never/len(rates):.1%}) "
+          f"| mean pass rate: {sum(rates)/len(rates):.3f}")
 
 
 def generate(
@@ -490,6 +573,16 @@ def generate(
     force_hints_distribution: dict[int, float] | None = None,
     force_hints_policy: dict[str, float] | None = None,
     sample_strategy: str | None = None,
+    data_parallel_size: int = 1,
+    no_hints: bool = False,
+    difficulty_profile_out: Path | None = None,
+    hint_schedule_from: Path | None = None,
+    hint_buckets: str | None = None,
+    hint_target_fraction: float | None = None,
+    max_hints: int = 4,
+    drop_exhausted: bool = False,
+    target_correct_rate: float | None = None,
+    max_oversample: int = 5,
 ) -> Path:
     """
     Generate model outputs on prompts.
@@ -518,6 +611,26 @@ def generate(
         force_hints_policy: Per-level probability of forcing hints. Maps level number
             to rate, e.g. {"1": 0.05, "2": 0.05, "3": 0.05, "4": 0.15, "5": 0.15}.
             If None but force_hints_distribution is set, all examples get forced hints.
+        data_parallel_size: Independent model replicas to shard prompts across.
+        no_hints: Suppress hint requests entirely. Phase 1 of the difficulty
+            schedule: measure how often the model solves each problem unaided.
+        difficulty_profile_out: Write a difficulty profile (per-problem pass rate)
+            here after generating. Pair with --num-samples > 1 and --no-hints.
+        hint_schedule_from: Read a difficulty profile and schedule per-problem hint
+            counts from it, instead of sampling from a global distribution.
+        hint_buckets: "max_pass_rate:num_hints,..." mapping for the schedule.
+        hint_target_fraction: Fraction of problems that should request a hint.
+            Assigns hints by difficulty rank so the fraction is hit exactly,
+            regardless of how the probe's pass rates are distributed. Takes
+            precedence over hint_buckets.
+        max_hints: Most hints any single problem is scheduled (rank mode).
+        drop_exhausted: Discard records where the model asked past the last
+            available hint and was served the "No more hints available."
+            placeholder. That string is real training text, so leaving it in
+            teaches the warm start to produce and expect it.
+        target_correct_rate: Keep resampling incorrect problems until this fraction
+            is answered correctly (phase 3). None disables the loop.
+        max_oversample: Cap on phase-3 resampling rounds.
         ... generation config ...
 
     Returns:
@@ -533,8 +646,18 @@ def generate(
     # Resolve multi_turn from method config (CLI overrides if explicitly set)
     if multi_turn is None:
         multi_turn = method.multi_turn if method else False
-    if force_hints_distribution:
-        multi_turn = True  # force_hints requires multi_turn
+    if force_hints_distribution or hint_schedule_from is not None:
+        multi_turn = True  # any hint injection requires multi_turn
+    if no_hints:
+        # The probe measures unaided ability, so there is nothing to multi-turn
+        # about. This also matters mechanically: the multi-turn path serves one
+        # generation per prompt regardless of --num-samples, which would collapse
+        # every pass rate to 0.0 or 1.0 and destroy the difficulty signal the
+        # schedule is built from. Single-turn honours num_samples via n=.
+        if multi_turn:
+            print("--no-hints: forcing single-turn so --num-samples yields a "
+                  "graded pass rate (method config requested multi-turn).")
+        multi_turn = False
 
     # Resolve model shortcuts (sft, rl)
     actual_model_name = model_name
@@ -576,9 +699,11 @@ def generate(
         top_p=top_p,
         num_samples=num_samples,
         tensor_parallel_size=tensor_parallel_size,
+        data_parallel_size=data_parallel_size,
         gpu_memory_utilization=gpu_memory_utilization,
         verbose=verbose,
         stop_strings=stop_strings,
+        ban_hint_requests=no_hints,
         seed=seed,
         hint_transition=method.hint_transition if method else True,
         nested_request=method.nested_request if method else False,
@@ -638,9 +763,37 @@ def generate(
             if multi_turn:
                 print("Multi-turn mode enabled")
 
-        # Compute per-prompt force_hints based on distribution and policy
-        if force_hints_distribution:
-            import random
+        # Compute per-prompt force_hints. A difficulty schedule, when supplied,
+        # takes precedence: it assigns each problem a hint count from its own
+        # measured pass rate rather than sampling from a global distribution, so
+        # hard problems reliably get more hints instead of getting them by luck.
+        if hint_schedule_from is not None:
+            from pipeline.core.hint_schedule import (
+                DifficultyProfile,
+                parse_buckets,
+                schedule_by_rank,
+                schedule_from_profile,
+                summarize_schedule,
+            )
+            profile = DifficultyProfile.from_dict(load_json(hint_schedule_from))
+            if hint_target_fraction is not None:
+                # Rank-based: hits the requested hint fraction exactly, whatever
+                # the probe's pass-rate distribution turned out to look like.
+                schedule = schedule_by_rank(remaining_prompts, profile,
+                                            hint_target_fraction, max_hints)
+            else:
+                buckets = parse_buckets(hint_buckets) if hint_buckets else DEFAULT_HINT_BUCKETS
+                schedule = schedule_from_profile(remaining_prompts, profile, buckets)
+            force_hints_list = [schedule[p["index"]] for p in remaining_prompts]
+            print(f"Hint schedule from {hint_schedule_from} "
+                  f"(probe: {profile.model}, {profile.num_samples} samples)")
+            print(summarize_schedule(schedule, profile))
+        elif force_hints_distribution:
+            # NB: no local `import random` here. A function-scope import makes
+            # `random` local to the whole of generate(), so the selection code
+            # further down hits UnboundLocalError whenever this branch is not
+            # taken (it killed job 187745 33 minutes in). The module-level
+            # import at the top of the file is what everything uses.
             rng = random.Random(42)
 
             hint_counts = sorted(force_hints_distribution.keys())
@@ -692,17 +845,41 @@ def generate(
             all_prompts = [p["prompt"] for p in remaining_prompts]
             all_ground_truths = [p["ground_truth"] for p in remaining_prompts]
 
-            print(f"Running async generation on {len(all_prompts)} prompts...")
+            # generate_with_hints_async has no num_samples parameter: the
+            # multi-turn loop carries per-prompt state across turns, so one call
+            # is one rollout. Replicate the prompt list instead and regroup after
+            # -- each replica gets its own request index, and the sampling seed is
+            # base_seed + index, so the copies diverge rather than repeating.
+            # Without this, --num-samples is silently ignored here, and SFT's
+            # correct-only filter then thins the hard, hint-heavy buckets.
+            rep_prompts = [p for p in all_prompts for _ in range(num_samples)]
+            rep_gts = [g for g in all_ground_truths for _ in range(num_samples)]
+            rep_force = [f for f in force_hints_list for _ in range(num_samples)]
+            print(f"Running async generation on {len(all_prompts)} prompts"
+                  + (f" x {num_samples} samples = {len(rep_prompts)} rollouts..."
+                     if num_samples > 1 else "..."))
             async_generator = AsyncGenerator(config)
-            all_results = asyncio.run(
-                async_generator.generate_with_hints_async(
-                    all_prompts,
-                    all_ground_truths,
-                    force_hints=force_hints_list,
+            try:
+                rep_results = asyncio.run(
+                    async_generator.generate_with_hints_async(
+                        rep_prompts,
+                        rep_gts,
+                        force_hints=rep_force,
+                    )
                 )
-            )
+            finally:
+                # Free the KV cache before anything builds another engine in this
+                # process (the oversampling loop does, once per round).
+                async_generator.close()
+
+            # Regroup the flat replica list back into num_samples per prompt.
+            all_results = [
+                [r for j in range(num_samples) for r in rep_results[i * num_samples + j]]
+                for i in range(len(all_prompts))
+            ]
 
             sample_strategy = sample_strategy or ("most_hints" if multi_turn else "shortest_cot")
+            n_no_correct = 0  # dropped by strategy="random_correct"
             for prompt_data, gen_samples in zip(remaining_prompts, all_results):
                 primitive = {
                     "index": prompt_data["index"],
@@ -711,7 +888,17 @@ def generate(
                 }
 
                 if num_samples > 1:
-                    best_sample = select_best_sample(gen_samples, task, primitive, strategy=sample_strategy)
+                    # Seed per problem index so a rerun picks the same sample.
+                    _rng = random.Random((seed or 0) + prompt_data["index"])
+                    best_sample = select_best_sample(gen_samples, task, primitive,
+                                                     strategy=sample_strategy,
+                                                     exclude_exhausted=drop_exhausted,
+                                                     rng=_rng)
+                    if best_sample is None:
+                        # strategy="random_correct" and nothing was correct.
+                        n_no_correct += 1
+                        records_by_index.pop(prompt_data["index"], None)
+                        continue
                 else:
                     sample = gen_samples[0]
                     is_correct, meta = task.check_correctness(primitive, sample["text"])
@@ -731,6 +918,9 @@ def generate(
                     "token_count": best_sample["token_count"],
                     "metadata": best_sample["metadata"],
                     "extracted_hints": extract_generation_hints(best_sample["text"]),
+                    **{k: best_sample[k] for k in
+                       ("pass_rate", "num_correct_samples", "num_samples")
+                       if k in best_sample},
                 }
 
                 if "num_hints" in best_sample:
@@ -743,12 +933,30 @@ def generate(
                 records_by_index[prompt_data["index"]] = record
 
             records = sorted(records_by_index.values(), key=lambda r: r["index"])
+            if n_no_correct:
+                print(f"Dropped {n_no_correct} problem(s) with no correct sample "
+                      f"(--sample-strategy random_correct).")
+            if drop_exhausted:
+                records, n_dropped = drop_exhausted_records(records)
+                if n_dropped:
+                    print(f"Dropped {n_dropped} record(s) that exhausted the hint "
+                          f"pool (--drop-exhausted).")
+                    # Keep the in-memory index consistent, or a later resume would
+                    # treat the dropped indices as still-completed.
+                    kept = {r["index"] for r in records}
+                    records_by_index = {i: r for i, r in records_by_index.items() if i in kept}
+            if not records:
+                print("No records remain after filtering.")
+                save_json(output_path, records)
+                return output_path
             save_json(output_path, records)
 
             correct = sum(1 for r in records if r["correct"])
             print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%)")
             _print_verify_metrics(records)
             print(f"Saved dataset to {output_path}")
+            _maybe_write_profile(difficulty_profile_out, records, actual_model_name,
+                                 split, num_samples)
             if not retry_truncated:
                 return output_path
             truncated = sum(1 for r in records if r.get("finish_reason") == "length")
@@ -765,9 +973,17 @@ def generate(
             # Same defaulting as the sync and multi-turn branches. Without it
             # sample_strategy stays None here and overrides the function default.
             sample_strategy = sample_strategy or "shortest_cot"
+            n_no_correct = 0  # dropped by strategy="random_correct"
 
             async def _async_generate_with_retries():
                 async_generator = AsyncGenerator(config)
+                try:
+                    return await _async_generate_inner(async_generator)
+                finally:
+                    async_generator.close()
+
+            async def _async_generate_inner(async_generator):
+                nonlocal n_no_correct
                 current_prompts = remaining_prompts
 
                 for retry_attempt in range(max_retries + 1 if retry_truncated else 1):
@@ -792,7 +1008,16 @@ def generate(
                         }
 
                         if num_samples > 1:
-                            best_sample = select_best_sample(gen_samples, task, primitive, strategy=sample_strategy)
+                            _rng = random.Random((seed or 0) + prompt_data["index"])
+                            best_sample = select_best_sample(
+                                gen_samples, task, primitive,
+                                strategy=sample_strategy,
+                                exclude_exhausted=drop_exhausted, rng=_rng)
+                            if best_sample is None:
+                                # random_correct: nothing correct -> drop the problem
+                                n_no_correct += 1
+                                records_by_index.pop(prompt_data["index"], None)
+                                continue
                         else:
                             sample = gen_samples[0]
                             is_correct, meta = task.check_correctness(primitive, sample["text"])
@@ -812,6 +1037,9 @@ def generate(
                             "token_count": best_sample["token_count"],
                             "metadata": best_sample["metadata"],
                             "extracted_hints": extract_generation_hints(best_sample["text"]),
+                            **{k: best_sample[k] for k in
+                               ("pass_rate", "num_correct_samples", "num_samples")
+                               if k in best_sample},
                             "forced_answer": best_sample.get("forced_answer", False),
                             "answer_truncated": best_sample.get("answer_truncated", False),
                         }
@@ -837,6 +1065,12 @@ def generate(
                         break
 
             asyncio.run(_async_generate_with_retries())
+            if n_no_correct:
+                print(f"Dropped {n_no_correct} problem(s) with no correct sample "
+                      f"(--sample-strategy random_correct).")
+            _maybe_write_profile(difficulty_profile_out,
+                                 sorted(records_by_index.values(), key=lambda r: r["index"]),
+                                 actual_model_name, split, num_samples)
             return output_path
 
         # Standard batch processing (sync)
@@ -872,6 +1106,7 @@ def generate(
 
             # Process results
             sample_strategy = sample_strategy or ("most_hints" if multi_turn else "shortest_cot")
+            n_no_correct = 0  # dropped by strategy="random_correct"
             batch_correct = 0
             for prompt_data, gen_samples in zip(batch_prompts_data, batch_results):
                 primitive = {
@@ -881,7 +1116,17 @@ def generate(
                 }
 
                 if num_samples > 1:
-                    best_sample = select_best_sample(gen_samples, task, primitive, strategy=sample_strategy)
+                    # Seed per problem index so a rerun picks the same sample.
+                    _rng = random.Random((seed or 0) + prompt_data["index"])
+                    best_sample = select_best_sample(gen_samples, task, primitive,
+                                                     strategy=sample_strategy,
+                                                     exclude_exhausted=drop_exhausted,
+                                                     rng=_rng)
+                    if best_sample is None:
+                        # strategy="random_correct" and nothing was correct.
+                        n_no_correct += 1
+                        records_by_index.pop(prompt_data["index"], None)
+                        continue
                 else:
                     sample = gen_samples[0]
                     is_correct, meta = task.check_correctness(primitive, sample["text"])
@@ -904,6 +1149,9 @@ def generate(
                     "token_count": best_sample["token_count"],
                     "metadata": best_sample["metadata"],
                     "extracted_hints": extract_generation_hints(best_sample["text"]),
+                    **{k: best_sample[k] for k in
+                       ("pass_rate", "num_correct_samples", "num_samples")
+                       if k in best_sample},
                 }
 
                 if "num_hints" in best_sample:
@@ -937,6 +1185,67 @@ def generate(
             break
         print(f"{truncated} truncated records remaining.")
 
+    _maybe_write_profile(difficulty_profile_out,
+                         sorted(records_by_index.values(), key=lambda r: r["index"]),
+                         actual_model_name, split, num_samples)
+    return output_path
+
+
+def generate_until_target(
+    target_correct_rate: float,
+    max_oversample: int = 5,
+    **generate_kwargs,
+):
+    """Phase 3: resample incorrect problems until enough are answered correctly.
+
+    Wraps `generate` rather than threading another mode through its retry loop.
+    Each round re-runs with `retry_incorrect=True`, which keeps correct and
+    abstained records and regenerates only the rest, at a fresh seed. Rounds stop
+    as soon as the correct fraction reaches the target, when a round makes no
+    progress, or at `max_oversample`.
+
+    Bailing out on a no-progress round matters: the remaining problems are the
+    ones the teacher genuinely cannot solve at this hint budget, and resampling
+    them again just burns GPU hours to arrive at the same answer.
+    """
+    output_path = generate_kwargs.get("output_path")
+    seed = generate_kwargs.pop("seed", 42)
+    # The caller passes its own --retry-incorrect; this loop owns that flag
+    # (round 0 generates fresh, later rounds retry only the incorrect), so drop
+    # theirs rather than colliding with it.
+    generate_kwargs.pop("retry_incorrect", None)
+
+    prev_correct = -1
+    for round_idx in range(max_oversample + 1):
+        if round_idx > 0:
+            print(f"\n=== Oversample round {round_idx}/{max_oversample} ===")
+        output_path = generate(
+            **generate_kwargs,
+            seed=(seed if seed is None else seed + round_idx * 1000),
+            retry_incorrect=(round_idx > 0),
+        )
+        generate_kwargs["output_path"] = output_path
+
+        records = load_json(output_path)
+        if not records:
+            print("No records produced; stopping.")
+            return output_path
+        correct = sum(1 for r in records if r.get("correct"))
+        rate = correct / len(records)
+        print(f"Round {round_idx}: {correct}/{len(records)} correct ({rate:.1%}), "
+              f"target {target_correct_rate:.1%}")
+
+        if rate >= target_correct_rate:
+            print(f"Target reached after {round_idx + 1} round(s).")
+            return output_path
+        if correct == prev_correct:
+            print(f"No improvement over the previous round ({correct} correct); "
+                  f"remaining problems look unsolvable at this hint budget. Stopping.")
+            return output_path
+        prev_correct = correct
+
+    print(f"Hit max_oversample={max_oversample} without reaching "
+          f"{target_correct_rate:.1%}. Best: {prev_correct}/{len(records)}.")
     return output_path
 
 
@@ -1031,6 +1340,7 @@ def evaluate(
     top_p: float = 1.0,
     num_samples: int = 1,
     tensor_parallel_size: int = 1,
+    data_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.9,
     verbose: bool = False,
     multi_turn: bool | None = None,
@@ -1117,6 +1427,7 @@ def evaluate(
         top_p=top_p,
         num_samples=num_samples,
         tensor_parallel_size=tensor_parallel_size,
+        data_parallel_size=data_parallel_size,
         gpu_memory_utilization=gpu_memory_utilization,
         verbose=verbose,
         seed=seed,

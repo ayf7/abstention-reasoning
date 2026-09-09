@@ -175,7 +175,7 @@ def cmd_generate(args):
             level, rate = pair.strip().split(":")
             force_hints_policy[level.strip()] = float(rate.strip())
 
-    commands.generate(
+    gen_kwargs = dict(
         task_name=args.task,
         model_name=args.model,
         method_name=args.method,
@@ -201,7 +201,28 @@ def cmd_generate(args):
         force_hints_distribution=force_hints_distribution,
         force_hints_policy=force_hints_policy,
         sample_strategy=getattr(args, "sample_strategy", None),
+        data_parallel_size=args.data_parallel_size,
+        no_hints=getattr(args, "no_hints", False),
+        difficulty_profile_out=(Path(args.difficulty_profile)
+                                if getattr(args, "difficulty_profile", None) else None),
+        hint_schedule_from=(Path(args.hint_schedule)
+                            if getattr(args, "hint_schedule", None) else None),
+        hint_buckets=getattr(args, "hint_buckets", None),
+        hint_target_fraction=getattr(args, "hint_target_fraction", None),
+        max_hints=getattr(args, "max_hints", 4),
+        drop_exhausted=getattr(args, "drop_exhausted", False),
     )
+
+    # A target correct rate turns generation into the phase-3 oversampling loop:
+    # resample the problems that came back wrong until enough are right.
+    target = getattr(args, "target_correct_rate", None)
+    if target is not None:
+        return commands.generate_until_target(
+            target_correct_rate=target,
+            max_oversample=getattr(args, "max_oversample", 5),
+            **gen_kwargs,
+        )
+    commands.generate(**gen_kwargs)
 
 
 def cmd_evaluate(args):
@@ -223,6 +244,7 @@ def cmd_evaluate(args):
         top_p=args.top_p,
         num_samples=args.num_samples,
         tensor_parallel_size=args.tensor_parallel_size,
+        data_parallel_size=args.data_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         verbose=args.verbose,
         multi_turn=args.multi_turn,  # None = use method config
@@ -280,6 +302,7 @@ def cmd_train_sft(args):
         include_abstained=not args.no_abstained,
         include_wrong_valid_format=args.include_wrong_valid_format,
         upsample_hint=args.upsample_hint,
+        strip_think_tokens=getattr(args, "strip_think_tokens", False),
         max_correct=args.max_correct,
         upsample_abstain=args.upsample_abstain,
         completion_only_loss=args.completion_only_loss,
@@ -444,9 +467,18 @@ def main():
     p.add_argument("--temperature", type=float, default=0.7, help="Temperature")
     p.add_argument("--top-p", type=float, default=0.9, help="Top-p")
     p.add_argument("--num-samples", type=int, default=1, help="Number of samples per prompt (best selected by --sample-strategy)")
-    p.add_argument("--sample-strategy", default=None, choices=["shortest_cot", "most_hints", "prefer_abstain"],
-        help="Selection strategy when --num-samples > 1 (default: most_hints for multi-turn, shortest_cot otherwise)")
+    p.add_argument("--sample-strategy", default=None,
+        choices=["shortest_cot", "most_hints", "prefer_abstain", "random_correct"],
+        help="Selection strategy when --num-samples > 1 (default: most_hints for "
+             "multi-turn, shortest_cot otherwise). 'random_correct' picks uniformly "
+             "among correct samples and DROPS problems with no correct sample; the "
+             "others fall back to an incorrect one, and the argmax strategies skew "
+             "the achieved distribution (most_hints inflates hint counts).")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
+    p.add_argument("--data-parallel-size", type=int, default=1,
+        help="Independent model replicas; prompts are sharded across them. The cluster "
+             "floor is 4 GPUs, so a model that fits on one GPU wants --data-parallel-size 4 "
+             "(~4x throughput) rather than --tensor-parallel-size 4.")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
     p.add_argument("--retry-incorrect", action="store_true", help="Re-run incorrect examples from existing output")
@@ -463,6 +495,42 @@ def main():
         help="Per-level force rate, e.g. '1:0.05,2:0.05,3:0.05,4:0.15,5:0.15'. "
              "Only this fraction of examples at each level will get forced hints. "
              "Requires --force-hints-distribution.")
+    # --- Difficulty-scheduled hints (3 phases) ------------------------------
+    # Phase 1: probe. Measure how often the model solves each problem unaided.
+    #   generate ... --no-hints --num-samples 8 --difficulty-profile P.json
+    # Phase 2+3: schedule from that profile and oversample until enough are right.
+    #   generate ... --hint-schedule P.json --target-correct-rate 0.5
+    p.add_argument("--no-hints", dest="no_hints", action="store_true",
+        help="Suppress hint requests during decoding. Phase 1 of the difficulty "
+             "schedule: measures unaided pass rate. Pair with --num-samples.")
+    p.add_argument("--difficulty-profile", type=str, default=None,
+        help="Write a per-problem difficulty profile (pass rates) here. Use with "
+             "--no-hints and --num-samples 4+.")
+    p.add_argument("--hint-schedule", type=str, default=None,
+        help="Read a difficulty profile and schedule per-problem hint counts from "
+             "it, so harder problems get more hints. Overrides "
+             "--force-hints-distribution/--force-hints-policy.")
+    p.add_argument("--hint-target-fraction", type=float, default=None,
+        help="Fraction of problems that should request a hint, e.g. 0.5. Assigns "
+             "hints by difficulty RANK so the fraction is hit exactly whatever the "
+             "probe's pass rates look like. Preferred over --hint-buckets, whose "
+             "achieved rate swings with teacher strength.")
+    p.add_argument("--max-hints", type=int, default=4,
+        help="Most hints scheduled for any single problem (default 4).")
+    p.add_argument("--hint-buckets", type=str, default=None,
+        help="Pass-rate to hint-count mapping for --hint-schedule, as "
+             "'max_pass_rate:num_hints,...'. Default: '0.0:4,0.25:3,0.5:2,0.75:1,1.0:0' "
+             "(never solved unaided -> 4 hints; always solved -> none).")
+    p.add_argument("--drop-exhausted", action="store_true",
+        help="Discard generations where the model asked past the last available "
+             "hint and was served 'No more hints available.'. That placeholder is "
+             "real training text; keeping it teaches the warm start to emit it.")
+    p.add_argument("--target-correct-rate", type=float, default=None,
+        help="Phase 3: keep resampling incorrect problems until this fraction is "
+             "answered correctly (e.g. 0.5 for a majority). Stops early if a round "
+             "makes no progress.")
+    p.add_argument("--max-oversample", type=int, default=5,
+        help="Cap on --target-correct-rate resampling rounds (default 5).")
     p.set_defaults(func=cmd_generate)
 
     # evaluate
@@ -480,6 +548,10 @@ def main():
     p.add_argument("--top-p", type=float, default=1.0, help="Top-p")
     p.add_argument("--num-samples", type=int, default=1, help="Samples per problem (default: 1)")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
+    p.add_argument("--data-parallel-size", type=int, default=1,
+        help="Independent model replicas; prompts are sharded across them. The cluster "
+             "floor is 4 GPUs, so a model that fits on one GPU wants --data-parallel-size 4 "
+             "(~4x throughput) rather than --tensor-parallel-size 4.")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
@@ -523,6 +595,13 @@ def main():
     p.add_argument("--include-wrong-valid-format", action="store_true", help="Include wrong answers with valid format (task-specific, e.g., valid UCI but wrong move for chess)")
     p.add_argument("--upsample-hint", type=int, default=1, help="Upsample hint-containing examples by this factor (e.g., 4 = 4x copies)")
     p.add_argument("--max-correct", type=int, default=None, help="Downsample correct examples to at most this many (random subset, seed=42)")
+    p.add_argument("--strip-think-tokens", action="store_true",
+        help="Remove <think>/</think> from the tokenizer's added-token vocabulary "
+             "so they encode as ordinary text. Qwen3 ships them as added tokens "
+             "(1 id each); Qwen2.5 has no such entries and uses 6 ids for the pair. "
+             "They are NOT special tokens, so nothing is being dropped -- this is "
+             "purely so both base models see identical tokenization of the same "
+             "data and their SFT runs stay comparable. Use for Qwen3-* models.")
     p.add_argument("--completion-only-loss", action="store_true", help="Mask the prompt and the injected <response> hints out of the loss. Off by default: every RL parent was trained on the full sequence, and the masked ablation scored lower")
     p.add_argument("--upsample-abstain", type=int, default=1, help="Upsample abstained examples by this factor (e.g., 2 = 2x copies)")
     p.set_defaults(func=cmd_train_sft)
@@ -543,7 +622,7 @@ def main():
     p.add_argument("--learning-rate", type=float, default=1e-6, help="Learning rate")
     p.add_argument("--total-steps", type=int, default=400, help="Total training steps")
     p.add_argument("--kl-coef", type=float, default=0.001, help="KL divergence coefficient")
-    p.add_argument("--n-samples", type=int, default=16, help="Number of samples per prompt (group size)")
+    p.add_argument("--n-samples", type=int, default=8, help="Number of samples per prompt (group size)")
     p.add_argument("--save-freq", type=int, default=None, help="Checkpoint save frequency (default: 25, or off when --save-best is set)")
     p.add_argument("--test-freq", type=int, default=None, help="Validation/logging frequency (default: same as save-freq)")
     p.add_argument("--max-prompt-length", type=int, default=2048, help="Maximum prompt length in tokens")
