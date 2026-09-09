@@ -124,12 +124,7 @@ def create_prompts(
     else:
         template_variant = getattr(task, "default_template_variant", None)
 
-    # Get assistant_prefix from method (if provided) or task default
-    assistant_prefix = None
-    if method is not None and method.assistant_prefix is not None:
-        assistant_prefix = method.assistant_prefix
-    else:
-        assistant_prefix = getattr(task, "assistant_prefix", None)
+    assistant_prefix = getattr(task, "assistant_prefix", None)
 
     # Handle "all" splits
     if split_name == "all":
@@ -193,10 +188,6 @@ def _create_prompts_single(
     num_hints: int | None = None,
 ) -> Path:
     """Create prompts for a single split."""
-    # Override task's assistant_prefix if method provided one
-    if assistant_prefix is not None:
-        task.assistant_prefix = assistant_prefix
-
     # Load primitives
     primitives = load_json(primitives_path)
 
@@ -215,12 +206,10 @@ def _create_prompts_single(
     if fmt == "parquet":
         print(f"Creating {split_name} data for {len(primitives)} primitives (template applied at runtime)...")
 
-        # Determine interaction name for multi-turn methods
-        # Maps method name to interaction class name (e.g., "hint" -> "countdown_hint")
+        # Interaction class name for multi-turn methods, e.g. "hint" -> "countdown_hint"
         interaction_name = None
         if method is not None and method.multi_turn:
-            # Use method's interaction_name if specified, else default to {task}_{method}
-            interaction_name = method.interaction_name or f"{task_name}_{method.name}"
+            interaction_name = f"{task_name}_{method.name}"
             print(f"  Multi-turn enabled: interaction_name={interaction_name}")
 
         records = []
@@ -319,244 +308,6 @@ def _create_prompts_single(
         save_json(output_path, records)
 
     print(f"Saved {len(records)} records to {output_path}")
-    return output_path
-
-
-def create_verify_prompts(
-    task_name: str,
-    source_dataset_path: Path,
-    method_name: str = "verify",
-    primitives_path: Path | None = None,
-    output_dir: Path | None = None,
-    split_name: str = "all",
-    seed: int = 42,
-    include_assistant_prefix: bool = True,
-) -> Path | dict[str, Path]:
-    """
-    Create verification prompts from a source model's generations.
-
-    Takes an existing dataset (e.g., from a simple model's generation) and creates
-    prompts that ask a model to verify whether each generation is correct.
-
-    Args:
-        task_name: Name of task (e.g., "countdown")
-        source_dataset_path: Path to source model's dataset JSON (must have index, generation, correct fields)
-        method_name: Method name for path derivation and template selection (default: "verify")
-        primitives_path: Path to primitives.json (default: artifacts/{task}/primitives.json)
-        output_dir: Output directory (default: artifacts/{task}/{method}/prompts/)
-        split_name: Which split to create, or "all" for every split the task
-            defines (see BaseTask.supported_splits)
-        seed: Random seed for split assignment
-        include_assistant_prefix: Whether to include assistant's opening
-
-    Returns:
-        Path to created prompts file, or dict of paths if split="all"
-    """
-    task = get_task(task_name)
-    method = Method.load(method_name, task_name)
-
-    # Default paths
-    if primitives_path is None:
-        primitives_path = get_primitives_path(task_name)
-    if output_dir is None:
-        output_dir = method.prompts_dir(task_name)
-
-    # Get assistant prefix from method or task
-    assistant_prefix = method.assistant_prefix or getattr(task, "assistant_prefix", None)
-    if assistant_prefix is not None:
-        task.assistant_prefix = assistant_prefix
-
-    # Load source dataset and primitives
-    source_records = load_json(source_dataset_path)
-    # Handle evaluate results format ({"details": [...]}) vs flat dataset format
-    if isinstance(source_records, dict) and "details" in source_records:
-        source_records = source_records["details"]
-    primitives = load_json(primitives_path)
-
-    # Filter out incomplete generations (truncated by token limit)
-    total = len(source_records)
-    source_records = [r for r in source_records if r.get("finish_reason") != "length"]
-    if len(source_records) < total:
-        print(f"Filtered out {total - len(source_records)} truncated generations (finish_reason=length)")
-
-    # Build lookups
-    primitives_by_index = {p["index"]: p for p in primitives}
-    source_by_index = {r["index"]: r for r in source_records}
-    source_indices = set(source_by_index.keys())
-
-    print(f"Loaded {len(source_records)} source records from {source_dataset_path}")
-    print(f"Loaded {len(primitives)} primitives from {primitives_path}")
-
-    # Handle "all" splits
-    if split_name == "all":
-        output_dir.mkdir(parents=True, exist_ok=True)
-        # eval_augmented is the split nearly every recorded evaluation reads
-        # (prompts/eval_augmented.json). Leaving it out of "all" meant the
-        # documented setup path silently produced none of it.
-        # Ask the task which splits it defines: code_output has no rl_val or
-        # eval_augmented, and a hardcoded list made "all" die partway through,
-        # leaving a half-written prompts dir behind.
-        splits = task.supported_splits()
-        results = {}
-        for split in splits:
-            ext = ".parquet" if split.startswith("rl") else ".json"
-            output_path = output_dir / f"{split}{ext}"
-            results[split] = _create_verify_prompts_single(
-                task=task,
-                task_name=task_name,
-                primitives_by_index=primitives_by_index,
-                source_by_index=source_by_index,
-                source_indices=source_indices,
-                num_primitives=len(primitives),
-                output_path=output_path,
-                split_name=split,
-                method=method,
-                seed=seed,
-                include_assistant_prefix=include_assistant_prefix,
-                assistant_prefix=assistant_prefix,
-            )
-        return results
-
-    # Single split
-    # If output_dir looks like a file path (has .json/.parquet extension), use it directly
-    if output_dir.suffix in (".json", ".parquet"):
-        output_path = output_dir
-    else:
-        ext = ".parquet" if split_name.startswith("rl") else ".json"
-        output_path = output_dir / f"{split_name}{ext}"
-    return _create_verify_prompts_single(
-        task=task,
-        task_name=task_name,
-        primitives_by_index=primitives_by_index,
-        source_by_index=source_by_index,
-        source_indices=source_indices,
-        num_primitives=len(primitives),
-        output_path=output_path,
-        split_name=split_name,
-        method=method,
-        seed=seed,
-        include_assistant_prefix=include_assistant_prefix,
-        assistant_prefix=assistant_prefix,
-    )
-
-
-def _create_verify_prompts_single(
-    task,
-    task_name: str,
-    primitives_by_index: dict,
-    source_by_index: dict,
-    source_indices: set,
-    num_primitives: int,
-    output_path: Path,
-    split_name: str,
-    method: "Method",
-    seed: int,
-    include_assistant_prefix: bool,
-    assistant_prefix: str | None = None,
-) -> Path:
-    """Create verification prompts for a single split."""
-    # Get split indices, filtered to those present in source dataset
-    split_indices = task.get_split_indices(num_primitives, split_name, seed)
-    valid_indices = [i for i in split_indices if i in source_indices]
-
-    if not valid_indices:
-        print(f"  Warning: No source records found for split '{split_name}', skipping")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        fmt = "parquet" if str(output_path).endswith(".parquet") else "json"
-        if fmt == "parquet":
-            save_parquet(output_path, [])
-        else:
-            save_json(output_path, [])
-        return output_path
-
-    # Load template
-    template_variant = method.template_variant
-    template_split = split_name
-    if split_name == "eval_augmented":
-        template_split = "eval"
-    elif split_name in ("rl_train", "rl_val"):
-        template_split = "rl"
-    template_path = TASKS_ROOT / task_name / "templates" / template_variant / f"{template_split}.txt"
-    if not template_path.exists():
-        raise FileNotFoundError(f"Template not found: {template_path}")
-
-    with open(template_path, "r", encoding="utf-8") as f:
-        template = f.read()
-
-    fmt = "parquet" if str(output_path).endswith(".parquet") else "json"
-
-    print(f"Creating {split_name} verify prompts for {len(valid_indices)} items (template: {template_path})...")
-
-    records = []
-    for idx in valid_indices:
-        primitive = primitives_by_index[idx]
-        source = source_by_index[idx]
-        generation_text = source["generation"]
-        generation_correct = source["correct"]
-
-        # Build ground_truth: for JSON include full task ground truth, for parquet keep minimal
-        task_ground_truth = task.get_ground_truth(primitive)
-        ground_truth_full = {"generation_correct": generation_correct}
-        if isinstance(task_ground_truth, dict):
-            ground_truth_full.update(task_ground_truth)
-        # Minimal ground_truth for parquet (avoids varying-length arrays breaking verl batching)
-        ground_truth_minimal = {"generation_correct": generation_correct}
-
-        if fmt == "parquet":
-            # RL: store enriched primitive with generation field for runtime template substitution
-            enriched = dict(primitive)
-            enriched["generation"] = generation_text
-            enriched["generation_correct"] = generation_correct
-            if hasattr(task, 'enrich_primitive_for_rl'):
-                enriched = task.enrich_primitive_for_rl(enriched)
-
-            # For RL reward_model, only include what compute_score_verify needs
-            # (full ground_truth has varying-length arrays that break verl's batching)
-            reward_ground_truth = {"generation_correct": generation_correct}
-
-            record = {
-                "index": idx,
-                "primitive": enriched,
-                "ground_truth": ground_truth_minimal,
-                "variant": primitive.get("variant", "unknown"),
-                "split": split_name,
-                "data_source": task_name,
-                "assistant_prefix": assistant_prefix,
-                "extra_info": {"index": idx},
-                "reward_model": {
-                    "style": "rule",
-                    "ground_truth": reward_ground_truth,
-                },
-            }
-        else:
-            # JSON: substitute {generation} first, then let format_prompt handle task fields
-            template_with_gen = template.replace("{generation}", generation_text)
-            # Also add generation_correct to primitive so check_correctness can use it
-            enriched_primitive = {**primitive, "generation_correct": generation_correct}
-            prompt = task.format_prompt(enriched_primitive, template_with_gen, include_assistant_prefix)
-
-            record = {
-                "index": idx,
-                "prompt": prompt,
-                "ground_truth": ground_truth_full,
-                "variant": primitive.get("variant", "unknown"),
-                "split": split_name,
-            }
-
-        records.append(record)
-
-    # Save
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if fmt == "parquet":
-        save_parquet(output_path, records)
-        if assistant_prefix:
-            print(f"  Note: Set verl config data.runtime_assistant_prefix=\"{assistant_prefix}\"")
-    else:
-        save_json(output_path, records)
-
-    n_correct = sum(1 for i in valid_indices if source_by_index[i]["correct"])
-    n_wrong = len(valid_indices) - n_correct
-    print(f"Saved {len(records)} records to {output_path} ({n_correct} correct, {n_wrong} incorrect)")
     return output_path
 
 
@@ -792,10 +543,6 @@ def create_ood_prompts(
     method = None
     if method_name is not None:
         method = Method.load(method_name, task_name)
-
-    # Get assistant prefix from method or task
-    if method is not None and method.assistant_prefix is not None:
-        task.assistant_prefix = method.assistant_prefix
 
     # Default output path
     if output_path is None:

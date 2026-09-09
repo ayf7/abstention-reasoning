@@ -8,7 +8,7 @@ Usage:
     commands.train_sft(...)
 """
 
-from .data import create_primitives, create_prompts, create_verify_prompts, create_ood_prompts, OOD_DATASETS
+from .data import create_primitives, create_prompts, create_ood_prompts, OOD_DATASETS
 from .inference import generate, generate_until_target, evaluate, analyze
 from .training import train_sft, train_rl, convert_checkpoint
 
@@ -16,7 +16,6 @@ __all__ = [
     # Data commands
     "create_primitives",
     "create_prompts",
-    "create_verify_prompts",
     "create_ood_prompts",
     "OOD_DATASETS",
     # Inference commands

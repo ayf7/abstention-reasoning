@@ -1,8 +1,8 @@
 # abstention-reasoning
 
-Training language models to recognize when they cannot solve a problem and perform alternative action (abstaining or hint-seeking), rather than committing to an answer every time.
+Training language models to recognize when they cannot solve a problem and ask for a hint, rather than committing to an answer every time.
 
-Models are trained in two stages: supervised fine-tuning (SFT) on chain-of-thought traces, then reinforcement learning with a reward function that pays for correct answers *and* for well-calibrated abstention. RL runs on a modified copy of [verl](https://github.com/volcengine/verl), vendored in `verl/`.
+Models are trained in two stages: supervised fine-tuning (SFT) on chain-of-thought traces, then reinforcement learning with a reward function that pays for correct answers and charges for each hint taken. RL runs on a modified copy of [verl](https://github.com/volcengine/verl), vendored in `verl/`.
 
 Everything is driven by one CLI:
 
@@ -59,27 +59,25 @@ Each lives in `pipeline/tasks/{task}/` and implements the `BaseTask` interface: 
 
 ## Methods
 
-A *method* bundles a prompt-template variant, a reward function, and its RL settings into one named config (`pipeline/configs/methods/{task}/{method}.yaml`). Six methods exist for all three tasks.
+A *method* bundles a prompt-template variant, a reward function, and its RL settings into one named config (`pipeline/configs/methods/{task}/{method}.yaml`). Four methods exist on countdown and competition math, three on code output (`hint_ablations` is math-and-countdown only).
 
 **Evaluated methods:**
 
 | Method | Behavior |
 |---|---|
-| `simple` | Baseline. Answer directly, never abstain. |
-| `verify` | Answer, then verify your own answer. |
-| `abstention_verify` | Verify, then either `<commit>` or `<abstain>`. |
+| `simple` | Baseline. Answer directly, never ask for a hint. |
 | `hint_encourage` | Multi-turn: ask for hints, with a bonus for admitting a wrong answer. |
+| `hint_ablations` | Multi-turn hint-seeking inside a single `<think>` block, swept over the hint-penalty weight α. Countdown and competition math only. |
 
-**SFT parents** — not evaluated on their own, but required to produce the two above. Do not delete them:
+**SFT parents** — not evaluated on their own, but required to produce the hint methods above. Do not delete them:
 
 | Method | Parent of |
 |---|---|
-| `simple_abstention` | `abstention_verify` |
-| `hint` | `hint_encourage` |
+| `hint` | `hint_encourage`, `hint_ablations` |
 
 Model sizes used throughout: Qwen2.5-1.5B, Qwen2.5-3B, Qwen3-4B.
 
-Remaining configs in `pipeline/configs/methods/` are ablations and retired variants. Run `python -m pipeline list_methods --task countdown` to list them.
+Run `python -m pipeline list_methods --task <task>` to list what a task actually has.
 
 Reward functions themselves live with the trainer, in `verl/recipe/{task}/reward_function.py`; a method config selects one by name and passes it `reward_kwargs`.
 
@@ -98,7 +96,6 @@ Reward functions themselves live with the trainer, in `verl/recipe/{task}/reward
 |---|---|
 | `create_primitives` | Generate raw puzzle data (shared across methods) |
 | `create_prompts` | Render prompts from primitives for a split, or `all` |
-| `create_verify_prompts` | Build `verify` / `abstention_verify` prompts from an existing dataset |
 | `create_ood_prompts` | Build OOD eval prompts (`aime2024`, `gsm8k`, `math500`, `minerva_math`, `olympiad_bench`, `unanswerable_math`) |
 
 **Inference**

@@ -26,7 +26,7 @@ def has_malformed_structure_nested(solution_str: str) -> bool:
     end, so </think> is reached exactly once, immediately before the answer.
 
         ([text]<request></request><response>...</response>)*
-        [text]</think>(<answer>...</answer> | <abstain>)
+        [text]</think><answer>...</answer>
 
     A <think> tag anywhere in the response is malformed: the block is never
     reopened because it is never closed. Contrast has_malformed_structure,
@@ -39,7 +39,7 @@ def has_malformed_structure_nested(solution_str: str) -> bool:
     if solution_str.count('<request>') != len(re.findall(r'<request></request>', solution_str)):
         return True
 
-    tag_pattern = r'(</think>|<think>|<request>|</request>|<response>|</response>|<answer>|</answer>|<abstain>)'
+    tag_pattern = r'(</think>|<think>|<request>|</request>|<response>|</response>|<answer>|</answer>)'
     tags = re.findall(tag_pattern, solution_str)
 
     if not tags:
@@ -59,13 +59,10 @@ def has_malformed_structure_nested(solution_str: str) -> bool:
     if i >= n:
         return True
 
-    if tags[i] == '<answer>':
-        if i + 1 >= n or tags[i + 1] != '</answer>':
-            return True
-        i += 2
-    elif tags[i] == '<abstain>':
-        i += 1
-    else:
+    if tags[i] != '<answer>':
         return True
+    if i + 1 >= n or tags[i + 1] != '</answer>':
+        return True
+    i += 2
 
     return i != n

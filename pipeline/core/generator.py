@@ -120,7 +120,7 @@ def _hint_injection(hint: str, nested: bool) -> str:
     return f"\n<response>{hint}</response>\n" if nested else f"\n<response>{hint}</response>\n<think>\n"
 
 
-DEFAULT_STOP_STRINGS = ["</answer>", "</think>\n\n<abstain>"]
+DEFAULT_STOP_STRINGS = ["</answer>"]
 
 # The tags a single-turn generation can legally emit. The assistant prefix opens
 # <think>, so a generation that never closes it carries no tags at all.
@@ -171,7 +171,6 @@ class GenerationConfig:
     gpu_memory_utilization: float = 0.9
     verbose: bool = False
     seed: int | None = 42  # Set seed for reproducibility
-    stop_strings: list[str] | None = None  # None = use DEFAULT_STOP_STRINGS
     hint_transition: bool = True  # Splice a canned phrase before forced hint requests
     nested_request: bool = False  # Keep <request></request> inside the <think> block
     ban_hint_requests: bool = False  # Counterfactual eval: make asking for a hint
@@ -249,9 +248,8 @@ class Generator(_SamplingParams):
             List of lists of dicts with 'text' and 'finish_reason'
             (each prompt can have multiple samples if num_samples > 1)
         """
-        from vllm import SamplingParams
 
-        stop = self.config.stop_strings if self.config.stop_strings is not None else DEFAULT_STOP_STRINGS
+        stop = DEFAULT_STOP_STRINGS
         sampling_params = self._sampling_params(
             temperature=self.config.temperature,
             top_p=self.config.top_p,
@@ -417,7 +415,6 @@ class Generator(_SamplingParams):
         Accumulates raw token IDs from each segment (generation, hint injection)
         and concatenates them, exactly like the RL rollout's agentic_loop.
         """
-        from vllm import SamplingParams
 
         num_prompts = len(prompts)
         tokenizer = self.model.get_tokenizer()
@@ -602,7 +599,6 @@ class Generator(_SamplingParams):
         """
         import copy
         import random as _random
-        from vllm import SamplingParams
 
         num_prompts = len(prompts)
         tokenizer = self.model.get_tokenizer()
@@ -1048,7 +1044,6 @@ class AsyncGenerator(_SamplingParams):
             List of lists of dicts with 'text', 'finish_reason', 'token_count'
         """
         import uuid
-        from vllm import SamplingParams
 
         engine = await self._get_engine()
         tokenizer = await self._get_tokenizer()
@@ -1056,7 +1051,7 @@ class AsyncGenerator(_SamplingParams):
         num_prompts = len(prompts)
 
         # Sampling params
-        stop = self.config.stop_strings if self.config.stop_strings is not None else DEFAULT_STOP_STRINGS
+        stop = DEFAULT_STOP_STRINGS
         sampling_params = self._sampling_params(
             temperature=self.config.temperature,
             top_p=self.config.top_p,
@@ -1246,7 +1241,7 @@ class AsyncGenerator(_SamplingParams):
     ) -> list[list[dict]]:
         """Async token-spliced multi-turn generation matching RL rollout behavior."""
         import uuid
-        from vllm import SamplingParams, TokensPrompt
+        from vllm import TokensPrompt
 
         engine = await self._get_engine()
         tokenizer = await self._get_tokenizer()
@@ -1415,7 +1410,6 @@ class AsyncGenerator(_SamplingParams):
         """
         import copy
         import uuid
-        from vllm import SamplingParams
 
         engine = await self._get_engine()
         tokenizer = await self._get_tokenizer()

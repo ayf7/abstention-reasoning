@@ -44,19 +44,17 @@ def train_sft(
     report_to: str = "wandb",
     project_name: str | None = None,
     experiment_name: str | None = None,
-    include_abstained: bool = True,
     include_wrong_valid_format: bool = False,
     upsample_hint: int = 1,
     max_correct: int | None = None,
-    upsample_abstain: int = 1,
     completion_only_loss: bool = False,
     strip_think_tokens: bool = False,
 ) -> Path:
     """
     Train an SFT model on generated dataset.
 
-    Filters to correct (and optionally abstained) examples, formats as
-    prompt/completion pairs, and trains using TRL's SFTTrainer.
+    Filters to correct examples, formats as prompt/completion pairs, and
+    trains using TRL's SFTTrainer.
 
     Args:
         task_name: Name of task
@@ -75,7 +73,6 @@ def train_sft(
         report_to: Reporting integration ("none", "wandb", etc.)
         project_name: Wandb project name (default: {task}-sft)
         experiment_name: Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})
-        include_abstained: Include abstained examples in training (default: True)
         include_wrong_valid_format: Include wrong answers with valid format (task-specific, default: False)
 
     Returns:
@@ -123,10 +120,9 @@ def train_sft(
         project_name = f"{task_name}-sft-{_model_project_tag(base_model)}"
 
     # Generate experiment name if not provided
-    # Format: {method}-{run_id}-{YYYYMMDD}
-    # e.g., "simple_abstention-default-20240115"
+    # Format: {method}-{run_id}
+    # e.g., "simple-default"
     if experiment_name is None:
-        from datetime import datetime
         method_str = method_name if method_name else "default"
         run_id_str = run_id if run_id else "default"
         experiment_name = f"{method_str}-{run_id_str}"
@@ -151,34 +147,22 @@ def train_sft(
     # Get task for potential custom filtering
     task = get_task(task_name)
 
-    # Helper to check if example is abstained
-    def is_abstained(ex):
-        return (ex.get("abstained", False)
-                or ex.get("metadata", {}).get("abstained", False)
-                or "</think>\n\n<abstain>" in ex.get("generation", ""))
-
-    # Use task-specific filter if available, otherwise default logic
+    # Use task-specific filter if available, otherwise keep only correct
     if hasattr(task, 'filter_for_sft'):
         filtered_examples = task.filter_for_sft(
             data,
-            include_abstained=include_abstained,
             include_wrong_valid_format=include_wrong_valid_format,
             **({"nested_request": True}
                if method is not None and method.nested_request else {}),
         )
         # Count categories for logging
         num_correct = sum(1 for ex in filtered_examples if ex.get("correct", False))
-        num_abstained = sum(1 for ex in filtered_examples if is_abstained(ex))
-        num_wrong_valid = len(filtered_examples) - num_correct - num_abstained
+        num_wrong_valid = len(filtered_examples) - num_correct
         print(f"Loaded {len(data)} examples, keeping {len(filtered_examples)} "
-              f"({num_correct} correct, {num_abstained} abstained, {num_wrong_valid} wrong-valid-format)")
-    elif include_abstained:
-        # Default filtering (no include_wrong_valid_format support)
-        filtered_examples = [ex for ex in data if ex.get("correct", False) or is_abstained(ex)]
-        num_correct = sum(1 for ex in filtered_examples if ex.get("correct", False))
-        num_abstained = sum(1 for ex in filtered_examples if is_abstained(ex))
-        print(f"Loaded {len(data)} examples, keeping {len(filtered_examples)} ({num_correct} correct, {num_abstained} abstained)")
+              f"({num_correct} correct, {num_wrong_valid} wrong-valid-format)")
     else:
+        # No custom filter: include_wrong_valid_format is task-specific, so a
+        # task without one has no way to judge a wrong answer's format.
         filtered_examples = [ex for ex in data if ex.get("correct", False)]
         print(f"Loaded {len(data)} examples, {len(filtered_examples)} correct ({100*len(filtered_examples)/len(data):.1f}%)")
 
@@ -196,15 +180,6 @@ def train_sft(
             filtered_examples = correct + non_correct
             rng.shuffle(filtered_examples)
             print(f"Downsampled correct to {max_correct} → {len(filtered_examples)} total ({max_correct} correct, {len(non_correct)} non-correct)")
-
-    # Upsample abstained examples
-    if upsample_abstain > 1:
-        abstain_examples = [ex for ex in filtered_examples if is_abstained(ex)]
-        if abstain_examples:
-            extra_copies = abstain_examples * (upsample_abstain - 1)
-            filtered_examples = filtered_examples + extra_copies
-            print(f"Upsampled {len(abstain_examples)} abstained examples {upsample_abstain}x → "
-                  f"{len(abstain_examples) * upsample_abstain} copies (total: {len(filtered_examples)})")
 
     # Upsample hint-containing examples
     if upsample_hint > 1:
@@ -726,7 +701,7 @@ def train_rl(
         if method.nested_request:
             reward_kwargs["nested_request"] = True
         allow_hint = method.allow_hint
-        interaction_name = method.interaction_name or (f"{task_name}_{method.name}" if method.multi_turn else None)
+        interaction_name = f"{task_name}_{method.name}" if method.multi_turn else None
         max_turns = method.max_turns
         max_hints = method.max_hints
         template_content = method.load_template(task_name, "rl")
@@ -747,18 +722,13 @@ def train_rl(
         print(f"Resuming from: {resume_path}")
 
     # Default reward function path
-    # Try full task name first, then fall back to base name (e.g., countdown_abstention -> countdown)
     if reward_function_path is None:
         reward_function_path = repo_root / f"verl/recipe/{task_name}/reward_function.py"
         if not reward_function_path.exists():
-            # Try base task name (for variants like countdown_abstention)
-            base_task_name = task_name.split("_")[0]
-            reward_function_path = repo_root / f"verl/recipe/{base_task_name}/reward_function.py"
-            if not reward_function_path.exists():
-                raise FileNotFoundError(
-                    f"Reward function not found at verl/recipe/{task_name}/ or verl/recipe/{base_task_name}/. "
-                    f"Please provide --reward-function."
-                )
+            raise FileNotFoundError(
+                f"Reward function not found at verl/recipe/{task_name}/. "
+                f"Please provide --reward-function."
+            )
 
     # Create output directories
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
@@ -770,9 +740,8 @@ def train_rl(
         project_name = f"{task_name}-rl-{_model_project_tag(actor_model)}"
 
     # Generate experiment name if not provided
-    # Format: {method}-{run_id}-{YYYYMMDD}
+    # Format: {method}-{run_id}
     if experiment_name is None:
-        from datetime import datetime
         method_str = method_name if method_name else "default"
         run_id_str = run_id if run_id else "default"
         experiment_name = f"{method_str}-{run_id_str}"
@@ -899,26 +868,11 @@ def train_rl(
     if method is not None and method.nested_request:
         cmd.append("+actor_rollout_ref.rollout.nested_request=True")
 
-    # Add custom stop strings for rollout if specified in method config
-    if method is not None and method.stop_strings is not None:
-        # Pass as comma-separated list; verl rollout will parse it
-        stop_strings_str = ",".join(method.stop_strings)
-        cmd.append(f'+actor_rollout_ref.rollout.stop_strings="{stop_strings_str}"')
-
     # Add reward kwargs if specified in method config
     # Use + prefix to add new config keys
     if reward_kwargs:
         for key, value in reward_kwargs.items():
             cmd.append(f"+custom_reward_function.reward_kwargs.{key}={value}")
-
-    # Set reward manager type if non-default
-    if method is not None and method.reward_manager != "naive":
-        cmd.append(f"reward_model.reward_manager={method.reward_manager}")
-        # Also pass reward_kwargs to reward_model.reward_kwargs so the manager
-        # constructor receives them (e.g., AdaptiveRewardManager needs beta, delta, etc.)
-        if reward_kwargs:
-            for key, value in reward_kwargs.items():
-                cmd.append(f"+reward_model.reward_kwargs.{key}={value}")
 
     # Raw hydra overrides go last so they win over everything derived above.
     if extra_overrides:

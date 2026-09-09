@@ -160,56 +160,6 @@ def trace_execution_uniform(
         return []
 
 
-def profile_execution(code: str, stdin_input: str) -> dict | None:
-    """Run counting pass only, return execution metadata for profiling.
-
-    Returns dict with hint placement info, loop dominance stats, etc.
-    Returns None on failure.
-    """
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return None
-
-    try:
-        body, indent, in_function = _find_entry_body(tree, code)
-    except ValueError:
-        return None
-
-    if len(body) < 2:
-        return None
-
-    num_top_loops = sum(1 for s in body if isinstance(s, (ast.For, ast.While)))
-
-    metadata = _run_counting_pass(code, body, indent, in_function, stdin_input)
-    if metadata is None:
-        return None
-
-    total_steps = metadata["total_steps"]
-    if total_steps < 2:
-        return None
-
-    post_loop_steps = sorted(metadata.get("post_loop_steps", []))
-    print_steps = sorted(metadata.get("print_steps", []))
-    in_loop_steps = metadata.get("in_loop_steps", 0)
-
-    choice = _choose_targets(total_steps, post_loop_steps, print_steps)
-
-    return {
-        "total_steps": total_steps,
-        "in_loop_steps": in_loop_steps,
-        "loop_fraction": 100 * in_loop_steps / total_steps,
-        "num_top_loops": num_top_loops,
-        "num_post_loop_points": len(set(post_loop_steps)),
-        "num_print_steps": len(set(print_steps)),
-        **choice,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Target selection
-# ---------------------------------------------------------------------------
-
 def _choose_targets(
     total_steps: int,
     post_loop_steps: list[int],

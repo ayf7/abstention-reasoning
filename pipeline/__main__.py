@@ -23,16 +23,16 @@ Examples:
 
     # Full workflow with --method (auto-derived paths)
     python -m pipeline create_primitives --task countdown --num-puzzles 5000
-    python -m pipeline create_prompts --task countdown --method simple_abstention
-    python -m pipeline generate --task countdown --method simple_abstention --model Qwen/Qwen3-14B
-    python -m pipeline train_sft --task countdown --method simple_abstention --base-model Qwen/Qwen2.5-3B
-    python -m pipeline train_rl --task countdown --method simple_abstention
-    python -m pipeline evaluate --task countdown --method simple_abstention --model sft
-    python -m pipeline evaluate --task countdown --method simple_abstention --model rl
+    python -m pipeline create_prompts --task countdown --method simple
+    python -m pipeline generate --task countdown --method simple --model Qwen/Qwen3-14B
+    python -m pipeline train_sft --task countdown --method simple --base-model Qwen/Qwen2.5-3B
+    python -m pipeline train_rl --task countdown --method simple
+    python -m pipeline evaluate --task countdown --method simple --model sft
+    python -m pipeline evaluate --task countdown --method simple --model rl
 
     # Artifacts are organized by method:
     # artifacts/countdown/primitives.json           (shared)
-    # artifacts/countdown/simple_abstention/        (method-specific)
+    # artifacts/countdown/simple/                  (method-specific)
     #   prompts/, datasets/, models/, results/
 """
 
@@ -60,24 +60,16 @@ def cmd_list_tasks(args):
 
 
 def cmd_list_methods(args):
-    """List available methods for a task, separating active from deprecated."""
-    status = Method.method_status(args.task)
-    if not status:
+    """List available methods for a task."""
+    names = Method.list_methods(args.task)
+    if not names:
         print(f"No methods found for task '{args.task}'")
         print(f"Create method configs in: pipeline/configs/methods/{args.task}/")
         return
 
-    active = [n for n, (dep, _) in status.items() if not dep]
-    retired = [(n, note) for n, (dep, note) in status.items() if dep]
-
     print(f"Available methods for '{args.task}':")
-    for name in active:
+    for name in names:
         print(f"  - {name}")
-
-    if retired and not args.no_deprecated:
-        print(f"\nDeprecated (still loadable, for reproducing old results):")
-        for name, note in retired:
-            print(f"  - {name}" + (f"  ({note})" if note else ""))
 
 
 def cmd_create_primitives(args):
@@ -112,23 +104,6 @@ def cmd_create_prompts(args):
         include_assistant_prefix=not args.no_assistant_prefix,
         num_hints=args.num_hints,
         force_json=args.json,
-    )
-
-
-def cmd_create_verify_prompts(args):
-    """Create verification prompts from source model generations."""
-    source_dataset = Path(args.source_dataset)
-    primitives_path = Path(args.primitives) if args.primitives else None
-    output_dir = Path(args.output) if args.output else None
-    commands.create_verify_prompts(
-        task_name=args.task,
-        source_dataset_path=source_dataset,
-        method_name=args.method,
-        primitives_path=primitives_path,
-        output_dir=output_dir,
-        split_name=args.split,
-        seed=args.seed,
-        include_assistant_prefix=not args.no_assistant_prefix,
     )
 
 
@@ -262,21 +237,6 @@ def cmd_analyze(args):
     )
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def cmd_train_sft(args):
     """Train SFT model."""
     dataset_path = Path(args.dataset) if args.dataset else None
@@ -299,12 +259,10 @@ def cmd_train_sft(args):
         report_to=args.report_to,
         project_name=args.project_name,
         experiment_name=args.experiment_name,
-        include_abstained=not args.no_abstained,
         include_wrong_valid_format=args.include_wrong_valid_format,
         upsample_hint=args.upsample_hint,
         strip_think_tokens=getattr(args, "strip_think_tokens", False),
         max_correct=args.max_correct,
-        upsample_abstain=args.upsample_abstain,
         completion_only_loss=args.completion_only_loss,
     )
 
@@ -372,7 +330,6 @@ def cmd_train_rl(args):
     )
 
 
-
 def cmd_convert_checkpoint(args):
     """Convert FSDP/Megatron checkpoint to HuggingFace format."""
     output_path = Path(args.output) if args.output else None
@@ -396,7 +353,6 @@ def main():
 
     # list_methods
     p = subparsers.add_parser("list_methods", help="List available methods for a task")
-    p.add_argument("--no-deprecated", action="store_true", help="Hide deprecated methods")
     p.add_argument("--task", required=True, help="Task name")
     p.set_defaults(func=cmd_list_methods)
 
@@ -429,18 +385,6 @@ def main():
     p.add_argument("--json", action="store_true", help="Force JSON output for all splits (instead of parquet for RL)")
     p.set_defaults(func=cmd_create_prompts)
 
-    # create_verify_prompts
-    p = subparsers.add_parser("create_verify_prompts", help="Create verification prompts from source model generations")
-    p.add_argument("--task", required=True, help="Task name (e.g., countdown)")
-    p.add_argument("--source-dataset", required=True, help="Path to source model's generation JSON")
-    p.add_argument("--method", default="verify", help="Method name (default: verify)")
-    p.add_argument("--primitives", help="Path to primitives.json (default: auto)")
-    p.add_argument("--output", help="Output directory (default: artifacts/{task}/{method}/prompts/)")
-    p.add_argument("--split", default="all", help="Split name or 'all' (default: all)")
-    p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
-    p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
-    p.set_defaults(func=cmd_create_verify_prompts)
-
     # create_ood_prompts
     ood_names = ", ".join(sorted(commands.OOD_DATASETS.keys()))
     p = subparsers.add_parser("create_ood_prompts", help="Create eval prompts from an OOD math benchmark")
@@ -468,7 +412,7 @@ def main():
     p.add_argument("--top-p", type=float, default=0.9, help="Top-p")
     p.add_argument("--num-samples", type=int, default=1, help="Number of samples per prompt (best selected by --sample-strategy)")
     p.add_argument("--sample-strategy", default=None,
-        choices=["shortest_cot", "most_hints", "prefer_abstain", "random_correct"],
+        choices=["shortest_cot", "most_hints", "random_correct"],
         help="Selection strategy when --num-samples > 1 (default: most_hints for "
              "multi-turn, shortest_cot otherwise). 'random_correct' picks uniformly "
              "among correct samples and DROPS problems with no correct sample; the "
@@ -567,12 +511,6 @@ def main():
     p.set_defaults(func=cmd_analyze)
 
 
-
-
-
-
-
-
     # train_sft
     p = subparsers.add_parser("train_sft", help="Train SFT model on generated dataset")
     p.add_argument("--task", required=True, help="Task name")
@@ -591,7 +529,6 @@ def main():
     p.add_argument("--report-to", default="wandb", help="Reporting integration (wandb, none)")
     p.add_argument("--project-name", help="Wandb project name (default: {task}-sft)")
     p.add_argument("--experiment-name", help="Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})")
-    p.add_argument("--no-abstained", action="store_true", help="Exclude abstained examples (by default they're included)")
     p.add_argument("--include-wrong-valid-format", action="store_true", help="Include wrong answers with valid format (task-specific, e.g., valid UCI but wrong move for chess)")
     p.add_argument("--upsample-hint", type=int, default=1, help="Upsample hint-containing examples by this factor (e.g., 4 = 4x copies)")
     p.add_argument("--max-correct", type=int, default=None, help="Downsample correct examples to at most this many (random subset, seed=42)")
@@ -603,7 +540,6 @@ def main():
              "purely so both base models see identical tokenization of the same "
              "data and their SFT runs stay comparable. Use for Qwen3-* models.")
     p.add_argument("--completion-only-loss", action="store_true", help="Mask the prompt and the injected <response> hints out of the loss. Off by default: every RL parent was trained on the full sequence, and the masked ablation scored lower")
-    p.add_argument("--upsample-abstain", type=int, default=1, help="Upsample abstained examples by this factor (e.g., 2 = 2x copies)")
     p.set_defaults(func=cmd_train_sft)
 
     # train_rl

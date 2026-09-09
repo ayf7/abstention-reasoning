@@ -71,7 +71,6 @@ def generate_puzzles(
     # Calculate count per variant
     counts = {}
     remaining = num_puzzles
-    variants = list(operand_distribution.keys())
     for i, (num_ops, prop) in enumerate(operand_distribution.items()):
         if i == len(operand_distribution) - 1:
             counts[num_ops] = remaining

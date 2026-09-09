@@ -164,7 +164,7 @@ class CompetitionMathTask(BaseTask):
                 hints_str = "(no hints available)"
             content = content.replace("{hints}", hints_str)
 
-        # Format hints_block (for hint_analysis: empty when no hints, block of text when hints present)
+        # Format hints_block (empty when no hints, block of text when hints present)
         if "{hints_block}" in content:
             hints = primitive.get("hints", [])
             if hints:
@@ -241,106 +241,11 @@ class CompetitionMathTask(BaseTask):
         """
         Check if the generated answer matches the correct answer.
 
-        Handles four formats:
-        - abstention_verify: <answer>...</answer><verify>...</verify> followed by <commit> or <abstain>
-        - abstention_commit: <answer>...</answer> followed by <commit> or <abstain>
-        - simple_abstention: ends with </think>\\n\\n<abstain>
-        - standard: <answer>...</answer>
+        Answers are read from <answer>...</answer>.
 
         Uses math-verify for robust symbolic equivalence checking.
         Gold answers are parsed as LaTeX, predicted answers as plain expressions.
         """
-        # Detect cross-verification format: </verify><answer>correct/incorrect</answer>
-        # Note: opening <verify> is the assistant prefix and not in generation text
-        # Distinguished from abstention_verify by: no <commit>/<abstain> tags
-        verify_verdict = re.search(
-            r'</verify>\s*<answer>\s*(correct|incorrect)\s*</answer>',
-            generation, re.DOTALL | re.IGNORECASE,
-        )
-        if verify_verdict and not re.search(r'<commit>|<abstain>', generation):
-            verdict = verify_verdict.group(1).lower()
-            generation_correct = primitive.get("generation_correct", False)
-            is_correct = (verdict == "correct") == generation_correct
-            return is_correct, {
-                "verdict": verdict,
-                "generation_correct": generation_correct,
-                "verify_format": True,
-            }
-
-        # Detect abstention_verify format: <answer>...</answer><verify>...</verify><commit>/<abstain>
-        has_verify_commit = bool(re.search(r'</verify>\s*<commit>', generation))
-        has_verify_abstain = bool(re.search(r'</verify>\s*<abstain>', generation))
-        has_verify_tag = bool(re.search(r'<verify>', generation))
-
-        if has_verify_commit or has_verify_abstain or has_verify_tag:
-            predicted = self.extract_answer(generation)
-            if predicted is None:
-                return False, {
-                    "predicted_answer": None,
-                    "committed": has_verify_commit,
-                    "abstained": has_verify_abstain,
-                    "error": "no_answer_tag",
-                }
-
-            predicted = predicted.strip()
-            correct_answer = primitive.get("answer", "")
-
-            if correct_answer is None:
-                return False, {
-                    "predicted_answer": predicted,
-                    "committed": has_verify_commit,
-                    "abstained": has_verify_abstain,
-                    "error": "no_ground_truth",
-                }
-
-            is_correct = self._verify_answer(predicted, correct_answer)
-            return is_correct, {
-                "predicted_answer": predicted,
-                "correct_answer": correct_answer,
-                "committed": has_verify_commit,
-                "abstained": has_verify_abstain,
-            }
-
-        # Detect abstention_commit format: <answer>...</answer>\n<commit> or <abstain>
-        has_commit = bool(re.search(r'</answer>\s*<commit>', generation))
-        has_abstain_after = bool(re.search(r'</answer>\s*<abstain>', generation))
-
-        if has_commit or has_abstain_after:
-            predicted = self.extract_answer(generation)
-            if predicted is None:
-                return False, {
-                    "predicted_answer": None,
-                    "committed": has_commit,
-                    "abstained": has_abstain_after,
-                    "error": "no_answer_tag",
-                }
-
-            predicted = predicted.strip()
-            correct_answer = primitive.get("answer", "")
-
-            if correct_answer is None:
-                return False, {
-                    "predicted_answer": predicted,
-                    "committed": has_commit,
-                    "abstained": has_abstain_after,
-                    "error": "no_ground_truth",
-                }
-
-            is_correct = self._verify_answer(predicted, correct_answer)
-            return is_correct, {
-                "predicted_answer": predicted,
-                "correct_answer": correct_answer,
-                "committed": has_commit,
-                "abstained": has_abstain_after,
-            }
-
-        # Check for simple abstention (ends with </think>\n\n<abstain>)
-        if generation.rstrip().endswith("</think>\n\n<abstain>"):
-            return False, {
-                "predicted_answer": None,
-                "abstained": True,
-            }
-
         # Standard format
         predicted = self.extract_answer(generation)
 
@@ -394,7 +299,6 @@ class CompetitionMathTask(BaseTask):
     def filter_for_sft(
         self,
         examples: list[dict],
-        include_abstained: bool = True,
         include_wrong_valid_format: bool = False,
         nested_request: bool = False,
     ) -> list[dict]:
@@ -413,11 +317,6 @@ class CompetitionMathTask(BaseTask):
         exists to remove, and a handful of examples is enough for the model to
         learn that </think> is a legal place to stop and ask.
         """
-        def is_abstained(ex):
-            return (ex.get("abstained", False)
-                    or ex.get("metadata", {}).get("abstained", False)
-                    or "</think>\n\n<abstain>" in ex.get("generation", ""))
-
         def has_hints_and_answer(ex):
             gen = ex.get("generation", "")
             return "<request></request>" in gen and "<answer>" in gen
@@ -425,8 +324,6 @@ class CompetitionMathTask(BaseTask):
         filtered = []
         for ex in examples:
             if ex.get("correct", False):
-                filtered.append(ex)
-            elif include_abstained and is_abstained(ex):
                 filtered.append(ex)
             elif include_wrong_valid_format and has_hints_and_answer(ex):
                 filtered.append(ex)
@@ -438,29 +335,11 @@ class CompetitionMathTask(BaseTask):
         return filtered
 
     def _categorize_result(self, r: dict) -> str:
-        """Categorize a result into: correct, abstained, incomplete, wrong.
+        """Categorize a result into: correct, incomplete, wrong.
 
-        For commit/abstain formats, committed results are correct/wrong,
-        abstained results are always "abstained", and anything else is "incomplete".
-        For standard format (no commit/abstain fields), uses correctness directly.
+        Correctness decides, with a truncated or answer-less rollout counted as
+        "incomplete" rather than wrong.
         """
-        metadata = r.get("metadata", {})
-
-        has_committed = r.get("committed", False) or metadata.get("committed", False)
-        has_abstained = r.get("abstained", False) or metadata.get("abstained", False)
-
-        if has_committed:
-            return "correct" if r.get("correct", False) else "wrong"
-        if has_abstained:
-            return "abstained"
-
-        # If this is a commit/abstain format result (other results in the batch
-        # have committed/abstained), then neither committed nor abstained = incomplete
-        # We detect this by checking if committed/abstained keys exist at all
-        if "committed" in r or "committed" in metadata:
-            return "incomplete"
-
-        # Standard format (no commit/abstain fields)
         if r.get("correct", False):
             return "correct"
         elif r.get("finish_reason") == "length" or r.get("error") == "no_answer_tag":
@@ -473,16 +352,15 @@ class CompetitionMathTask(BaseTask):
         Compute competition_math-specific metrics.
 
         Groups by both problem type and difficulty level.
-        When results use abstention_commit format, also computes precision/recall/F1.
         """
         from collections import defaultdict
 
         metrics = super().compute_metrics(results)
 
         # Track distribution by level
-        dist_by_level = defaultdict(lambda: {"count": 0, "correct": 0, "incomplete": 0, "abstained": 0, "wrong": 0})
+        dist_by_level = defaultdict(lambda: {"count": 0, "correct": 0, "incomplete": 0, "wrong": 0})
         # Track distribution by type
-        dist_by_type = defaultdict(lambda: {"count": 0, "correct": 0, "incomplete": 0, "abstained": 0, "wrong": 0})
+        dist_by_type = defaultdict(lambda: {"count": 0, "correct": 0, "incomplete": 0, "wrong": 0})
 
         for r in results:
             level = r.get("level", "unknown")
@@ -496,7 +374,7 @@ class CompetitionMathTask(BaseTask):
             dist_by_type[ptype][category] += 1
 
         # Compute totals
-        total_dist = {"count": 0, "correct": 0, "incomplete": 0, "abstained": 0, "wrong": 0}
+        total_dist = {"count": 0, "correct": 0, "incomplete": 0, "wrong": 0}
         for v_dist in dist_by_level.values():
             for k in total_dist:
                 total_dist[k] += v_dist[k]
@@ -504,74 +382,6 @@ class CompetitionMathTask(BaseTask):
         metrics["distribution_by_level"] = dict(dist_by_level)
         metrics["distribution_by_type"] = dict(dist_by_type)
         metrics["distribution"] = total_dist
-
-        # Commit/abstain precision/recall/F1 (abstention_commit format)
-        has_commit_format = any(
-            r.get("committed", False) or r.get("abstained", False)
-            or r.get("metadata", {}).get("committed", False)
-            for r in results
-        )
-        if has_commit_format:
-            def _is_committed(r):
-                return r.get("committed", False) or r.get("metadata", {}).get("committed", False)
-            def _is_abstained(r):
-                return r.get("abstained", False) or r.get("metadata", {}).get("abstained", False)
-
-            committed = [r for r in results if _is_committed(r)]
-            abstained = [r for r in results if _is_abstained(r)]
-            committed_set = set(id(r) for r in committed)
-            abstained_set = set(id(r) for r in abstained)
-            incomplete = [r for r in results if id(r) not in committed_set and id(r) not in abstained_set]
-
-            committed_correct = sum(1 for r in committed if r.get("correct", False))
-            abstained_correct = sum(1 for r in abstained if r.get("correct", False))
-
-            precision = committed_correct / len(committed) if committed else 0.0
-            total_correct = committed_correct + abstained_correct
-            recall = committed_correct / total_correct if total_correct > 0 else 0.0
-            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-
-            # Accuracy = committed_correct / total (not raw correctness)
-            metrics["accuracy"] = committed_correct / len(results) if results else 0.0
-            metrics["correct"] = committed_correct
-
-            metrics["commit_stats"] = {
-                "total": len(results),
-                "committed": len(committed),
-                "committed_correct": committed_correct,
-                "committed_wrong": len(committed) - committed_correct,
-                "abstained": len(abstained),
-                "abstained_correct": abstained_correct,
-                "abstained_wrong": len(abstained) - abstained_correct,
-                "incomplete": len(incomplete),
-                "precision": precision,
-                "recall": recall,
-                "f1": f1,
-            }
-
-            # Per-level commit breakdown
-            commit_by_level = defaultdict(lambda: {
-                "commit_correct": 0, "commit_wrong": 0,
-                "abstain_correct": 0, "abstain_wrong": 0,
-                "incomplete": 0, "count": 0,
-            })
-            for r in results:
-                level = r.get("level", "unknown")
-                commit_by_level[level]["count"] += 1
-                if _is_committed(r):
-                    if r.get("correct", False):
-                        commit_by_level[level]["commit_correct"] += 1
-                    else:
-                        commit_by_level[level]["commit_wrong"] += 1
-                elif _is_abstained(r):
-                    if r.get("correct", False):
-                        commit_by_level[level]["abstain_correct"] += 1
-                    else:
-                        commit_by_level[level]["abstain_wrong"] += 1
-                else:
-                    commit_by_level[level]["incomplete"] += 1
-
-            metrics["commit_by_level"] = dict(commit_by_level)
 
         return metrics
 
@@ -584,81 +394,34 @@ class CompetitionMathTask(BaseTask):
 
         # By difficulty level
         lines.append("By Difficulty Level:")
-        lines.append(f"{'Level':<12} {'Count':>7} {'Correct':>10} {'Incomplete':>12} {'Abstained':>11} {'Wrong':>8}")
-        lines.append("-" * 65)
+        lines.append(f"{'Level':<12} {'Count':>7} {'Correct':>10} {'Incomplete':>12} {'Wrong':>8}")
+        lines.append("-" * 53)
 
         dist_by_level = metrics.get("distribution_by_level", {})
         for level in sorted(dist_by_level.keys()):
             d = dist_by_level[level]
             lines.append(
-                f"{level:<12} {d['count']:>7} {d['correct']:>10} {d['incomplete']:>12} {d['abstained']:>11} {d['wrong']:>8}"
+                f"{level:<12} {d['count']:>7} {d['correct']:>10} {d['incomplete']:>12} {d['wrong']:>8}"
             )
 
         lines.append("")
 
         # By problem type
         lines.append("By Problem Type:")
-        lines.append(f"{'Type':<24} {'Count':>7} {'Correct':>10} {'Incomplete':>12} {'Abstained':>11} {'Wrong':>8}")
-        lines.append("-" * 77)
+        lines.append(f"{'Type':<24} {'Count':>7} {'Correct':>10} {'Incomplete':>12} {'Wrong':>8}")
+        lines.append("-" * 65)
 
         dist_by_type = metrics.get("distribution_by_type", {})
         for ptype in sorted(dist_by_type.keys()):
             d = dist_by_type[ptype]
             lines.append(
-                f"{ptype:<24} {d['count']:>7} {d['correct']:>10} {d['incomplete']:>12} {d['abstained']:>11} {d['wrong']:>8}"
+                f"{ptype:<24} {d['count']:>7} {d['correct']:>10} {d['incomplete']:>12} {d['wrong']:>8}"
             )
 
         # Summary
         lines.append("")
         d = metrics.get("distribution", {})
         total_count = d.get("count", 0)
-        commit_stats = metrics.get("commit_stats")
-
-        if commit_stats:
-            answeracc = (commit_stats["committed_correct"] + commit_stats["abstained_correct"]) / total_count if total_count else 0
-            abstention = commit_stats["abstained"] / total_count if total_count else 0
-            non_abstained = total_count - commit_stats["abstained"]
-            precision = commit_stats["committed_correct"] / non_abstained if non_abstained else 0
-            raw_correct = d.get("correct", 0)
-            raw_acc = raw_correct / total_count if total_count else 0
-            lines.append(f"Total: {total_count} | RawAcc: {raw_acc:.2%} ({raw_correct}/{total_count})  AnswerAcc: {answeracc:.2%}  Abstention: {abstention:.2%}  Precision: {precision:.2%}")
-        else:
-            lines.append(f"Total: {total_count} | Correct: {d.get('correct', 0)} | Accuracy: {metrics.get('accuracy', 0):.2%}")
-
-        if commit_stats:
-            lines.extend([
-                "",
-                "Commit/Abstain Analysis:",
-                f"  {'':>18} {'Correct':>10} {'Wrong':>10} {'Total':>10}",
-                f"  {'Committed':>18} {commit_stats['committed_correct']:>10} {commit_stats['committed_wrong']:>10} {commit_stats['committed']:>10}",
-                f"  {'Abstained':>18} {commit_stats['abstained_correct']:>10} {commit_stats['abstained_wrong']:>10} {commit_stats['abstained']:>10}",
-                f"  {'Incomplete':>18} {'':>10} {'':>10} {commit_stats['incomplete']:>10}",
-                "",
-                f"  Precision: {commit_stats['precision']:.3f}  (committed_correct / committed)",
-                f"  Recall:    {commit_stats['recall']:.3f}  (committed_correct / all_correct)",
-                f"  F1:        {commit_stats['f1']:.3f}",
-            ])
-
-            # Per-level commit breakdown
-            commit_by_level = metrics.get("commit_by_level")
-            if commit_by_level:
-                lines.extend([
-                    "",
-                    "Commit/Abstain by Level:",
-                    f"  {'Level':<12} {'Commit+Cor':>12} {'Commit+Wrg':>12} {'Abst+Wrg':>12} {'Abst+Cor':>12} {'Incomplete':>12}",
-                    "  " + "-" * 72,
-                ])
-                totals = {"commit_correct": 0, "commit_wrong": 0, "abstain_wrong": 0, "abstain_correct": 0, "incomplete": 0}
-                for level in sorted(commit_by_level.keys()):
-                    d = commit_by_level[level]
-                    lines.append(
-                        f"  {level:<12} {d['commit_correct']:>12} {d['commit_wrong']:>12} {d['abstain_wrong']:>12} {d['abstain_correct']:>12} {d['incomplete']:>12}"
-                    )
-                    for k in totals:
-                        totals[k] += d[k]
-                lines.append("  " + "-" * 72)
-                lines.append(
-                    f"  {'Total':<12} {totals['commit_correct']:>12} {totals['commit_wrong']:>12} {totals['abstain_wrong']:>12} {totals['abstain_correct']:>12} {totals['incomplete']:>12}"
-                )
+        lines.append(f"Total: {total_count} | Correct: {d.get('correct', 0)} | Accuracy: {metrics.get('accuracy', 0):.2%}")
 
         return "\n".join(lines)

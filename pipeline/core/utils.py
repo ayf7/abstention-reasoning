@@ -67,12 +67,6 @@ def extract_answer(text: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def extract_think(text: str) -> str | None:
-    """Extract content between <think> and </think> tags."""
-    match = re.search(r"<think>(.*?)</think>", text, re.DOTALL | re.IGNORECASE)
-    return match.group(1).strip() if match else None
-
-
 def safe_eval(expr: str) -> Any:
     """
     Safely evaluate arithmetic expressions.

@@ -13,46 +13,6 @@ from pipeline.core.method import Method
 from pipeline.tasks import get_task
 
 
-def _get_verify_field(record, field):
-    """Get verify field from either top-level (evaluate) or metadata (generate)."""
-    if field in record:
-        return record[field]
-    return record.get("metadata", {}).get(field)
-
-
-def _compute_verify_metrics(records):
-    """Compute verify confusion matrix from records. Returns dict or None."""
-    fmt = [r for r in records if _get_verify_field(r, "verify_format")]
-    if not fmt:
-        return None
-    n = len(fmt)
-    tp = sum(1 for r in fmt if _get_verify_field(r, "verdict") == "correct" and _get_verify_field(r, "generation_correct"))
-    fp = sum(1 for r in fmt if _get_verify_field(r, "verdict") == "correct" and not _get_verify_field(r, "generation_correct"))
-    fn = sum(1 for r in fmt if _get_verify_field(r, "verdict") == "incorrect" and _get_verify_field(r, "generation_correct"))
-    tn = sum(1 for r in fmt if _get_verify_field(r, "verdict") == "incorrect" and not _get_verify_field(r, "generation_correct"))
-    no_fmt = len(records) - n
-
-    return {
-        "accuracy": (tp + tn) / n if n else 0,
-        "precision": tp / (tp + fp) if (tp + fp) else 0,
-        "recall": tp / (tp + fn) if (tp + fn) else 0,
-        "tp": tp, "fp": fp, "fn": fn, "tn": tn,
-        "with_format": n, "malformed": no_fmt,
-        "said_correct": tp + fp, "actually_correct": tp + fn,
-    }
-
-
-def _print_verify_metrics(records):
-    """Print verify confusion matrix if records contain verify metadata."""
-    vm = _compute_verify_metrics(records)
-    if not vm:
-        return None
-    print(f"  Verify ({vm['with_format']} with format, {vm['malformed']} malformed):")
-    print(f"    Accuracy: {vm['accuracy']:.1%}  Precision: {vm['precision']:.1%}  Recall: {vm['recall']:.1%}")
-    print(f"    TP={vm['tp']} FP={vm['fp']} FN={vm['fn']} TN={vm['tn']}  (said correct: {vm['said_correct']}, actually correct: {vm['actually_correct']})")
-    return vm
-
-
 def extract_generation_hints(text: str) -> list[str]:
     """Extract '(using the <category> of <name>)' hints from generated text.
 
@@ -414,9 +374,6 @@ def select_best_sample(
     - "most_hints": Among correct samples, pick the one with most hint requests.
       Falls back to most hints among incorrect if none correct. Useful for
       generating SFT data that teaches models to use hints.
-    - "prefer_abstain": If any sample is correct, pick shortest correct CoT.
-      Otherwise, prefer an abstaining sample (for hard problems the model should
-      learn to abstain on). Falls back to shortest incorrect CoT.
     - "random_correct": Pick uniformly at random among correct samples, and
       return None when none are correct so the caller can drop the problem.
       The other strategies all fall back to an incorrect sample, and the
@@ -428,7 +385,7 @@ def select_best_sample(
         samples: List of generation results with 'text', 'finish_reason', 'token_count'
         task: Task instance for checking correctness
         primitive: Primitive data with ground truth
-        strategy: Selection strategy ("shortest_cot", "most_hints", or "prefer_abstain")
+        strategy: Selection strategy ("shortest_cot", "most_hints", "random_correct")
 
     Returns:
         Best sample dict with added 'correct' and 'metadata' fields
@@ -445,7 +402,6 @@ def select_best_sample(
             "metadata": meta,
             "cot_length": cot_length,
             "_num_hints": num_hints,
-            "_abstained": meta.get("abstained", False),
         })
 
     # Drop samples that ran the hint pool dry before choosing. This matters most
@@ -471,15 +427,6 @@ def select_best_sample(
             import random as _random
             rng = _random.Random(0)
         best_sample = rng.choice(correct_samples)
-    elif strategy == "prefer_abstain":
-        # Abstaining sample always wins if available
-        abstained = [s for s in evaluated_samples if s["_abstained"]]
-        if abstained:
-            best_sample = abstained[0]
-        elif correct_samples:
-            best_sample = min(correct_samples, key=lambda s: s["cot_length"])
-        else:
-            best_sample = min(incorrect_samples, key=lambda s: s["cot_length"])
     elif strategy == "most_hints":
         candidates = correct_samples if correct_samples else incorrect_samples
         best_sample = max(candidates, key=lambda s: s["_num_hints"])
@@ -490,7 +437,6 @@ def select_best_sample(
     # Remove internal fields
     del best_sample["cot_length"]
     del best_sample["_num_hints"]
-    del best_sample["_abstained"]
 
     # Fraction of samples that were correct. The selection strategies above all
     # collapse to a single sample, which throws away how *reliably* the model
@@ -690,7 +636,6 @@ def generate(
     print(f"Loaded {len(prompts_data)} prompts from {prompts_path}")
 
     # Initialize generator (once, reused across retry iterations)
-    stop_strings = method.stop_strings if method else None
     config = GenerationConfig(
         model_name=actual_model_name,
         batch_size=batch_size,
@@ -702,7 +647,6 @@ def generate(
         data_parallel_size=data_parallel_size,
         gpu_memory_utilization=gpu_memory_utilization,
         verbose=verbose,
-        stop_strings=stop_strings,
         ban_hint_requests=no_hints,
         seed=seed,
         hint_transition=method.hint_transition if method else True,
@@ -725,16 +669,10 @@ def generate(
             records_by_index = {r["index"]: r for r in existing_records}
 
             if retry_incorrect:
-                def _is_done(r):
-                    if r.get("correct", False):
-                        return True
-                    if r.get("metadata", {}).get("abstained", False):
-                        return True
-                    return False
-                incorrect_indices = {r["index"] for r in existing_records if not _is_done(r)}
+                incorrect_indices = {r["index"] for r in existing_records if not r.get("correct", False)}
                 done_count = len(existing_records) - len(incorrect_indices)
-                print(f"Retry mode: {done_count} done (correct + abstained), retrying {len(incorrect_indices)} incorrect")
-                completed_indices = {r["index"] for r in existing_records if _is_done(r)}
+                print(f"Retry mode: {done_count} correct, retrying {len(incorrect_indices)} incorrect")
+                completed_indices = {r["index"] for r in existing_records if r.get("correct", False)}
             elif retry_truncated:
                 truncated_indices = {r["index"] for r in existing_records if r.get("finish_reason") == "length"}
                 done_count = len(existing_records) - len(truncated_indices)
@@ -953,7 +891,6 @@ def generate(
 
             correct = sum(1 for r in records if r["correct"])
             print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%)")
-            _print_verify_metrics(records)
             print(f"Saved dataset to {output_path}")
             _maybe_write_profile(difficulty_profile_out, records, actual_model_name,
                                  split, num_samples)
@@ -1056,7 +993,6 @@ def generate(
                     trunc = count_truncation(records)
                     print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%), "
                           f"{trunc['think']} think-truncated, {trunc['answer']} answer-truncated{forced_note}")
-                    _print_verify_metrics(records)
                     print(f"Saved dataset to {output_path}")
 
                     if truncated_count == 0 or not retry_truncated:
@@ -1173,7 +1109,6 @@ def generate(
         records = sorted(records_by_index.values(), key=lambda r: r["index"])
         correct = sum(1 for r in records if r["correct"])
         print(f"Generated {len(records)} examples: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%)")
-        _print_verify_metrics(records)
         save_json(output_path, records)
         print(f"Saved dataset to {output_path}")
 
@@ -1199,8 +1134,8 @@ def generate_until_target(
     """Phase 3: resample incorrect problems until enough are answered correctly.
 
     Wraps `generate` rather than threading another mode through its retry loop.
-    Each round re-runs with `retry_incorrect=True`, which keeps correct and
-    abstained records and regenerates only the rest, at a fresh seed. Rounds stop
+    Each round re-runs with `retry_incorrect=True`, which keeps the correct
+    records and regenerates only the rest, at a fresh seed. Rounds stop
     as soon as the correct fraction reaches the target, when a round makes no
     progress, or at `max_oversample`.
 
@@ -1252,7 +1187,7 @@ def generate_until_target(
 def _compute_multisample_metrics(details: list[dict]) -> dict:
     """Compute metrics for multi-sample evaluation.
 
-    Each detail has n_samples, n_correct, n_abstained.
+    Each detail has n_samples and n_correct.
     Returns avg@k accuracy and raw counts, overall and by variant/level.
     """
     from collections import defaultdict
@@ -1261,7 +1196,6 @@ def _compute_multisample_metrics(details: list[dict]) -> dict:
         n_problems = len(records)
         total_correct = sum(r["n_correct"] for r in records)
         total_samples = sum(r["n_samples"] for r in records)
-        total_abstained = sum(r["n_abstained"] for r in records)
         avg_accuracy = (
             sum(r["n_correct"] / r["n_samples"] for r in records) / n_problems
             if n_problems > 0 else 0
@@ -1270,7 +1204,6 @@ def _compute_multisample_metrics(details: list[dict]) -> dict:
             "n_problems": n_problems,
             "total_correct": total_correct,
             "total_samples": total_samples,
-            "total_abstained": total_abstained,
             "avg_accuracy": avg_accuracy,
         }
 
@@ -1302,25 +1235,24 @@ def _format_multisample_metrics(metrics: dict, model_name: str | None, num_sampl
     def _row(label, m):
         avg = f"{m['avg_accuracy']:.1%}"
         raw = f"{m['total_correct']}/{m['total_samples']}"
-        abst = f"{m['total_abstained']}/{m['total_samples']}" if m['total_abstained'] > 0 else "--"
-        return f"  {label:<20s}  {m['n_problems']:>5d}  {avg:>8s}  {raw:>14s}  {abst:>14s}"
+        return f"  {label:<20s}  {m['n_problems']:>5d}  {avg:>8s}  {raw:>14s}"
 
-    lines.append(f"  {'':20s}  {'N':>5s}  {'Avg@'+str(num_samples):>8s}  {'Correct/Total':>14s}  {'Abstain/Total':>14s}")
-    lines.append("  " + "-" * 67)
+    lines.append(f"  {'':20s}  {'N':>5s}  {'Avg@'+str(num_samples):>8s}  {'Correct/Total':>14s}")
+    lines.append("  " + "-" * 51)
 
     for variant, vm in sorted(metrics.get("by_variant", {}).items()):
         lines.append(_row(variant, vm))
 
-    lines.append("  " + "-" * 67)
+    lines.append("  " + "-" * 51)
     lines.append(_row("Total", metrics))
 
     if "by_level" in metrics:
         lines.append("")
-        lines.append(f"  {'':20s}  {'N':>5s}  {'Avg@'+str(num_samples):>8s}  {'Correct/Total':>14s}  {'Abstain/Total':>14s}")
-        lines.append("  " + "-" * 67)
+        lines.append(f"  {'':20s}  {'N':>5s}  {'Avg@'+str(num_samples):>8s}  {'Correct/Total':>14s}")
+        lines.append("  " + "-" * 51)
         for level, lm in sorted(metrics["by_level"].items()):
             lines.append(_row(level, lm))
-        lines.append("  " + "-" * 67)
+        lines.append("  " + "-" * 51)
         lines.append(_row("Total", metrics))
 
     return "\n".join(lines)
@@ -1418,7 +1350,6 @@ def evaluate(
     print(f"Loaded {len(prompts_data)} prompts from {prompts_path}")
 
     # Initialize generator
-    stop_strings = method.stop_strings if method else None
     config = GenerationConfig(
         model_name=actual_model_name,
         batch_size=batch_size,
@@ -1431,7 +1362,6 @@ def evaluate(
         gpu_memory_utilization=gpu_memory_utilization,
         verbose=verbose,
         seed=seed,
-        stop_strings=stop_strings,
         nested_request=method.nested_request if method else False,
         ban_hint_requests=no_hints,
     )
@@ -1584,14 +1514,12 @@ def evaluate(
                 samples.append({
                     "generation": s["text"],
                     "correct": is_correct,
-                    "abstained": meta.get("abstained", False) if isinstance(meta, dict) else False,
                     "predicted_answer": meta.get("predicted_answer") if isinstance(meta, dict) else None,
                     "finish_reason": s.get("finish_reason", "unknown"),
                     "token_count": s.get("token_count", 0),
                 })
 
             n_correct = sum(1 for s in samples if s["correct"])
-            n_abstained = sum(1 for s in samples if s["abstained"])
 
             details.append({
                 "index": prompt_data["index"],
@@ -1600,7 +1528,6 @@ def evaluate(
                 "ground_truth": prompt_data["ground_truth"],
                 "n_samples": len(samples),
                 "n_correct": n_correct,
-                "n_abstained": n_abstained,
                 "samples": samples,
             })
 
@@ -1717,11 +1644,6 @@ def evaluate(
     # Print hint analysis if multi-turn
     if hint_metrics:
         print(format_hint_metrics(hint_metrics, details))
-
-    # Print and save verify metrics if applicable
-    verify_metrics = _print_verify_metrics(details)
-    if verify_metrics:
-        results["verify_metrics"] = verify_metrics
 
     # Save
     output_path.parent.mkdir(parents=True, exist_ok=True)
