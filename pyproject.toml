@@ -13,10 +13,13 @@ dependencies = [
   "tqdm",
   "numpy",
   "accelerate",
-  "trl",
+  # 1.x defaults loss_type="chunked_nll", whose _patch_chunked_ce_lm_head does
+  # inspect.signature(model.forward.__func__); forward is a functools.partial here,
+  # so SFT dies with AttributeError. 0.27.2 is what requirements.lock.txt pins and
+  # what pipeline/commands/training.py was written against.
+  "trl==0.27.2",
   "wandb",
   "vllm==0.15.0",
-  "xformers",
   "math-verify[antlr4_9_3]",
   "datasets",
   "pyyaml",

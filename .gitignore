@@ -29,3 +29,4 @@ commands.sh
 
 artifacts/
 SCOPE.md
+.project_scope/

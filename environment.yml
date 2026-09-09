@@ -1,0 +1,57 @@
+# Conda environment for abstention-reasoning on aarch64 (Grace) + NVIDIA GB200.
+#
+#   ./setup-env.sh          # <- use this, not `conda env create` alone
+#
+# `conda env create -f environment.yml` gets you a working env for everything
+# EXCEPT vLLM inference; two post-install fixups in setup-env.sh are also
+# required. See that script for what they are and why.
+#
+# Verified on: aarch64, glibc 2.39, NVIDIA GB200, compute capability 10.0
+# (sm_100), driver 580.126.16, 4 GPUs/node, CUDA 12.8 toolchain.
+name: abstention
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+
+  # CUDA 12.8 compiler + headers. vLLM 0.15 picks the FlashInfer attention
+  # backend on sm_100 and JIT-compiles kernels at runtime; these nodes have no
+  # system CUDA toolkit (/usr/local/cuda does not exist), so nvcc, the CUDA
+  # headers and the libcuda stub all have to come from inside the env.
+  - cuda-version=12.8
+  - cuda-nvcc=12.8.93
+  - cuda-cudart-dev=12.8
+  - cuda-nvrtc-dev=12.8
+  - cuda-driver-dev=12.8
+  - cuda-libraries-dev=12.8
+  - libcublas-dev
+
+  - pip
+  - pip:
+      # CUDA 12.8 builds for aarch64, as explicit URLs. PyPI's `torch` aarch64
+      # wheel is CPU-ONLY (104 MB vs 900 MB on x86) -- a plain `pip install
+      # torch` on ARM silently leaves you with no CUDA.
+      - https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-manylinux_2_28_aarch64.whl
+      - https://download.pytorch.org/whl/cu128/torchvision-0.24.1-cp312-cp312-manylinux_2_28_aarch64.whl
+      - https://download.pytorch.org/whl/cu128/torchaudio-2.9.1-cp312-cp312-manylinux_2_28_aarch64.whl
+
+      # flash-attn ships no aarch64 wheel on PyPI (sdist only, and a source
+      # build for sm_100 takes hours). verl hardcodes
+      # attn_implementation="flash_attention_2" in its FSDP paths, so this is
+      # required for training, not optional. Prebuilt wheel from the project's
+      # GitHub releases, matched to cu12 + torch 2.9 + cp312 + aarch64.
+      - https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3%2Bcu12torch2.9cxx11abiTRUE-cp312-cp312-linux_aarch64.whl
+
+      # Pinned to match requirements.lock.txt. flashinfer-python asks only for
+      # >=4.3.4, so an unpinned install resolves to 4.7.1 -- against which
+      # flash-attn 2.8.3's FA4/cute module raises AttributeError. vllm probes
+      # that module inside `except ImportError`, which does NOT catch
+      # AttributeError, so every vLLM engine start dies during attention-backend
+      # selection. On 4.3.5 the same probe fails with ModuleNotFoundError (an
+      # ImportError), which IS caught, and vLLM falls back cleanly.
+      - nvidia-cutlass-dsl==4.3.5
+      # see pyproject.toml: trl 1.x breaks SFT on this stack
+      - trl==0.27.2
+
+      - -e .
+      - -e verl/
