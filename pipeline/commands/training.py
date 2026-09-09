@@ -61,8 +61,8 @@ def train_sft(
         base_model: Base model to fine-tune
         method_name: Method name for auto-derived paths
         run_id: Run identifier for organizing outputs (default: "default")
-        dataset_path: Path to generated dataset (default: artifacts/{task}/{method}/datasets/sft_{model}.json)
-        output_path: Where to save trained model (default: artifacts/{task}/{method}/models/sft/{run_id}/model)
+        dataset_path: Path to generated dataset (default: artifacts/{task}/datasets/sft_whole__{method}.json)
+        output_path: Where to save trained model (default: artifacts/{task}/models/{method}_sft/{run_id}/model)
         epochs: Number of training epochs
         batch_size: Per-device batch size
         gradient_accumulation_steps: Gradient accumulation steps
@@ -94,23 +94,24 @@ def train_sft(
                 "Either --method or --dataset must be specified. "
                 "Use --method to auto-derive paths, or --dataset for explicit paths."
             )
-        datasets_dir = method.datasets_dir(task_name)
         # Prefer sft_whole, fall back to sft_train, and never pick sft_val --
-        # it is the held-out tail, so a bare glob("sft_*.json") could silently
-        # train on the validation split. sorted() so the choice among several
-        # generator models is at least deterministic rather than dirent order.
-        for prefix in ("sft_whole", "sft_train"):
-            sft_files = sorted(datasets_dir.glob(f"{prefix}*.json"))
-            if sft_files:
+        # it is the held-out tail, so training on it would be training on the
+        # validation split. Every method's datasets share one directory, so the
+        # lookup is by exact name rather than a glob that would also match a
+        # sibling method's files.
+        for split in ("sft_whole", "sft_train"):
+            candidate = method.dataset_path(task_name, split)
+            if candidate.exists():
+                dataset_path = candidate
                 break
         else:
             raise FileNotFoundError(
-                f"No SFT datasets found in {datasets_dir}. "
+                f"No SFT dataset for method '{method.name}' in "
+                f"{method.datasets_dir(task_name)} (looked for "
+                f"{method.artifact_stem('sft_whole')}.json and "
+                f"{method.artifact_stem('sft_train')}.json). "
                 f"Run 'python -m pipeline generate --task {task_name} --method {method_name}' first."
             )
-        dataset_path = sft_files[0]
-        if len(sft_files) > 1:
-            print(f"Warning: Multiple SFT datasets found, using {dataset_path}")
 
     # Default output path
     if output_path is None:
@@ -620,10 +621,10 @@ def train_rl(
         actor_model = base_model
     elif sft_model_path is not None:
         actor_model = str(sft_model_path)
-    elif method is not None:
-        actor_model = str(method.sft_model_path(task_name))
+    elif method is not None and run_id:
+        actor_model = str(method.sft_model_path(task_name, run_id))
     else:
-        raise ValueError("Either --base-model or --sft-model is required (or use --method)")
+        raise ValueError("Either --base-model or --sft-model is required (or use --method and --run-id)")
 
     # Derive run directory structure from method
     run_dir = None

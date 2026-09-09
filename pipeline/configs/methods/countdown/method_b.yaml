@@ -1,12 +1,11 @@
-name: hint_ablations
-template_variant: hint_ablations
+template_variant: method_b
 reward_function: compute_score_hint
 multi_turn: true
 max_turns: 6
 mask_response_tokens: true  # Mask <response>...</response> tokens during SFT
 # Forced hint requests get no canned lead-in phrase, so <request></request> has
 # to be predicted from the reasoning state rather than triggered by a memorised
-# cue. This is the countdown port of competition_math/hint_ablations.
+# cue. This is the countdown port of competition_math/method_b.
 hint_transition: false
 # The request lives inside the think block, so </think> is reached exactly once,
 # immediately before <answer>. That is what makes the counterfactual eval

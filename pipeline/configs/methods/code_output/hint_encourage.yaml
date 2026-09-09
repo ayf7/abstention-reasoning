@@ -1,4 +1,3 @@
-name: hint_encourage
 template_variant: hint
 reward_function: compute_score_hint
 multi_turn: true

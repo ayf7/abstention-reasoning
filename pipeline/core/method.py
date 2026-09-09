@@ -7,8 +7,6 @@ from typing import Any
 
 import yaml
 
-from .utils import model_short_name
-
 
 # Repo root, derived from this file's location: <repo>/pipeline/core/method.py.
 # Config, template and artifact lookups used to be relative to the process's
@@ -81,7 +79,7 @@ class Method:
         Load a method config.
 
         Args:
-            name_or_path: Either a method name (e.g., "simple", "hint")
+            name_or_path: Either a method name (e.g., "baseline", "method_b")
                           or a path to a YAML config file
             task_name: Task name (used to find config in standard location)
 
@@ -91,6 +89,8 @@ class Method:
         Lookup order:
             1. If name_or_path is a file path, load directly
             2. Otherwise, look in pipeline/configs/methods/{task}/{name}.yaml
+
+        Either way the method's name is the config file's stem.
         """
         path = Path(name_or_path)
 
@@ -110,8 +110,12 @@ class Method:
         with open(config_path) as f:
             data = yaml.safe_load(f)
 
+        # The filename is the name, and the only source of it. It decides the
+        # templates, the __suffix on every prompt and dataset file, and the
+        # model group directory, so a `name:` key free to disagree with the
+        # file it sits in would be a second source of truth for all three.
         return cls(
-            name=data.get("name", name_or_path),
+            name=config_path.stem,
             template_variant=data["template_variant"],
             reward_function=data.get("reward_function", "compute_score"),
             reward_kwargs=data.get("reward_kwargs", {}),
@@ -146,56 +150,82 @@ class Method:
     # =========================================================================
     # Artifact path utilities
     # =========================================================================
+    def task_dir(self, task_name: str) -> Path:
+        """Root of a task's artifacts. Method-independent: prompts, datasets and
+        models all live in shared directories and are told apart by name, not by
+        sitting under a per-method subtree."""
+        return ARTIFACTS_ROOT / task_name
 
-    def artifacts_dir(self, task_name: str) -> Path:
-        """Get the artifacts directory for this method."""
-        return ARTIFACTS_ROOT / task_name / self.name
+    # -- prompts and datasets -------------------------------------------------
+
+    def artifact_stem(self, split: str, desc: str | None = None) -> str:
+        """`{split}__{method}` (+ `_{desc}`), the shared stem for a prompt file
+        and the dataset generated from it."""
+        stem = f"{split}__{self.name}"
+        return f"{stem}_{desc}" if desc else stem
 
     def prompts_dir(self, task_name: str) -> Path:
-        """Get the prompts directory."""
-        return self.artifacts_dir(task_name) / "prompts"
+        return self.task_dir(task_name) / "prompts"
 
-    def prompts_path(self, task_name: str, split: str) -> Path:
-        """Get the prompts path for a specific split."""
+    def prompts_path(self, task_name: str, split: str, desc: str | None = None) -> Path:
         ext = ".parquet" if split.startswith("rl") else ".json"
-        return self.prompts_dir(task_name) / f"{split}{ext}"
+        return self.prompts_dir(task_name) / f"{self.artifact_stem(split, desc)}{ext}"
 
     def datasets_dir(self, task_name: str) -> Path:
-        """Get the datasets directory."""
-        return self.artifacts_dir(task_name) / "datasets"
+        return self.task_dir(task_name) / "datasets"
 
-    def dataset_path(self, task_name: str, split: str, model_name: str) -> Path:
-        """Get the dataset path for a specific split and model."""
-        model_slug = model_short_name(model_name)
-        return self.datasets_dir(task_name) / f"{split}_{model_slug}.json"
+    def dataset_path(self, task_name: str, split: str, desc: str | None = None) -> Path:
+        return self.datasets_dir(task_name) / f"{self.artifact_stem(split, desc)}.json"
+
+    # -- models ---------------------------------------------------------------
 
     def models_dir(self, task_name: str) -> Path:
-        """Get the models directory."""
-        return self.artifacts_dir(task_name) / "models"
+        return self.task_dir(task_name) / "models"
+
+    # Directory suffix per training stage. RL output is the finished model for
+    # a method, so it lands in `_models`; `_sft` holds the intermediate it was
+    # initialized from. The stage is still spelled "rl" everywhere in the code
+    # and on the command line -- only the directory reads as the result.
+    GROUP_SUFFIX = {"sft": "sft", "rl": "models"}
+
+    def group_dir(self, task_name: str, stage: str) -> Path:
+        """`models/{method}_{sft,models}` -- e.g. models/baseline_sft, models/method_b_models."""
+        try:
+            suffix = self.GROUP_SUFFIX[stage]
+        except KeyError:
+            raise ValueError(
+                f"stage must be one of {sorted(self.GROUP_SUFFIX)}, got {stage!r}"
+            ) from None
+        return self.models_dir(task_name) / f"{self.name}_{suffix}"
+
+    def run_dir(self, task_name: str, stage: str, run_id: str) -> Path:
+        """One training run: `models/{method}_{sft,models}/{run_id}`.
+
+        run_id is the directory name verbatim and is always required. Nothing
+        derives it from the base checkpoint: the convention (`1.5b`, `4b`,
+        `4b-instruct`, `1.5b__extend-quad-a0.5`) is a naming decision, not a
+        fact about the model, so a guessed name would only drift from it.
+        """
+        if not run_id:
+            raise ValueError(
+                f"--run-id is required: it names the directory under "
+                f"{self.group_dir(task_name, stage).relative_to(ARTIFACTS_ROOT.parent)}."
+            )
+        return self.group_dir(task_name, stage) / run_id
 
     def _ensure_run_dir(self, run_dir: Path, task_name: str) -> Path:
+        """Create a run directory, or resolve it to external storage.
+
+        With EXTERNAL_MODELS_ROOT set, a run that does not exist yet is created
+        there and symlinked in, so new runs land on shared storage even when
+        older ones are local.
         """
-        Ensure a run directory exists, using external storage if configured.
-
-        If EXTERNAL_MODELS_ROOT is set and the run directory doesn't already
-        exist, creates the target directory on external storage and symlinks
-        the run dir to it. This operates at the run level (e.g.,
-        models/sft/{run_id}/) so that new runs go to external storage even
-        if older runs exist locally.
-
-        Args:
-            run_dir: The run directory path (e.g., models/sft/{run_id}/)
-            task_name: Task name
-
-        Returns:
-            Path to the run directory.
-        """
-        # A convenience alias (models/rl/qwen3-4b -> qwen3-4b-g8) names a sibling
-        # run in the same directory, so the canonical size names resolve without
+        # A convenience alias (models/baseline_rl/4b -> 4b__stdnorm) names a
+        # sibling run in the same directory, so a short name resolves without
         # renaming anything. Training through one would write into the run it
         # points at and destroy it. Such aliases are relative and have no "/";
-        # the external-storage links created below and the artifacts_legacy
-        # links are absolute and remain valid resume targets.
+        # the external-storage links created below are absolute and remain
+        # valid resume targets.
         if run_dir.is_symlink():
             target = os.readlink(run_dir)
             if "/" not in target:
@@ -208,19 +238,13 @@ class Method:
                 )
             return run_dir
 
-        # Already exists -> leave as-is
         if run_dir.exists():
             return run_dir
 
-        # External storage configured -> create symlink
         if EXTERNAL_MODELS_ROOT is not None:
-            # Mirror the relative path under external storage
-            # run_dir is like: artifacts/{task}/{method}/models/sft/{run_id}
-            # external is:     /share/goyal/ayf7/models/{task}/{method}/sft/{run_id}
             rel_to_models = run_dir.relative_to(self.models_dir(task_name))
-            external_path = EXTERNAL_MODELS_ROOT / task_name / self.name / rel_to_models
+            external_path = EXTERNAL_MODELS_ROOT / task_name / rel_to_models
             external_path.mkdir(parents=True, exist_ok=True)
-            # Ensure parent dir exists locally
             run_dir.parent.mkdir(parents=True, exist_ok=True)
             run_dir.symlink_to(external_path)
             print(f"Created symlink: {run_dir} -> {external_path}")
@@ -229,80 +253,50 @@ class Method:
 
         return run_dir
 
-    def ensure_sft_run_dir(self, task_name: str, run_id: str | None = None) -> Path:
-        """Ensure the SFT run directory exists, symlinking to external storage if needed."""
+    def sft_run_dir(self, task_name: str, run_id: str) -> Path:
+        return self.run_dir(task_name, "sft", run_id)
+
+    def rl_run_dir(self, task_name: str, run_id: str) -> Path:
+        return self.run_dir(task_name, "rl", run_id)
+
+    def ensure_sft_run_dir(self, task_name: str, run_id: str) -> Path:
         return self._ensure_run_dir(self.sft_run_dir(task_name, run_id), task_name)
 
-    def ensure_rl_run_dir(self, task_name: str, run_id: str | None = None) -> Path:
-        """Ensure the RL run directory exists, symlinking to external storage if needed."""
+    def ensure_rl_run_dir(self, task_name: str, run_id: str) -> Path:
         return self._ensure_run_dir(self.rl_run_dir(task_name, run_id), task_name)
 
-    def sft_run_dir(self, task_name: str, run_id: str | None = None) -> Path:
-        """
-        Get the SFT run directory.
-
-        Args:
-            task_name: Name of task
-            run_id: Run identifier (default: "default")
-
-        Returns:
-            Path to models/sft/{run_id}/
-        """
-        run_id = run_id or "default"
-        return self.models_dir(task_name) / "sft" / run_id
-
-    def sft_model_path(self, task_name: str, run_id: str | None = None) -> Path:
-        """
-        Get the SFT model path.
-
-        Args:
-            task_name: Name of task
-            run_id: Run identifier (default: "default")
-
-        Returns:
-            Path to models/sft/{run_id}/model/
-        """
+    def sft_model_path(self, task_name: str, run_id: str) -> Path:
         return self.sft_run_dir(task_name, run_id) / "model"
 
-    def rl_run_dir(self, task_name: str, run_id: str | None = None) -> Path:
-        """
-        Get the RL run directory.
+    def rl_model_path(self, task_name: str, run_id: str) -> Path:
+        return self.rl_run_dir(task_name, run_id) / "model"
 
-        Args:
-            task_name: Name of task
-            run_id: Run identifier (default: "default")
-
-        Returns:
-            Path to models/rl/{run_id}/
-        """
-        run_id = run_id or "default"
-        return self.models_dir(task_name) / "rl" / run_id
-
-    def rl_checkpoints_dir(self, task_name: str, run_id: str | None = None) -> Path:
-        """Get the RL checkpoints directory: models/rl/{run_id}/checkpoints/"""
+    def rl_checkpoints_dir(self, task_name: str, run_id: str) -> Path:
         return self.rl_run_dir(task_name, run_id) / "checkpoints"
 
-    def rl_rollouts_dir(self, task_name: str, run_id: str | None = None) -> Path:
-        """Get the RL rollouts directory: models/rl/{run_id}/rollouts/"""
+    def rl_rollouts_dir(self, task_name: str, run_id: str) -> Path:
         return self.rl_run_dir(task_name, run_id) / "rollouts"
 
-    def rl_model_path(self, task_name: str, run_id: str | None = None) -> Path:
-        """
-        Get the RL model path.
+    # -- evaluations ----------------------------------------------------------
 
-        Args:
-            task_name: Name of task
-            run_id: Run identifier (default: "default")
+    def evals_dir(self, task_name: str, stage: str, run_id: str) -> Path:
+        """`models/{method}_{sft,models}/{run_id}/evals` -- results live inside the
+        run that produced them, not in a task-wide results/ pool."""
+        return self.run_dir(task_name, stage, run_id) / "evals"
 
-        Returns:
-            Path to models/rl/{run_id}/model/
-        """
-        return self.rl_run_dir(task_name, run_id) / "model"
-    def results_dir(self, task_name: str) -> Path:
-        """Get the results directory."""
-        return self.artifacts_dir(task_name) / "results"
+    def eval_path(self, task_name: str, stage: str, run_id: str,
+                  split: str, suffix: str = "") -> Path:
+        """`.../evals/{split}{suffix}.json`. The run directory already carries
+        the model identity, so the filename only has to say which split and
+        under what deviation from the default settings."""
+        return self.evals_dir(task_name, stage, run_id) / f"{split}{suffix}.json"
+
+
+def problems_dir(task_name: str) -> Path:
+    """`artifacts/{task}/problems` -- raw problems, shared by every method."""
+    return ARTIFACTS_ROOT / task_name / "problems"
 
 
 def get_primitives_path(task_name: str) -> Path:
     """Get the shared primitives path for a task."""
-    return ARTIFACTS_ROOT / task_name / "primitives.json"
+    return problems_dir(task_name) / "primitives.json"

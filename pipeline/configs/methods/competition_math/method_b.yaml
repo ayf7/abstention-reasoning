@@ -1,5 +1,4 @@
-name: hint_ablations
-template_variant: hint_ablations
+template_variant: method_b
 reward_function: compute_score_hint
 multi_turn: true
 max_turns: 6

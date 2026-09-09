@@ -67,6 +67,20 @@ def create_primitives(
     return output_path
 
 
+def _prompts_filename(split: str, method, force_json: bool) -> str:
+    """Filename for one split's prompts.
+
+    Prompt files for every method share a single prompts/ directory, so the
+    method has to be in the name: `{split}__{method}`. Without a method the
+    caller has supplied its own output directory and gets the bare split name.
+    rl_* is parquet because verl reads parquet; --json overrides that for
+    inspection.
+    """
+    ext = ".json" if force_json else (".parquet" if split.startswith("rl") else ".json")
+    stem = method.artifact_stem(split) if method is not None else split
+    return f"{stem}{ext}"
+
+
 def create_prompts(
     task_name: str,
     method_name: str | None = None,
@@ -88,7 +102,7 @@ def create_prompts(
         task_name: Name of task
         method_name: Method name for auto-derived paths and template selection
         primitives_path: Path to primitives.json (default: artifacts/{task}/primitives.json)
-        output_dir: Directory to save prompts (default: artifacts/{task}/{method}/prompts/)
+        output_dir: Directory to save prompts (default: artifacts/{task}/prompts/)
         split_name: Name of split (sft_whole, sft_train, sft_val, rl_train,
             rl_val, eval, or 'all')
         seed: Random seed for split assignment
@@ -136,9 +150,7 @@ def create_prompts(
         splits = task.supported_splits()
         results = {}
         for split in splits:
-            # Determine output format based on split
-            ext = ".json" if force_json else (".parquet" if split.startswith("rl") else ".json")
-            output_path = output_dir / f"{split}{ext}"
+            output_path = output_dir / _prompts_filename(split, method, force_json)
             results[split] = _create_prompts_single(
                 task=task,
                 task_name=task_name,
@@ -155,8 +167,7 @@ def create_prompts(
         return results
 
     # Single split
-    ext = ".json" if force_json else (".parquet" if split_name.startswith("rl") else ".json")
-    output_path = output_dir / f"{split_name}{ext}"
+    output_path = output_dir / _prompts_filename(split_name, method, force_json)
     return _create_prompts_single(
         task=task,
         task_name=task_name,
@@ -521,7 +532,7 @@ def create_ood_prompts(
         task_name: Task whose templates/check_correctness to use (e.g., "competition_math")
         dataset_name: OOD dataset key (math500, olympiad_bench, gsm8k, aime2024)
         method_name: Method name for template selection and output path derivation
-        output_path: Explicit output path (default: artifacts/{task}/{method}/prompts/ood_{dataset}.json)
+        output_path: Explicit output path (default: artifacts/{task}/prompts/eval__{method}_ood-{dataset}.json)
         num_problems: Limit number of problems (None = all)
         seed: Random seed for shuffling
         include_assistant_prefix: Whether to include assistant's opening in prompt
@@ -547,7 +558,9 @@ def create_ood_prompts(
                 "Either --method or --output must be specified. "
                 "Use --method to auto-derive paths, or --output for explicit paths."
             )
-        output_path = method.prompts_dir(task_name) / f"ood_{dataset_name}.json"
+        output_path = method.prompts_dir(task_name) / (
+            f"{method.artifact_stem('eval', desc=f'ood-{dataset_name}')}.json"
+        )
 
     # Load template (always use eval template)
     template_variant = method.template_variant if method else None

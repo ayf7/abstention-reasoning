@@ -10,6 +10,7 @@ from pathlib import Path
 from pipeline.core.io import load_json, save_json
 from pipeline.core.generator import Generator, GenerationConfig, AsyncGenerator
 from pipeline.core.method import Method
+from pipeline.core.utils import model_short_name
 from pipeline.tasks import get_task
 
 
@@ -541,8 +542,8 @@ def generate(
         model_name: Model to use for generation
         method_name: Method name for auto-derived paths
         run_id: Run identifier for model resolution (used when model_name="sft" or "rl")
-        prompts_path: Path to prompts file (default: artifacts/{task}/{method}/prompts/{split}.json)
-        output_path: Where to save dataset (default: artifacts/{task}/{method}/datasets/{split}_{model}.json)
+        prompts_path: Path to prompts file (default: artifacts/{task}/prompts/{split}__{method}.json)
+        output_path: Where to save dataset (default: artifacts/{task}/datasets/{split}__{method}.json)
         split: Which split to generate from (default: sft)
         retry_incorrect: If True, re-run incorrect examples
         answer_budget: Tokens held back for a forced answer. A generation that runs
@@ -629,7 +630,7 @@ def generate(
                 "Either --method or --output must be specified. "
                 "Use --method to auto-derive paths, or --output for explicit paths."
             )
-        output_path = method.dataset_path(task_name, split, model_name)
+        output_path = method.dataset_path(task_name, split)
 
     # Load prompts
     prompts_data = load_json(prompts_path)
@@ -1288,8 +1289,8 @@ def evaluate(
         model_name: Model to evaluate (can be "sft" or "rl" to use method's model paths)
         method_name: Method name for auto-derived paths
         run_id: Run identifier for model resolution (used when model_name="sft" or "rl")
-        prompts_path: Path to eval prompts (default: artifacts/{task}/{method}/prompts/eval.json)
-        output_path: Where to save results (default: artifacts/{task}/{method}/results/eval_{model}.json)
+        prompts_path: Path to eval prompts (default: artifacts/{task}/prompts/{split}__{method}.json)
+        output_path: Where to save results (default: artifacts/{task}/models/{method}_{sft,models}/{run_id}/evals/{split}.json)
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
         use_async: Use async generation for optimal throughput.
         no_hints: Counterfactual eval -- ban the hint request so the model must
@@ -1335,15 +1336,21 @@ def evaluate(
                 "Either --method or --output must be specified. "
                 "Use --method to auto-derive paths, or --output for explicit paths."
             )
-        # Include run_id in output filename for SFT/RL models
-        output_model_name = model_name
-        if model_name in ("sft", "rl") and run_id and run_id != "default":
-            output_model_name = f"{model_name}_{run_id}"
-        from pipeline.core.method import model_short_name
-        model_slug = model_short_name(output_model_name)
+        # Results live inside the run that produced them, so the run directory
+        # already carries the model identity and the filename only records the
+        # split plus any deviation from the default eval settings.
         samples_suffix = f"_{num_samples}s" if num_samples > 1 else ""
         hint_suffix = "_nohint" if no_hints else ""
-        output_path = method.results_dir(task_name) / f"{split}_{model_slug}{samples_suffix}{hint_suffix}.json"
+        suffix = f"{samples_suffix}{hint_suffix}"
+        if model_name in ("sft", "rl"):
+            output_path = method.eval_path(task_name, model_name, run_id, split, suffix)
+        else:
+            # A checkpoint evaluated outside any run of ours -- a stock
+            # HuggingFace model, or a path handed in directly. It has no run
+            # directory, so it gets one under _stock keyed by the model name.
+            slug = model_short_name(model_name)
+            output_path = (method.models_dir(task_name) / "_stock" / slug
+                           / "evals" / f"{split}{suffix}.json")
 
     # Load prompts
     prompts_data = load_json(prompts_path)

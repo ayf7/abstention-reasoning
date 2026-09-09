@@ -23,17 +23,20 @@ Examples:
 
     # Full workflow with --method (auto-derived paths)
     python -m pipeline create_primitives --task countdown --num-puzzles 5000
-    python -m pipeline create_prompts --task countdown --method simple
-    python -m pipeline generate --task countdown --method simple --model Qwen/Qwen3-14B
-    python -m pipeline train_sft --task countdown --method simple --base-model Qwen/Qwen2.5-3B
-    python -m pipeline train_rl --task countdown --method simple
-    python -m pipeline evaluate --task countdown --method simple --model sft
-    python -m pipeline evaluate --task countdown --method simple --model rl
+    python -m pipeline create_prompts --task countdown --method baseline
+    python -m pipeline generate --task countdown --method baseline --model Qwen/Qwen3-14B
+    python -m pipeline train_sft --task countdown --method baseline --base-model Qwen/Qwen2.5-3B --run-id 3b
+    python -m pipeline train_rl --task countdown --method baseline --run-id 3b
+    python -m pipeline evaluate --task countdown --method baseline --model sft --run-id 3b
+    python -m pipeline evaluate --task countdown --method baseline --model rl --run-id 3b
 
-    # Artifacts are organized by method:
-    # artifacts/countdown/primitives.json           (shared)
-    # artifacts/countdown/simple/                  (method-specific)
-    #   prompts/, datasets/, models/, results/
+    # Artifacts are organized by stage, not by method: prompts, datasets and
+    # models each share one directory per task, and a method's files are told
+    # apart by its name.
+    # artifacts/countdown/problems/primitives.json
+    # artifacts/countdown/prompts/{split}__{method}.json
+    # artifacts/countdown/datasets/{split}__{method}.json
+    # artifacts/countdown/models/{method}_{sft,models}/{run_id}/{model,evals,...}
 """
 
 # IMPORTANT: Set VLLM's multiprocessing method before any imports.
@@ -359,7 +362,7 @@ def main():
     # create_primitives
     p = subparsers.add_parser("create_primitives", help="Generate raw puzzle data")
     p.add_argument("--task", required=True, help="Task name (e.g., countdown)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/primitives.json)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/problems/primitives.json)")
     p.add_argument("--num-puzzles", type=int, default=None, help="Number of puzzles (omit to use all available)")
     p.add_argument("--seed", type=int, default=42, help="Random seed")
     p.add_argument("--tracer", choices=["original", "uniform"], default=None,
@@ -371,8 +374,8 @@ def main():
     p = subparsers.add_parser("create_prompts", help="Create prompts from primitives")
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--method", help="Method name for auto-derived paths and templates")
-    p.add_argument("--primitives", help="Path to primitives.json (default: artifacts/{task}/primitives.json)")
-    p.add_argument("--output", help="Output directory (default: artifacts/{task}/{method}/prompts/)")
+    p.add_argument("--primitives", help="Path to primitives.json (default: artifacts/{task}/problems/primitives.json)")
+    p.add_argument("--output", help="Output directory (default: artifacts/{task}/prompts/)")
     p.add_argument("--split", default="all",
                    help="Split name, or 'all' for every split this task defines. Most tasks: "
                    "sft_whole, sft_train, sft_val, rl_train, rl_val, eval; "
@@ -391,7 +394,7 @@ def main():
     p.add_argument("--task", required=True, help="Task whose templates to use (e.g., competition_math)")
     p.add_argument("--dataset", required=True, help=f"OOD dataset name ({ood_names})")
     p.add_argument("--method", help="Method name for template selection and output path")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/prompts/ood_{dataset}.json)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/prompts/eval__{method}_ood-{dataset}.json)")
     p.add_argument("--num-problems", type=int, default=None, help="Limit number of problems (omit for all)")
     p.add_argument("--seed", type=int, default=42, help="Random seed for shuffling")
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
@@ -402,9 +405,9 @@ def main():
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--model", required=True, help="Model name or path")
     p.add_argument("--method", help="Method name for auto-derived paths")
-    p.add_argument("--run-id", help="Run identifier for model resolution (used with --model sft/rl)")
-    p.add_argument("--prompts", help="Path to prompts file (default: artifacts/{task}/{method}/prompts/{split}.json)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/datasets/{split}_{model}.json)")
+    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,models}/. Required with --method; nothing is derived from the base checkpoint.")
+    p.add_argument("--prompts", help="Path to prompts file (default: artifacts/{task}/prompts/{split}__{method}.json)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/datasets/{split}__{method}.json)")
     p.add_argument("--split", default="sft_whole", help="Which split to generate from (default: sft_whole)")
     p.add_argument("--batch-size", type=int, default=16, help="Batch size")
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
@@ -482,10 +485,10 @@ def main():
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--model", required=True, help="Model name/path, or 'sft'/'rl' to use method's model")
     p.add_argument("--method", help="Method name for auto-derived paths")
-    p.add_argument("--run-id", help="Run identifier for model resolution (used with --model sft/rl)")
+    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,models}/. Required with --method; nothing is derived from the base checkpoint.")
     p.add_argument("--split", default="eval", help="Prompts split to evaluate (default: eval)")
-    p.add_argument("--prompts", help="Path to eval prompts (default: artifacts/{task}/{method}/prompts/{split}.json)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/results/{split}_{model}.json)")
+    p.add_argument("--prompts", help="Path to eval prompts (default: artifacts/{task}/prompts/{split}__{method}.json)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/models/{method}_{sft,models}/{run_id}/evals/{split}.json)")
     p.add_argument("--batch-size", type=int, default=16, help="Batch size")
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
     p.add_argument("--temperature", type=float, default=1.0, help="Temperature")
@@ -516,9 +519,9 @@ def main():
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--base-model", required=True, help="Base model to fine-tune")
     p.add_argument("--method", help="Method name for auto-derived paths")
-    p.add_argument("--run-id", help="Run identifier for organizing outputs (default: 'default')")
+    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,models}/. Required with --method; nothing is derived from the base checkpoint.")
     p.add_argument("--dataset", help="Path to generated dataset (default: auto-detect from method)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/models/sft/{run_id}/model)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/models/{method}_sft/{run_id}/model)")
     p.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
     p.add_argument("--batch-size", type=int, default=4, help="Per-device batch size")
     p.add_argument("--gradient-accumulation-steps", type=int, default=4, help="Gradient accumulation steps")
@@ -546,12 +549,12 @@ def main():
     p = subparsers.add_parser("train_rl", help="Train RL model using verl (GRPO)")
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--method", help="Method name for auto-derived paths, template, and reward config")
-    p.add_argument("--run-id", help="Run identifier for organizing outputs (default: 'default')")
+    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,models}/. Required with --method; nothing is derived from the base checkpoint.")
     p.add_argument("--base-model", help="Base model for cold-start RL (mutually exclusive with --sft-model)")
-    p.add_argument("--train-prompts", help="Path to RL train prompts (default: artifacts/{task}/{method}/prompts/rl_train.parquet)")
-    p.add_argument("--val-prompts", help="Path to RL validation prompts (default: artifacts/{task}/{method}/prompts/rl_val.parquet)")
+    p.add_argument("--train-prompts", help="Path to RL train prompts (default: artifacts/{task}/prompts/rl_train__{method}.parquet)")
+    p.add_argument("--val-prompts", help="Path to RL validation prompts (default: artifacts/{task}/prompts/rl_val__{method}.parquet)")
     p.add_argument("--sft-model", help="Path to SFT model (mutually exclusive with --base-model)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/models/rl/{run_id}/model)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/models/{method}_models/{run_id}/model)")
     p.add_argument("--reward-function", help="Path to reward function (default: task's reward function)")
     p.add_argument("--train-batch-size", type=int, default=64, help="Training batch size")
     p.add_argument("--val-batch-size", type=int, default=64, help="Validation batch size")

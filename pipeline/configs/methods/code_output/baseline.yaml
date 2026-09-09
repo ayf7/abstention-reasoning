@@ -1,5 +1,4 @@
-name: simple
-template_variant: simple
+template_variant: baseline
 reward_function: compute_score
 reward_kwargs:
   format_score: 0.1

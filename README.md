@@ -30,19 +30,19 @@ End-to-end on `countdown` with the `simple` baseline:
 python -m pipeline create_primitives --task countdown --num-puzzles 5000
 
 # 2. Render prompts for every split the task defines
-python -m pipeline create_prompts --task countdown --method simple --split all
+python -m pipeline create_prompts --task countdown --method baseline --split all
 
 # 3. Sample SFT training data from a strong teacher model
-python -m pipeline generate --task countdown --method simple --model Qwen/Qwen3-4B --split sft --async
+python -m pipeline generate --task countdown --method baseline --model Qwen/Qwen3-4B --split sft --async
 
 # 4. Supervised fine-tune
-python -m pipeline train_sft --task countdown --method simple --base-model Qwen/Qwen2.5-1.5B
+python -m pipeline train_sft --task countdown --method baseline --base-model Qwen/Qwen2.5-1.5B
 
 # 5. RL from the SFT checkpoint
-python -m pipeline train_rl --task countdown --method simple
+python -m pipeline train_rl --task countdown --method baseline
 
 # 6. Evaluate. --model takes 'sft'/'rl' to resolve the method's own checkpoint
-python -m pipeline evaluate --task countdown --method simple --model rl --async
+python -m pipeline evaluate --task countdown --method baseline --model rl --async
 ```
 
 `--method` auto-derives every artifact path, so steps rarely need explicit `--prompts` / `--dataset` / `--output`. Pass `--async` to `generate` and `evaluate` for the batched async vLLM path; it is the standard mode here.
@@ -59,21 +59,21 @@ Each lives in `pipeline/tasks/{task}/` and implements the `BaseTask` interface: 
 
 ## Methods
 
-A *method* bundles a prompt-template variant, a reward function, and its RL settings into one named config (`pipeline/configs/methods/{task}/{method}.yaml`). Four methods exist on countdown and competition math, three on code output (`hint_ablations` is math-and-countdown only).
+A *method* bundles a prompt-template variant, a reward function, and its RL settings into one named config (`pipeline/configs/methods/{task}/{method}.yaml`). The config name is also the name its artifacts carry on disk, so renaming a method renames its files. Four methods exist on countdown and competition math, three on code output (`method_b` is math-and-countdown only).
 
 **Evaluated methods:**
 
 | Method | Behavior |
 |---|---|
-| `simple` | Baseline. Answer directly, never ask for a hint. |
+| `baseline` | Answer directly, never ask for a hint. The starting point for every other method. |
 | `hint_encourage` | Multi-turn: ask for hints, with a bonus for admitting a wrong answer. |
-| `hint_ablations` | Multi-turn hint-seeking inside a single `<think>` block, swept over the hint-penalty weight α. Countdown and competition math only. |
+| `method_b` | Multi-turn hint-seeking inside a single `<think>` block, swept over the hint-penalty weight α. Countdown and competition math only. |
 
 **SFT parents** — not evaluated on their own, but required to produce the hint methods above. Do not delete them:
 
 | Method | Parent of |
 |---|---|
-| `hint` | `hint_encourage`, `hint_ablations` |
+| `hint` | `hint_encourage`, `method_b` |
 
 Model sizes used throughout: Qwen2.5-1.5B, Qwen2.5-3B, Qwen3-4B.
 
@@ -121,13 +121,13 @@ Reward functions themselves live with the trainer, in `verl/recipe/{task}/reward
 Each stage is a pure transformation that writes new files and never edits existing ones:
 
 ```
-primitives.json     Raw puzzle data (index, variant, task-specific fields)
+problems/primitives.json   Raw puzzle data (index, variant, task-specific fields)
        │
-       ├── template ───► prompts/*.json     Model-ready inputs + ground truth
+       ├── template ───► prompts/{split}__{method}.json     Model-ready inputs + ground truth
        │
-       └── model ──────► datasets/*.json    Generations + correctness labels
+       └── model ──────► datasets/{split}__{method}.json    Generations + correctness labels
                               │
-                              └─────────────► results/*.json   Metrics + details
+                              └───► models/{method}_{sft,models}/{run_id}/evals/{split}.json
 ```
 
 ### Splits
@@ -151,21 +151,22 @@ Splits are disjoint slices of a seeded shuffle of the primitives, so no problem 
 
 ## Artifacts
 
-Generated data and model weights are written under `artifacts/`, which is typically a symlink to shared storage:
+Generated data and model weights are written under `artifacts/`, which is typically a symlink to shared storage. The tree is organized by **stage**, not by method — prompts, datasets and models each share one directory per task, and a method's files are told apart by its *artifact name*:
 
 ```
 artifacts/{task}/
-├── primitives.json              # shared across methods
-└── {method}/
-    ├── prompts/                 # sft.json, rl_train.parquet, eval.json, ...
-    ├── datasets/                # generations + correctness labels
-    ├── models/
-    │   ├── sft/{run_id}/model/
-    │   └── rl/{run_id}/model/   # + checkpoints/, rollouts/
-    └── results/                 # evaluation metrics
+├── problems/primitives.json                    # raw problems, shared by every method
+├── prompts/{split}__{method}.json|parquet     # templates applied
+├── datasets/{split}__{method}.json            # generations + correctness labels
+└── models/{method}_{sft,models}/{run_id}/
+    ├── model/                                  # or a symlink to last/
+    ├── checkpoints/  rollouts/                 # RL only
+    └── evals/{split}.json                      # results live with the run that made them
 ```
 
-Use `--run-id` to keep multiple runs of the same (task, method) side by side.
+The name in `{split}__{method}` and `{method}_{sft,models}` is the method's config name, so `baseline.yaml` produces `sft_whole__baseline.json` and `models/baseline_sft/`. Names are underscored, since they become directory names.
+
+`--run-id` names the run directory verbatim and is **required** wherever a model path is derived. Nothing is inferred from the base checkpoint: run names are a convention (`1.5b`, `4b`, `4b-instruct`, `1.5b__extend-quad-a0.5`), and a name guessed from a checkpoint would only drift from it.
 
 ## Repository layout
 
