@@ -136,13 +136,16 @@ Splits are disjoint slices of a seeded shuffle of the primitives, so no problem 
 
 | Split | `countdown`, `competition_math` | `code_output` |
 |---|---|---|
-| `sft` | 0–30% | 0–19.2% |
+| `sft_whole` | 0–30% | 0–19.2% |
+| `sft_train` | 0–27% | 0–17.28% |
+| `sft_val` | 27–30% | 17.28–19.2% |
 | `rl_train` | 30–65% | 19.2–67.2% |
 | `rl_val` | 65–70% | — |
-| `eval` | 90–100% | 67.2–100% |
-| `eval_augmented` | 70–100% | — |
+| `eval` | 70–100% | 67.2–100% |
 
-`eval_augmented` is the deliberate exception to disjointness: it is a superset of `eval` drawn from otherwise-unused indices, and it is what most evaluations actually read. `code_output` allocates its whole range across three splits, so it has no spare region for `eval_augmented` and no `rl_val`.
+`sft_whole` is the one overlap, and it is an identity rather than an exception: it is exactly `sft_train` + `sft_val`, index for index, because the three share a left edge and `sft_val` is carved off the tail. `BaseTask.__init_subclass__` checks that at import time, so a task cannot override the table into a layout where the name lies. Materialize whichever of the three a stage needs — train on `sft_train`, early-stop on `sft_val`, or train on `sft_whole` when there is nothing to early-stop against.
+
+`code_output` allocates its whole range across three regions, so it has no `rl_val`.
 
 `--split all` creates exactly the splits the task defines — a task's `SPLITS` table in `pipeline/tasks/{task}/task.py` is the single source of truth.
 

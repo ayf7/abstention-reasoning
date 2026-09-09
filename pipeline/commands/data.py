@@ -89,7 +89,8 @@ def create_prompts(
         method_name: Method name for auto-derived paths and template selection
         primitives_path: Path to primitives.json (default: artifacts/{task}/primitives.json)
         output_dir: Directory to save prompts (default: artifacts/{task}/{method}/prompts/)
-        split_name: Name of split (sft, rl_train, rl_val, eval, eval_augmented, or 'all')
+        split_name: Name of split (sft_whole, sft_train, sft_val, rl_train,
+            rl_val, eval, or 'all')
         seed: Random seed for split assignment
         include_assistant_prefix: Whether to include assistant's opening
         num_hints: Number of hints to extract from prefix_hints (0-6). If None, no hint injection.
@@ -129,12 +130,9 @@ def create_prompts(
     # Handle "all" splits
     if split_name == "all":
         output_dir.mkdir(parents=True, exist_ok=True)
-        # eval_augmented is the split nearly every recorded evaluation reads
-        # (prompts/eval_augmented.json). Leaving it out of "all" meant the
-        # documented setup path silently produced none of it.
-        # Ask the task which splits it defines: code_output has no rl_val or
-        # eval_augmented, and a hardcoded list made "all" die partway through,
-        # leaving a half-written prompts dir behind.
+        # Ask the task which splits it defines rather than hardcoding a list:
+        # code_output has no rl_val, and a fixed list made "all" die partway
+        # through, leaving a half-written prompts dir behind.
         splits = task.supported_splits()
         results = {}
         for split in splits:
@@ -253,12 +251,10 @@ def _create_prompts_single(
         if assistant_prefix:
             print(f"  Note: Set verl config data.runtime_assistant_prefix=\"{assistant_prefix}\"")
     else:
-        # Resolve template path (map split names to template file names)
-        template_split = split_name
-        if split_name == "eval_augmented":
-            template_split = "eval"
-        elif split_name in ("rl_train", "rl_val"):
-            template_split = "rl"
+        # Resolve template path. Splits share one template per family: every
+        # sft_* split renders sft.txt and both rl_* splits render rl.txt, so
+        # the family name is the split name up to its first underscore.
+        template_split = split_name.split("_")[0]
         if template_variant:
             template_path = TASKS_ROOT / task_name / "templates" / template_variant / f"{template_split}.txt"
         else:

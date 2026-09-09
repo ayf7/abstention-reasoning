@@ -375,9 +375,9 @@ def main():
     p.add_argument("--output", help="Output directory (default: artifacts/{task}/{method}/prompts/)")
     p.add_argument("--split", default="all",
                    help="Split name, or 'all' for every split this task defines. Most tasks: "
-                   "sft, rl_train, rl_val, eval, eval_augmented; code_output has "
-                   "only sft, rl_train, eval. "
-                        "eval_augmented is what most evaluations read.")
+                   "sft_whole, sft_train, sft_val, rl_train, rl_val, eval; "
+                   "code_output has no rl_val. sft_whole is the union of "
+                   "sft_train and sft_val, not a separate region.")
     p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
     p.add_argument("--num-hints", type=int, default=None,
@@ -405,7 +405,7 @@ def main():
     p.add_argument("--run-id", help="Run identifier for model resolution (used with --model sft/rl)")
     p.add_argument("--prompts", help="Path to prompts file (default: artifacts/{task}/{method}/prompts/{split}.json)")
     p.add_argument("--output", help="Output path (default: artifacts/{task}/{method}/datasets/{split}_{model}.json)")
-    p.add_argument("--split", default="sft", help="Which split to generate from (default: sft)")
+    p.add_argument("--split", default="sft_whole", help="Which split to generate from (default: sft_whole)")
     p.add_argument("--batch-size", type=int, default=16, help="Batch size")
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
     p.add_argument("--temperature", type=float, default=0.7, help="Temperature")

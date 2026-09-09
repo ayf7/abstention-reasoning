@@ -58,15 +58,38 @@ class BaseTask:
 
     # Fractional [start, end) ranges over the shuffled primitive order.
     # Tasks override this to declare their own layout; a task need not define
-    # every split (code_output has no rl_val / eval_augmented), so callers that
-    # sweep "all" splits must ask supported_splits() rather than assume the set.
+    # every split (code_output has no rl_val), so callers that sweep "all"
+    # splits must ask supported_splits() rather than assume the set.
+    #
+    # sft_whole is the union of sft_train and sft_val, not a fourth region:
+    # the three share a left edge and sft_val is carved off the tail, so
+    # sft_train + sft_val reproduces sft_whole exactly, index for index.
+    # __init_subclass__ enforces that, so a task cannot override the table
+    # into a layout where the name lies.
     SPLITS: dict[str, tuple[float, float]] = {
-        "sft": (0.0, 0.3),
+        "sft_whole": (0.0, 0.3),
+        "sft_train": (0.0, 0.27),
+        "sft_val": (0.27, 0.3),
         "rl_train": (0.3, 0.65),
         "rl_val": (0.65, 0.7),
-        "eval": (0.9, 1.0),
-        "eval_augmented": (0.7, 1.0),
+        "eval": (0.7, 1.0),
     }
+
+    def __init_subclass__(cls, **kwargs):
+        """Check the sft_whole = sft_train + sft_val identity at import time.
+
+        Cheap here and impossible to forget; the alternative is discovering it
+        from a validation set that silently overlaps its own training set.
+        """
+        super().__init_subclass__(**kwargs)
+        s = cls.SPLITS
+        if {"sft_whole", "sft_train", "sft_val"} <= set(s):
+            whole, train, val = s["sft_whole"], s["sft_train"], s["sft_val"]
+            if not (whole[0] == train[0] and train[1] == val[0] and val[1] == whole[1]):
+                raise ValueError(
+                    f"Task '{cls.__name__}': sft_train {train} + sft_val {val} "
+                    f"does not tile sft_whole {whole}"
+                )
 
     @classmethod
     def supported_splits(cls) -> list[str]:
@@ -85,11 +108,12 @@ class BaseTask:
 
         Ranges come from the task's SPLITS table; override that (not this
         method) to change the layout. Base layout:
-        - sft: 30% (indices 0-30%)
+        - sft_whole: 30% (indices 0-30%), = sft_train + sft_val
+        - sft_train: 27% (indices 0-27%)
+        - sft_val: 3% (indices 27-30%)
         - rl_train: 35% (indices 30-65%)
         - rl_val: 5% (indices 65-70%)
-        - eval: 10% (indices 90-100%)
-        - eval_augmented: 30% (indices 70-100%), overlapping eval
+        - eval: 30% (indices 70-100%)
 
         Raises ValueError if the task does not define `split`.
 

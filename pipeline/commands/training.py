@@ -95,13 +95,20 @@ def train_sft(
                 "Use --method to auto-derive paths, or --dataset for explicit paths."
             )
         datasets_dir = method.datasets_dir(task_name)
-        sft_files = list(datasets_dir.glob("sft_*.json"))
-        if not sft_files:
+        # Prefer sft_whole, fall back to sft_train, and never pick sft_val --
+        # it is the held-out tail, so a bare glob("sft_*.json") could silently
+        # train on the validation split. sorted() so the choice among several
+        # generator models is at least deterministic rather than dirent order.
+        for prefix in ("sft_whole", "sft_train"):
+            sft_files = sorted(datasets_dir.glob(f"{prefix}*.json"))
+            if sft_files:
+                break
+        else:
             raise FileNotFoundError(
                 f"No SFT datasets found in {datasets_dir}. "
                 f"Run 'python -m pipeline generate --task {task_name} --method {method_name}' first."
             )
-        dataset_path = sft_files[0]  # Use most recent or only one
+        dataset_path = sft_files[0]
         if len(sft_files) > 1:
             print(f"Warning: Multiple SFT datasets found, using {dataset_path}")
 
