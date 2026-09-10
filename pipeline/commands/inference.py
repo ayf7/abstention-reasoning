@@ -513,7 +513,7 @@ def generate(
         method_name: Method name for auto-derived paths
         run_id: Run identifier for model resolution (used when model_name="sft" or "rl")
         prompts_path: Path to prompts file (default: artifacts/{task}/problems_with_format/{split}__{method}.json)
-        output_path: Where to save dataset (default: artifacts/{task}/datasets/{split}__{method}.json)
+        output_path: Where to save dataset (default: artifacts/{task}/sft_sft_datasets/{split}__{method}.json)
         split: Which split to generate from (default: sft)
         retry_incorrect: If True, re-run incorrect examples
         answer_budget: Tokens held back for a forced answer. A generation that runs

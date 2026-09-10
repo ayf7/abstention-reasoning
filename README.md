@@ -125,7 +125,7 @@ problems/primitives.json   Raw puzzle data (index, variant, task-specific fields
        │
        ├── template ───► problems_with_format/{split}__{method}.json     Model-ready inputs + ground truth
        │
-       └── model ──────► datasets/{split}__{method}.json    Generations + correctness labels
+       └── model ──────► sft_datasets/{split}__{method}.json    Generations + correctness labels
                               │
                               └───► models/{method}_{sft,models}/{run_id}/evals/{split}.json
 ```
@@ -157,7 +157,7 @@ Generated data and model weights are written under `artifacts/`, which is typica
 artifacts/{task}/
 ├── problems/primitives.json                    # raw problems, shared by every method
 ├── problems_with_format/{split}__{method}.json|parquet     # templates applied
-├── datasets/{split}__{method}.json            # generations + correctness labels
+├── sft_datasets/{split}__{method}.json            # generations + correctness labels
 └── models/{method}_{sft,models}/{run_id}/
     ├── model/                                  # or a symlink to last/
     ├── checkpoints/  rollouts/                 # RL only

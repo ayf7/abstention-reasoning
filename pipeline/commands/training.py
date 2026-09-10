@@ -61,7 +61,7 @@ def train_sft(
         base_model: Base model to fine-tune
         method_name: Method name for auto-derived paths
         run_id: Run identifier for organizing outputs (default: "default")
-        dataset_path: Path to generated dataset (default: artifacts/{task}/datasets/sft_whole__{method}.json)
+        dataset_path: Path to generated dataset (default: artifacts/{task}/sft_datasets/sft_whole__{method}.json)
         output_path: Where to save trained model (default: artifacts/{task}/models/{method}_sft/{run_id}/model)
         epochs: Number of training epochs
         batch_size: Per-device batch size

@@ -35,7 +35,7 @@ Examples:
     # apart by its name.
     # artifacts/countdown/problems/primitives.json
     # artifacts/countdown/problems_with_format/{split}__{method}.json
-    # artifacts/countdown/datasets/{split}__{method}.json
+    # artifacts/countdown/sft_datasets/{split}__{method}.json
     # artifacts/countdown/models/{method}_{sft,models}/{run_id}/{model,evals,...}
 """
 
@@ -424,7 +424,7 @@ def main():
     p.add_argument("--method", help="Method name for auto-derived paths")
     p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,models}/. Required with --method; nothing is derived from the base checkpoint.")
     p.add_argument("--prompts", help="Path to prompts file (default: artifacts/{task}/problems_with_format/{split}__{method}.json)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/datasets/{split}__{method}.json)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/sft_sft_datasets/{split}__{method}.json)")
     p.add_argument("--split", default="sft_whole", help="Which split to generate from (default: sft_whole)")
     p.add_argument("--batch-size", type=int, default=16, help="Batch size")
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")

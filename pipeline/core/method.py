@@ -182,10 +182,18 @@ class Method:
         return self.formatted_dir(task_name) / f"{self.artifact_stem(split, desc)}{ext}"
 
     def datasets_dir(self, task_name: str) -> Path:
-        return self.task_dir(task_name) / "datasets"
+        """`sft_datasets/` -- generations with correctness labels. SFT-stage only:
+        the RL parquets carry no generations, so they stay in the formatted layer
+        and never reach here."""
+        return self.task_dir(task_name) / "sft_datasets"
 
     def dataset_path(self, task_name: str, split: str, desc: str | None = None) -> Path:
         return self.datasets_dir(task_name) / f"{self.artifact_stem(split, desc)}.json"
+
+    def scratch_path(self, task_name: str, split: str, desc: str | None = None) -> Path:
+        """Same naming as a dataset, but under .scratch/ -- for intermediates
+        that are read back by a later step and never trained on."""
+        return scratch_dir(task_name) / f"{self.artifact_stem(split, desc)}.json"
 
     # -- models ---------------------------------------------------------------
 
@@ -300,6 +308,18 @@ class Method:
         the model identity, so the filename only has to say which split and
         under what deviation from the default settings."""
         return self.evals_dir(task_name, stage, run_id) / f"{split}{suffix}.json"
+
+
+def scratch_dir(task_name: str) -> Path:
+    """`artifacts/{task}/.scratch` -- intermediates that feed a later step but are
+    not themselves training data or results.
+
+    The no-hint difficulty probe is the case that forced this: it is a real
+    generate output, so it looks like a dataset, but nothing is ever trained on
+    it and it only exists to be read back by --hint-schedule. Dot-prefixed so it
+    sorts and greps out of the way of the artifacts that matter.
+    """
+    return ARTIFACTS_ROOT / task_name / ".scratch"
 
 
 def problems_dir(task_name: str) -> Path:

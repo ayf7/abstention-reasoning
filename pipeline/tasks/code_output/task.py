@@ -466,19 +466,12 @@ class CodeOutputTask(BaseTask):
             "hint_exprs": primitive.get("hint_exprs", []),
         }
 
-    # code_output allocates the whole [0, 1) range across three regions, so it
-    # has no rl_val. The outer boundaries are kept exactly as originally
-    # generated -- changing them would repartition every existing code_output
-    # artifact -- and sft_val is carved off the tail of the sft region at the
-    # same 10% the other tasks use, which leaves sft_train and every other
-    # split holding the indices they already held.
-    SPLITS = {
-        "sft_whole": (0.0, 0.192),
-        "sft_train": (0.0, 0.1728),
-        "sft_val": (0.1728, 0.192),
-        "rl_train": (0.192, 0.672),
-        "eval": (0.672, 1.0),
-    }
+    # Same layout as every other task. code_output used to allocate 19.2% to
+    # SFT and 48% to RL, and the boundaries were frozen on the grounds that
+    # moving them would repartition existing artifacts -- but no code_output
+    # dataset, model or eval was ever produced, so there was nothing to
+    # protect, and the asymmetric budget would have quietly confounded any
+    # comparison drawn against countdown or competition_math.
 
     def _categorize_result(self, r: dict) -> str:
         """Categorize a result into: correct, incomplete, wrong.
