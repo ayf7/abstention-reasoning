@@ -123,7 +123,7 @@ Each stage is a pure transformation that writes new files and never edits existi
 ```
 problems/primitives.json   Raw puzzle data (index, variant, task-specific fields)
        │
-       ├── template ───► prompts/{split}__{method}.json     Model-ready inputs + ground truth
+       ├── template ───► problems_with_format/{split}__{method}.json     Model-ready inputs + ground truth
        │
        └── model ──────► datasets/{split}__{method}.json    Generations + correctness labels
                               │
@@ -156,7 +156,7 @@ Generated data and model weights are written under `artifacts/`, which is typica
 ```
 artifacts/{task}/
 ├── problems/primitives.json                    # raw problems, shared by every method
-├── prompts/{split}__{method}.json|parquet     # templates applied
+├── problems_with_format/{split}__{method}.json|parquet     # templates applied
 ├── datasets/{split}__{method}.json            # generations + correctness labels
 └── models/{method}_{sft,models}/{run_id}/
     ├── model/                                  # or a symlink to last/

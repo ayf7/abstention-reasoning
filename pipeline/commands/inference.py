@@ -449,7 +449,6 @@ def select_best_sample(
     return best_sample
 
 
-from pipeline.core.hint_schedule import DEFAULT_BUCKETS as DEFAULT_HINT_BUCKETS
 
 
 def drop_exhausted_records(records: list[dict]) -> tuple[list[dict], int]:
@@ -464,34 +463,6 @@ def drop_exhausted_records(records: list[dict]) -> tuple[list[dict], int]:
     """
     keep = [r for r in records if EXHAUSTED_MARKER not in (r.get("generation") or "")]
     return keep, len(records) - len(keep)
-
-
-def _maybe_write_profile(path, records, model, split, num_samples):
-    """Write a difficulty profile from generated records, if requested.
-
-    Phase 1 of the difficulty schedule. Records carry `pass_rate` when
-    --num-samples > 1; with a single sample the rate degenerates to 0.0/1.0,
-    which is a much noisier difficulty estimate, so warn rather than silently
-    produce a profile that buckets everything into the extremes.
-    """
-    if path is None:
-        return
-    from pipeline.core.hint_schedule import build_profile
-
-    if num_samples < 2:
-        print(f"WARNING: --difficulty-profile with --num-samples={num_samples}; "
-              f"pass rates will be 0.0 or 1.0 only. Use --num-samples 4+ for a "
-              f"usable difficulty signal.")
-    profile = build_profile(records, model=model, split=split, num_samples=num_samples)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    save_json(path, profile.to_dict())
-    rates = list(profile.pass_rates.values())
-    solved = sum(1 for r in rates if r >= 1.0)
-    never = sum(1 for r in rates if r <= 0.0)
-    print(f"Wrote difficulty profile to {path}")
-    print(f"  {len(rates)} problems | always solved: {solved} ({solved/len(rates):.1%}) "
-          f"| never solved: {never} ({never/len(rates):.1%}) "
-          f"| mean pass rate: {sum(rates)/len(rates):.3f}")
 
 
 def generate(
@@ -522,7 +493,6 @@ def generate(
     sample_strategy: str | None = None,
     data_parallel_size: int = 1,
     no_hints: bool = False,
-    difficulty_profile_out: Path | None = None,
     hint_schedule_from: Path | None = None,
     hint_buckets: str | None = None,
     hint_target_fraction: float | None = None,
@@ -542,7 +512,7 @@ def generate(
         model_name: Model to use for generation
         method_name: Method name for auto-derived paths
         run_id: Run identifier for model resolution (used when model_name="sft" or "rl")
-        prompts_path: Path to prompts file (default: artifacts/{task}/prompts/{split}__{method}.json)
+        prompts_path: Path to prompts file (default: artifacts/{task}/problems_with_format/{split}__{method}.json)
         output_path: Where to save dataset (default: artifacts/{task}/datasets/{split}__{method}.json)
         split: Which split to generate from (default: sft)
         retry_incorrect: If True, re-run incorrect examples
@@ -559,12 +529,12 @@ def generate(
             to rate, e.g. {"1": 0.05, "2": 0.05, "3": 0.05, "4": 0.15, "5": 0.15}.
             If None but force_hints_distribution is set, all examples get forced hints.
         data_parallel_size: Independent model replicas to shard prompts across.
-        no_hints: Suppress hint requests entirely. Phase 1 of the difficulty
-            schedule: measure how often the model solves each problem unaided.
-        difficulty_profile_out: Write a difficulty profile (per-problem pass rate)
-            here after generating. Pair with --num-samples > 1 and --no-hints.
-        hint_schedule_from: Read a difficulty profile and schedule per-problem hint
-            counts from it, instead of sampling from a global distribution.
+        no_hints: Ban the hint request, so the model has to answer unaided.
+            Also phase 1 of the difficulty schedule: measures unaided pass rate.
+        hint_schedule_from: Path to a no-hint probe dataset (a `generate
+            --no-hints --num-samples 8` output). Per-problem hint counts are
+            derived from its pass rates instead of sampled from a global
+            distribution.
         hint_buckets: "max_pass_rate:num_hints,..." mapping for the schedule.
         hint_target_fraction: Fraction of problems that should request a hint.
             Assigns hints by difficulty rank so the fraction is hit exactly,
@@ -596,8 +566,8 @@ def generate(
     if force_hints_distribution or hint_schedule_from is not None:
         multi_turn = True  # any hint injection requires multi_turn
     if no_hints:
-        # The probe measures unaided ability, so there is nothing to multi-turn
-        # about. This also matters mechanically: the multi-turn path serves one
+        # With hints banned there is nothing to multi-turn about. This also
+        # matters mechanically: the multi-turn path serves one
         # generation per prompt regardless of --num-samples, which would collapse
         # every pass rate to 0.0 or 1.0 and destroy the difficulty signal the
         # schedule is built from. Single-turn honours num_samples via n=.
@@ -621,7 +591,7 @@ def generate(
                 "Either --method or --prompts must be specified. "
                 "Use --method to auto-derive paths, or --prompts for explicit paths."
             )
-        prompts_path = method.prompts_path(task_name, split)
+        prompts_path = method.formatted_path(task_name, split)
 
     # Default output path
     if output_path is None:
@@ -708,24 +678,30 @@ def generate(
         # hard problems reliably get more hints instead of getting them by luck.
         if hint_schedule_from is not None:
             from pipeline.core.hint_schedule import (
-                DifficultyProfile,
+                DEFAULT_BUCKETS,
+                build_profile,
                 parse_buckets,
                 schedule_by_rank,
                 schedule_from_profile,
                 summarize_schedule,
             )
-            profile = DifficultyProfile.from_dict(load_json(hint_schedule_from))
+            profile = build_profile(load_json(hint_schedule_from))
+            if profile.num_samples < 2:
+                print(f"WARNING: probe {hint_schedule_from} has num_samples="
+                      f"{profile.num_samples}; pass rates are 0.0 or 1.0 only, "
+                      f"which buckets every problem into the extremes. Re-probe "
+                      f"with --num-samples 4+ for a usable difficulty signal.")
             if hint_target_fraction is not None:
                 # Rank-based: hits the requested hint fraction exactly, whatever
                 # the probe's pass-rate distribution turned out to look like.
                 schedule = schedule_by_rank(remaining_prompts, profile,
                                             hint_target_fraction, max_hints)
             else:
-                buckets = parse_buckets(hint_buckets) if hint_buckets else DEFAULT_HINT_BUCKETS
+                buckets = parse_buckets(hint_buckets) if hint_buckets else DEFAULT_BUCKETS
                 schedule = schedule_from_profile(remaining_prompts, profile, buckets)
             force_hints_list = [schedule[p["index"]] for p in remaining_prompts]
             print(f"Hint schedule from {hint_schedule_from} "
-                  f"(probe: {profile.model}, {profile.num_samples} samples)")
+                  f"({len(profile.pass_rates)} problems, {profile.num_samples} samples)")
             print(summarize_schedule(schedule, profile))
         elif force_hints_distribution:
             # NB: no local `import random` here. A function-scope import makes
@@ -893,8 +869,6 @@ def generate(
             correct = sum(1 for r in records if r["correct"])
             print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%)")
             print(f"Saved dataset to {output_path}")
-            _maybe_write_profile(difficulty_profile_out, records, actual_model_name,
-                                 split, num_samples)
             if not retry_truncated:
                 return output_path
             truncated = sum(1 for r in records if r.get("finish_reason") == "length")
@@ -1005,9 +979,6 @@ def generate(
             if n_no_correct:
                 print(f"Dropped {n_no_correct} problem(s) with no correct sample "
                       f"(--sample-strategy random_correct).")
-            _maybe_write_profile(difficulty_profile_out,
-                                 sorted(records_by_index.values(), key=lambda r: r["index"]),
-                                 actual_model_name, split, num_samples)
             return output_path
 
         # Standard batch processing (sync)
@@ -1121,9 +1092,6 @@ def generate(
             break
         print(f"{truncated} truncated records remaining.")
 
-    _maybe_write_profile(difficulty_profile_out,
-                         sorted(records_by_index.values(), key=lambda r: r["index"]),
-                         actual_model_name, split, num_samples)
     return output_path
 
 
@@ -1289,7 +1257,7 @@ def evaluate(
         model_name: Model to evaluate (can be "sft" or "rl" to use method's model paths)
         method_name: Method name for auto-derived paths
         run_id: Run identifier for model resolution (used when model_name="sft" or "rl")
-        prompts_path: Path to eval prompts (default: artifacts/{task}/prompts/{split}__{method}.json)
+        prompts_path: Path to eval prompts (default: artifacts/{task}/problems_with_format/{split}__{method}.json)
         output_path: Where to save results (default: artifacts/{task}/models/{method}_{sft,models}/{run_id}/evals/{split}.json)
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
         use_async: Use async generation for optimal throughput.
@@ -1327,7 +1295,7 @@ def evaluate(
                 "Either --method or --prompts must be specified. "
                 "Use --method to auto-derive paths, or --prompts for explicit paths."
             )
-        prompts_path = method.prompts_path(task_name, split)
+        prompts_path = method.formatted_path(task_name, split)
 
     # Default output path
     if output_path is None:

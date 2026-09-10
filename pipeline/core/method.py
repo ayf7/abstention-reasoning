@@ -159,17 +159,27 @@ class Method:
     # -- prompts and datasets -------------------------------------------------
 
     def artifact_stem(self, split: str, desc: str | None = None) -> str:
-        """`{split}__{method}` (+ `_{desc}`), the shared stem for a prompt file
-        and the dataset generated from it."""
+        """`{split}__{method}`, or `{split}__{method}__{desc}`.
+
+        Every field is separated by a double underscore. Method names contain
+        single underscores (`method_b`, `method_ac`), so a single-underscore
+        desc separator would make `sft_whole__method_b_generations` ambiguous --
+        method `method_b` with desc `generations`, or a method actually named
+        `method_b_generations`. Hyphens stay legal *inside* a field, which is
+        what carries model slugs (`qwen3-4b-base`) and run descs
+        (`extend-quad-a0.5`).
+        """
         stem = f"{split}__{self.name}"
-        return f"{stem}_{desc}" if desc else stem
+        return f"{stem}__{desc}" if desc else stem
 
-    def prompts_dir(self, task_name: str) -> Path:
-        return self.task_dir(task_name) / "prompts"
+    def formatted_dir(self, task_name: str) -> Path:
+        """`problems_with_format/` -- a partition with the method's template
+        applied, and nothing generated yet. Model-ready input, no rollouts."""
+        return self.task_dir(task_name) / "problems_with_format"
 
-    def prompts_path(self, task_name: str, split: str, desc: str | None = None) -> Path:
+    def formatted_path(self, task_name: str, split: str, desc: str | None = None) -> Path:
         ext = ".parquet" if split.startswith("rl") else ".json"
-        return self.prompts_dir(task_name) / f"{self.artifact_stem(split, desc)}{ext}"
+        return self.formatted_dir(task_name) / f"{self.artifact_stem(split, desc)}{ext}"
 
     def datasets_dir(self, task_name: str) -> Path:
         return self.task_dir(task_name) / "datasets"
@@ -295,6 +305,18 @@ class Method:
 def problems_dir(task_name: str) -> Path:
     """`artifacts/{task}/problems` -- raw problems, shared by every method."""
     return ARTIFACTS_ROOT / task_name / "problems"
+
+
+def partition_path(task_name: str, split: str) -> Path:
+    """`problems/{split}.json` -- the problems belonging to one split.
+
+    Materialized rather than recomputed. The partition used to exist only as
+    (seed, SPLITS table), so editing a boundary silently repartitioned every
+    artifact ever produced, with no record of what the old one was. Writing it
+    down makes the split a fact about the data instead of a fact about the code
+    that happens to be checked out.
+    """
+    return problems_dir(task_name) / f"{split}.json"
 
 
 def get_primitives_path(task_name: str) -> Path:

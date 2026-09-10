@@ -34,7 +34,7 @@ Examples:
     # models each share one directory per task, and a method's files are told
     # apart by its name.
     # artifacts/countdown/problems/primitives.json
-    # artifacts/countdown/prompts/{split}__{method}.json
+    # artifacts/countdown/problems_with_format/{split}__{method}.json
     # artifacts/countdown/datasets/{split}__{method}.json
     # artifacts/countdown/models/{method}_{sft,models}/{run_id}/{model,evals,...}
 """
@@ -89,6 +89,16 @@ def cmd_create_primitives(args):
         num_puzzles=args.num_puzzles,
         seed=args.seed,
         **task_options,
+    )
+
+
+def cmd_create_partitions(args):
+    """Split primitives into per-split problem files."""
+    commands.create_partitions(
+        task_name=args.task,
+        primitives_path=Path(args.primitives) if args.primitives else None,
+        output_dir=Path(args.output) if args.output else None,
+        seed=args.seed,
     )
 
 
@@ -181,8 +191,6 @@ def cmd_generate(args):
         sample_strategy=getattr(args, "sample_strategy", None),
         data_parallel_size=args.data_parallel_size,
         no_hints=getattr(args, "no_hints", False),
-        difficulty_profile_out=(Path(args.difficulty_profile)
-                                if getattr(args, "difficulty_profile", None) else None),
         hint_schedule_from=(Path(args.hint_schedule)
                             if getattr(args, "hint_schedule", None) else None),
         hint_buckets=getattr(args, "hint_buckets", None),
@@ -370,12 +378,21 @@ def main():
                         "used for the shipped primitives) or 'original' (top-level). Default: uniform.")
     p.set_defaults(func=cmd_create_primitives)
 
+    # create_partitions
+    p = subparsers.add_parser("create_partitions",
+        help="Split primitives into per-split problem files under problems/")
+    p.add_argument("--task", required=True, help="Task name")
+    p.add_argument("--primitives", help="Path to primitives.json (default: artifacts/{task}/problems/primitives.json)")
+    p.add_argument("--output", help="Output directory (default: artifacts/{task}/problems/)")
+    p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
+    p.set_defaults(func=cmd_create_partitions)
+
     # create_prompts
     p = subparsers.add_parser("create_prompts", help="Create prompts from primitives")
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--method", help="Method name for auto-derived paths and templates")
     p.add_argument("--primitives", help="Path to primitives.json (default: artifacts/{task}/problems/primitives.json)")
-    p.add_argument("--output", help="Output directory (default: artifacts/{task}/prompts/)")
+    p.add_argument("--output", help="Output directory (default: artifacts/{task}/problems_with_format/)")
     p.add_argument("--split", default="all",
                    help="Split name, or 'all' for every split this task defines. Most tasks: "
                    "sft_whole, sft_train, sft_val, rl_train, rl_val, eval; "
@@ -394,7 +411,7 @@ def main():
     p.add_argument("--task", required=True, help="Task whose templates to use (e.g., competition_math)")
     p.add_argument("--dataset", required=True, help=f"OOD dataset name ({ood_names})")
     p.add_argument("--method", help="Method name for template selection and output path")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/prompts/eval__{method}_ood-{dataset}.json)")
+    p.add_argument("--output", help="Output path (default: artifacts/{task}/problems_with_format/eval__{method}_ood-{dataset}.json)")
     p.add_argument("--num-problems", type=int, default=None, help="Limit number of problems (omit for all)")
     p.add_argument("--seed", type=int, default=42, help="Random seed for shuffling")
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
@@ -406,7 +423,7 @@ def main():
     p.add_argument("--model", required=True, help="Model name or path")
     p.add_argument("--method", help="Method name for auto-derived paths")
     p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,models}/. Required with --method; nothing is derived from the base checkpoint.")
-    p.add_argument("--prompts", help="Path to prompts file (default: artifacts/{task}/prompts/{split}__{method}.json)")
+    p.add_argument("--prompts", help="Path to prompts file (default: artifacts/{task}/problems_with_format/{split}__{method}.json)")
     p.add_argument("--output", help="Output path (default: artifacts/{task}/datasets/{split}__{method}.json)")
     p.add_argument("--split", default="sft_whole", help="Which split to generate from (default: sft_whole)")
     p.add_argument("--batch-size", type=int, default=16, help="Batch size")
@@ -444,18 +461,19 @@ def main():
              "Requires --force-hints-distribution.")
     # --- Difficulty-scheduled hints (3 phases) ------------------------------
     # Phase 1: probe. Measure how often the model solves each problem unaided.
-    #   generate ... --no-hints --num-samples 8 --difficulty-profile P.json
-    # Phase 2+3: schedule from that profile and oversample until enough are right.
-    #   generate ... --hint-schedule P.json --target-correct-rate 0.5
+    #   generate ... --no-hints --num-samples 8 --output PROBE.json
+    # Phase 2+3: schedule from that probe and oversample until enough are right.
+    #   generate ... --hint-schedule PROBE.json --target-correct-rate 0.5
+    # The probe is an ordinary dataset; its pass rates are read straight out of
+    # it, so there is no separate profile file to write, name or keep in sync.
     p.add_argument("--no-hints", dest="no_hints", action="store_true",
-        help="Suppress hint requests during decoding. Phase 1 of the difficulty "
-             "schedule: measures unaided pass rate. Pair with --num-samples.")
-    p.add_argument("--difficulty-profile", type=str, default=None,
-        help="Write a per-problem difficulty profile (pass rates) here. Use with "
-             "--no-hints and --num-samples 4+.")
+        help="Ban the hint request during decoding, so the model has to answer "
+             "unaided. Phase 1 of the difficulty schedule: measures unaided pass "
+             "rate. Pair with --num-samples.")
     p.add_argument("--hint-schedule", type=str, default=None,
-        help="Read a difficulty profile and schedule per-problem hint counts from "
-             "it, so harder problems get more hints. Overrides "
+        help="Path to a no-hint probe dataset (a 'generate --no-hints "
+             "--num-samples 8' output). Schedules per-problem hint counts from its "
+             "pass rates, so harder problems get more hints. Overrides "
              "--force-hints-distribution/--force-hints-policy.")
     p.add_argument("--hint-target-fraction", type=float, default=None,
         help="Fraction of problems that should request a hint, e.g. 0.5. Assigns "
@@ -487,7 +505,7 @@ def main():
     p.add_argument("--method", help="Method name for auto-derived paths")
     p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,models}/. Required with --method; nothing is derived from the base checkpoint.")
     p.add_argument("--split", default="eval", help="Prompts split to evaluate (default: eval)")
-    p.add_argument("--prompts", help="Path to eval prompts (default: artifacts/{task}/prompts/{split}__{method}.json)")
+    p.add_argument("--prompts", help="Path to eval prompts (default: artifacts/{task}/problems_with_format/{split}__{method}.json)")
     p.add_argument("--output", help="Output path (default: artifacts/{task}/models/{method}_{sft,models}/{run_id}/evals/{split}.json)")
     p.add_argument("--batch-size", type=int, default=16, help="Batch size")
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
@@ -551,8 +569,8 @@ def main():
     p.add_argument("--method", help="Method name for auto-derived paths, template, and reward config")
     p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,models}/. Required with --method; nothing is derived from the base checkpoint.")
     p.add_argument("--base-model", help="Base model for cold-start RL (mutually exclusive with --sft-model)")
-    p.add_argument("--train-prompts", help="Path to RL train prompts (default: artifacts/{task}/prompts/rl_train__{method}.parquet)")
-    p.add_argument("--val-prompts", help="Path to RL validation prompts (default: artifacts/{task}/prompts/rl_val__{method}.parquet)")
+    p.add_argument("--train-prompts", help="Path to RL train prompts (default: artifacts/{task}/problems_with_format/rl_train__{method}.parquet)")
+    p.add_argument("--val-prompts", help="Path to RL validation prompts (default: artifacts/{task}/problems_with_format/rl_val__{method}.parquet)")
     p.add_argument("--sft-model", help="Path to SFT model (mutually exclusive with --base-model)")
     p.add_argument("--output", help="Output path (default: artifacts/{task}/models/{method}_models/{run_id}/model)")
     p.add_argument("--reward-function", help="Path to reward function (default: task's reward function)")

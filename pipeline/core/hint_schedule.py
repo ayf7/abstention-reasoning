@@ -41,9 +41,14 @@ DEFAULT_BUCKETS: list[tuple[float, int]] = [
 
 @dataclass
 class DifficultyProfile:
-    """Per-problem empirical difficulty from a no-hint probe."""
-    model: str
-    split: str
+    """Per-problem empirical difficulty from a no-hint probe.
+
+    Built in memory from the probe's own records and used immediately. It used
+    to be written out and read back as its own JSON, which bought nothing: it
+    is a pure function of the probe dataset, so the file could only ever go
+    stale against the records it summarized, and it needed a name in a scheme
+    that has no room for a keyed-by-index summary.
+    """
     num_samples: int
     pass_rates: dict[int, float] = field(default_factory=dict)
     # Reasoning tokens spent per problem. Secondary difficulty signal, needed
@@ -51,26 +56,6 @@ class DifficultyProfile:
     # a large block ties at 1.0 and rank order inside it would otherwise be
     # arbitrary. Longer reasoning on an equally-solved problem means harder.
     effort: dict[int, float] = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        return {
-            "model": self.model,
-            "split": self.split,
-            "num_samples": self.num_samples,
-            # JSON object keys are strings; keep the round-trip explicit.
-            "pass_rates": {str(k): v for k, v in self.pass_rates.items()},
-            "effort": {str(k): v for k, v in self.effort.items()},
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "DifficultyProfile":
-        return cls(
-            model=d["model"],
-            split=d["split"],
-            num_samples=d["num_samples"],
-            pass_rates={int(k): float(v) for k, v in d["pass_rates"].items()},
-            effort={int(k): float(v) for k, v in d.get("effort", {}).items()},
-        )
 
 
 def parse_buckets(spec: str) -> list[tuple[float, int]]:
@@ -105,14 +90,17 @@ def hints_for_pass_rate(pass_rate: float, buckets: list[tuple[float, int]]) -> i
     return buckets[-1][1]
 
 
-def build_profile(records: list[dict], model: str, split: str, num_samples: int) -> DifficultyProfile:
+def build_profile(records: list[dict]) -> DifficultyProfile:
     """Turn no-hint probe records into a difficulty profile.
 
     Expects each record to carry `index` and either `pass_rate` (already
-    aggregated over samples) or `correct` (a single sample).
+    aggregated over samples) or `correct` (a single sample). num_samples comes
+    from the records themselves rather than being passed alongside them, so it
+    cannot disagree with the data it describes.
     """
     rates: dict[int, float] = {}
     effort: dict[int, float] = {}
+    num_samples = 1
     for r in records:
         idx = r["index"]
         if "pass_rate" in r:
@@ -121,8 +109,10 @@ def build_profile(records: list[dict], model: str, split: str, num_samples: int)
             rates[idx] = 1.0 if r.get("correct") else 0.0
         if r.get("token_count"):
             effort[idx] = float(r["token_count"])
-    return DifficultyProfile(model=model, split=split, num_samples=num_samples,
-                             pass_rates=rates, effort=effort)
+        num_samples = max(num_samples, int(r.get("num_samples") or 1))
+    if not rates:
+        raise ValueError("hint schedule probe has no usable records")
+    return DifficultyProfile(num_samples=num_samples, pass_rates=rates, effort=effort)
 
 
 def schedule_from_profile(

@@ -610,9 +610,9 @@ def train_rl(
     # Default paths from method
     if method is not None:
         if train_prompts_path is None:
-            train_prompts_path = method.prompts_path(task_name, "rl_train")
+            train_prompts_path = method.formatted_path(task_name, "rl_train")
         if val_prompts_path is None:
-            candidate = method.prompts_path(task_name, "rl_val")
+            candidate = method.formatted_path(task_name, "rl_val")
             if candidate.exists():
                 val_prompts_path = candidate
 

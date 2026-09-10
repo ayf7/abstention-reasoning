@@ -6,7 +6,7 @@ import inspect
 from pathlib import Path
 
 from pipeline.core.io import load_json, save_json, save_parquet
-from pipeline.core.method import TASKS_ROOT, Method, get_primitives_path
+from pipeline.core.method import TASKS_ROOT, Method, get_primitives_path, partition_path
 from pipeline.tasks import get_task
 
 
@@ -67,6 +67,39 @@ def create_primitives(
     return output_path
 
 
+def create_partitions(
+    task_name: str,
+    primitives_path: Path | None = None,
+    output_dir: Path | None = None,
+    seed: int = 42,
+) -> dict[str, Path]:
+    """Split primitives into per-split problem files under problems/.
+
+    One partition serves every method: the split a problem belongs to is a
+    property of the dataset, not of whatever method happens to be formatting it.
+    Writing it down also pins it -- the boundaries in a task's SPLITS table can
+    change afterwards without silently reinterpreting artifacts already built
+    against the old ones.
+
+    Returns:
+        {split: path} for every split the task defines.
+    """
+    task = get_task(task_name)
+    if primitives_path is None:
+        primitives_path = get_primitives_path(task_name)
+    primitives = load_json(primitives_path)
+
+    written = {}
+    for split in task.supported_splits():
+        indices = set(task.get_split_indices(len(primitives), split, seed, primitives))
+        rows = [p for p in primitives if p["index"] in indices]
+        path = (output_dir / f"{split}.json") if output_dir else partition_path(task_name, split)
+        save_json(path, rows)
+        print(f"  {split:<10} {len(rows):>6} problems -> {path}")
+        written[split] = path
+    return written
+
+
 def _prompts_filename(split: str, method, force_json: bool) -> str:
     """Filename for one split's prompts.
 
@@ -102,7 +135,7 @@ def create_prompts(
         task_name: Name of task
         method_name: Method name for auto-derived paths and template selection
         primitives_path: Path to primitives.json (default: artifacts/{task}/primitives.json)
-        output_dir: Directory to save prompts (default: artifacts/{task}/prompts/)
+        output_dir: Directory to save prompts (default: artifacts/{task}/problems_with_format/)
         split_name: Name of split (sft_whole, sft_train, sft_val, rl_train,
             rl_val, eval, or 'all')
         seed: Random seed for split assignment
@@ -130,7 +163,7 @@ def create_prompts(
                 "Either --method or --output must be specified. "
                 "Use --method to auto-derive paths, or --output for explicit paths."
             )
-        output_dir = method.prompts_dir(task_name)
+        output_dir = method.formatted_dir(task_name)
 
     # Get template variant from method or task default
     template_variant = None
@@ -196,16 +229,18 @@ def _create_prompts_single(
     method: "Method | None" = None,
     num_hints: int | None = None,
 ) -> Path:
-    """Create prompts for a single split."""
-    # Load primitives
-    primitives = load_json(primitives_path)
-
-    # Get indices for this split from task (pass primitives for stratified sampling)
-    split_indices = task.get_split_indices(len(primitives), split_name, seed, primitives)
-    index_set = set(split_indices)
-
-    # Filter primitives
-    primitives = [p for p in primitives if p["index"] in index_set]
+    """Apply a method's template to one materialized partition."""
+    # Read the partition rather than recomputing it. create_partitions wrote it
+    # down precisely so that every method formats the *same* problems, and so
+    # that editing a SPLITS boundary later cannot silently repartition work
+    # that has already been generated against the old one.
+    partition = partition_path(task_name, split_name)
+    if not partition.exists():
+        raise FileNotFoundError(
+            f"No {split_name} partition at {partition}. "
+            f"Run 'python -m pipeline create_partitions --task {task_name}' first."
+        )
+    primitives = load_json(partition)
 
     # Determine format from output path
     fmt = "parquet" if str(output_path).endswith(".parquet") else "json"
@@ -532,7 +567,7 @@ def create_ood_prompts(
         task_name: Task whose templates/check_correctness to use (e.g., "competition_math")
         dataset_name: OOD dataset key (math500, olympiad_bench, gsm8k, aime2024)
         method_name: Method name for template selection and output path derivation
-        output_path: Explicit output path (default: artifacts/{task}/prompts/eval__{method}_ood-{dataset}.json)
+        output_path: Explicit output path (default: artifacts/{task}/problems_with_format/eval__{method}_ood-{dataset}.json)
         num_problems: Limit number of problems (None = all)
         seed: Random seed for shuffling
         include_assistant_prefix: Whether to include assistant's opening in prompt
@@ -558,7 +593,7 @@ def create_ood_prompts(
                 "Either --method or --output must be specified. "
                 "Use --method to auto-derive paths, or --output for explicit paths."
             )
-        output_path = method.prompts_dir(task_name) / (
+        output_path = method.formatted_dir(task_name) / (
             f"{method.artifact_stem('eval', desc=f'ood-{dataset_name}')}.json"
         )
 
