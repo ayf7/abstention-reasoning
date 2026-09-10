@@ -23,29 +23,105 @@ pip install -e verl/    # RL trainer
 
 ## Quickstart
 
-End-to-end on `countdown` with the `simple` baseline:
+The full `baseline` → `method_b` pipeline on `countdown` with a 1.5B student and Qwen3-14B as the teacher. Every path is written out: `--method` plus `--run-id` would derive the same ones, but spelling them makes the data flow between stages visible.
+
+### 0. Problems — shared by every method
 
 ```bash
-# 1. Generate raw puzzles (shared by every method for this task)
-python -m pipeline create_primitives --task countdown --num-puzzles 5000
+python -m pipeline create_primitives --task countdown --num-puzzles 5000 --seed 42 \
+    --output artifacts/countdown/problems/primitives.json
 
-# 2. Render prompts for every split the task defines
-python -m pipeline create_prompts --task countdown --method baseline --split all
-
-# 3. Sample SFT training data from a strong teacher model
-python -m pipeline generate --task countdown --method baseline --model Qwen/Qwen3-4B --split sft --async
-
-# 4. Supervised fine-tune
-python -m pipeline train_sft --task countdown --method baseline --base-model Qwen/Qwen2.5-1.5B
-
-# 5. RL from the SFT checkpoint
-python -m pipeline train_rl --task countdown --method baseline
-
-# 6. Evaluate. --model takes 'sft'/'rl' to resolve the method's own checkpoint
-python -m pipeline evaluate --task countdown --method baseline --model rl --async
+python -m pipeline create_partitions --task countdown --seed 42 \
+    --primitives artifacts/countdown/problems/primitives.json \
+    --output artifacts/countdown/problems
 ```
 
-`--method` auto-derives every artifact path, so steps rarely need explicit `--prompts` / `--dataset` / `--output`. Pass `--async` to `generate` and `evaluate` for the batched async vLLM path; it is the standard mode here.
+`create_partitions` writes one file per split (`sft_whole`, `sft_train`, `sft_val`, `rl_train`, `rl_val`, `eval`). Every method formats those same files, so the split is fixed once and recorded rather than recomputed per method.
+
+### 1. Baseline — answer directly, never ask for a hint
+
+```bash
+# Apply the baseline template to each partition
+python -m pipeline create_prompts --task countdown --method baseline --split all \
+    --primitives artifacts/countdown/problems/primitives.json \
+    --output artifacts/countdown/problems_with_format
+
+# Teacher rollouts -> SFT data
+python -m pipeline generate --task countdown --method baseline --async \
+    --model Qwen/Qwen3-14B --split sft_whole \
+    --prompts artifacts/countdown/problems_with_format/sft_whole__baseline.json \
+    --output artifacts/countdown/sft_datasets/sft_whole__baseline.json
+
+# SFT the student on those rollouts
+python -m pipeline train_sft --task countdown --method baseline --run-id qwen2.5-1.5b \
+    --base-model Qwen/Qwen2.5-1.5B \
+    --dataset artifacts/countdown/sft_datasets/sft_whole__baseline.json \
+    --output artifacts/countdown/models/baseline_sft/qwen2.5-1.5b/model
+
+# RL from that SFT checkpoint -> the baseline model
+python -m pipeline train_rl --task countdown --method baseline --run-id qwen2.5-1.5b \
+    --sft-model artifacts/countdown/models/baseline_sft/qwen2.5-1.5b/model \
+    --train-prompts artifacts/countdown/problems_with_format/rl_train__baseline.parquet \
+    --val-prompts artifacts/countdown/problems_with_format/rl_val__baseline.parquet \
+    --output artifacts/countdown/models/baseline_models/qwen2.5-1.5b/model
+
+python -m pipeline evaluate --task countdown --method baseline --model rl --async \
+    --run-id qwen2.5-1.5b --split eval \
+    --prompts artifacts/countdown/problems_with_format/eval__baseline.json \
+    --output artifacts/countdown/models/baseline_models/qwen2.5-1.5b/evals/eval.json
+```
+
+### 2. Method B — request hints mid-reasoning
+
+Method B starts from the *baseline model*, not from the base checkpoint: reasoning is sharpened first, hint-seeking second.
+
+```bash
+# Apply the method_b template to the same partitions
+python -m pipeline create_prompts --task countdown --method method_b --split all \
+    --primitives artifacts/countdown/problems/primitives.json \
+    --output artifacts/countdown/problems_with_format
+
+# Probe: how often does the teacher solve each problem unaided?
+python -m pipeline generate --task countdown --method baseline --async \
+    --model Qwen/Qwen3-14B --split sft_whole --no-hints --num-samples 8 \
+    --prompts artifacts/countdown/problems_with_format/sft_whole__baseline.json \
+    --output artifacts/countdown/.scratch/sft_whole__baseline__probe.json
+
+# Schedule hints from that probe -- harder problems get more -- and oversample
+# until half the set is correct. The profile is derived in memory; only the
+# dataset is written.
+python -m pipeline generate --task countdown --method method_b --async \
+    --model Qwen/Qwen3-14B --split sft_whole \
+    --hint-schedule artifacts/countdown/.scratch/sft_whole__baseline__probe.json \
+    --hint-target-fraction 0.5 --max-hints 4 --target-correct-rate 0.5 \
+    --prompts artifacts/countdown/problems_with_format/sft_whole__method_b.json \
+    --output artifacts/countdown/sft_datasets/sft_whole__method_b.json
+
+# Hint SFT on top of the baseline model
+python -m pipeline train_sft --task countdown --method method_b --run-id qwen2.5-1.5b \
+    --base-model artifacts/countdown/models/baseline_models/qwen2.5-1.5b/model \
+    --dataset artifacts/countdown/sft_datasets/sft_whole__method_b.json \
+    --output artifacts/countdown/models/method_b_sft/qwen2.5-1.5b/model
+
+# RL with the quadratic hint penalty. alpha is the swept parameter and is not
+# in the method config, so it must be passed here -- and it is the only thing
+# distinguishing the runs, which is why it is in the run id.
+python -m pipeline train_rl --task countdown --method method_b \
+    --run-id qwen2.5-1.5b__quad-a0.5 \
+    --sft-model artifacts/countdown/models/method_b_sft/qwen2.5-1.5b/model \
+    --train-prompts artifacts/countdown/problems_with_format/rl_train__method_b.parquet \
+    --val-prompts artifacts/countdown/problems_with_format/rl_val__method_b.parquet \
+    --reward-kwargs hint_penalty=0.1 hint_penalty_shape=quadratic hint_penalty_alpha=0.5 \
+    --override algorithm.norm_adv_by_std_in_grpo=True \
+    --output artifacts/countdown/models/method_b_models/qwen2.5-1.5b__quad-a0.5/model
+
+python -m pipeline evaluate --task countdown --method method_b --model rl --async \
+    --run-id qwen2.5-1.5b__quad-a0.5 --split eval \
+    --prompts artifacts/countdown/problems_with_format/eval__method_b.json \
+    --output artifacts/countdown/models/method_b_models/qwen2.5-1.5b__quad-a0.5/evals/eval.json
+```
+
+Pass `--async` to `generate` and `evaluate` for the batched async vLLM path; it is the standard mode here. `--multi-turn` is read from the method config and does not need passing.
 
 ## Tasks
 
@@ -95,15 +171,16 @@ Reward functions themselves live with the trainer, in `verl/recipe/{task}/reward
 | Command | Purpose |
 |---|---|
 | `create_primitives` | Generate raw puzzle data (shared across methods) |
-| `create_prompts` | Render prompts from primitives for a split, or `all` |
+| `create_partitions` | Split primitives into per-split problem files under `problems/` |
+| `create_prompts` | Apply a method's template to a partition, or `all` of them |
 | `create_ood_prompts` | Build OOD eval prompts (`aime2024`, `gsm8k`, `math500`, `minerva_math`, `olympiad_bench`, `unanswerable_math`) |
 
 **Inference**
 
 | Command | Purpose |
 |---|---|
-| `generate` | Run a model over prompts to produce a dataset (`--async`, `--multi-turn`) |
-| `evaluate` | Evaluate a model (`--run-id`, `--num-samples`, `--async`) |
+| `generate` | Run a model over prompts to produce a dataset (`--async`, `--no-hints`, `--hint-schedule`, `--target-correct-rate`) |
+| `evaluate` | Evaluate a model (`--model sft`/`rl`, `--run-id`, `--num-samples`, `--async`) |
 | `analyze` | Report accuracy by variant for a dataset or results file |
 
 **Training**
@@ -111,23 +188,39 @@ Reward functions themselves live with the trainer, in `verl/recipe/{task}/reward
 | Command | Purpose |
 |---|---|
 | `train_sft` | SFT (`--epochs` 3, `--batch-size` 4, `--max-length` 4096) |
-| `train_rl` | RL (`--total-steps` 400, `--train-batch-size` 64, `--save-freq` 25) |
+| `train_rl` | RL (`--total-steps` 400, `--train-batch-size` 64, `--save-freq` 25, `--reward-kwargs`, `--override`) |
 | `convert_checkpoint` | Convert an FSDP/Megatron checkpoint to HuggingFace format |
 
 `python -m pipeline <command> --help` documents every flag.
+
+Every command that touches a model path requires `--run-id`; nothing is derived from the base checkpoint. Commands that read or write artifacts take an explicit `--primitives` / `--prompts` / `--dataset` / `--output`, and fall back to the method-derived path when omitted.
 
 ## Data model
 
 Each stage is a pure transformation that writes new files and never edits existing ones:
 
 ```
-problems/primitives.json   Raw puzzle data (index, variant, task-specific fields)
+problems/primitives.json                      Raw puzzle data (index, variant, task fields)
        │
-       ├── template ───► problems_with_format/{split}__{method}.json     Model-ready inputs + ground truth
+       │  create_partitions
+       ▼
+problems/{split}.json                         The seeded split, written down once
        │
-       └── model ──────► sft_datasets/{split}__{method}.json    Generations + correctness labels
-                              │
-                              └───► models/{method}_{sft,models}/{run_id}/evals/{split}.json
+       │  create_prompts        + a method's template
+       ▼
+problems_with_format/{split}__{method}.json   Model-ready inputs + ground truth
+       │                        .parquet for rl_train / rl_val
+       │  generate              + a model's rollouts
+       ▼
+sft_datasets/{split}__{method}.json           Generations + correctness labels
+       │
+       │  train_sft -> train_rl
+       ▼
+models/{method}_{sft,models}/{run_id}/model/
+       │
+       │  evaluate
+       ▼
+models/{method}_{sft,models}/{run_id}/evals/{split}.json
 ```
 
 ### Splits
@@ -151,22 +244,31 @@ Splits are disjoint slices of a seeded shuffle of the primitives, so no problem 
 
 ## Artifacts
 
-Generated data and model weights are written under `artifacts/`, which is typically a symlink to shared storage. The tree is organized by **stage**, not by method — prompts, datasets and models each share one directory per task, and a method's files are told apart by its *artifact name*:
+Generated data and model weights are written under `artifacts/`. The tree is organized by **stage**, not by method: each layer is one directory per task, and a method's files are told apart by name.
 
 ```
 artifacts/{task}/
-├── problems/primitives.json                    # raw problems, shared by every method
-├── problems_with_format/{split}__{method}.json|parquet     # templates applied
-├── sft_datasets/{split}__{method}.json            # generations + correctness labels
-└── models/{method}_{sft,models}/{run_id}/
-    ├── model/                                  # or a symlink to last/
-    ├── checkpoints/  rollouts/                 # RL only
-    └── evals/{split}.json                      # results live with the run that made them
+├── problems/                              problems. no template.
+│   ├── primitives.json                    raw, shared by every method
+│   └── {split}.json                       one per split, written by create_partitions
+├── problems_with_format/                  + a method's template. model-ready, nothing generated.
+│   ├── {split}__{method}.json             sft_whole, sft_train, sft_val, eval
+│   └── rl_{train,val}__{method}.parquet   verl rolls out itself, so no generations here
+├── sft_datasets/                          + generations and correctness labels
+│   └── {split}__{method}.json
+├── models/{method}_{sft,models}/{run_id}/
+│   ├── model/                             HuggingFace weights, or a symlink to last/ or best/
+│   ├── last/  best/  rollouts/            RL only
+│   └── evals/{split}.json                 results live inside the run that produced them
+└── .scratch/                              intermediates read back by a later step,
+    └── {split}__{method}__probe.json      never trained on
 ```
 
-The name in `{split}__{method}` and `{method}_{sft,models}` is the method's config name, so `baseline.yaml` produces `sft_whole__baseline.json` and `models/baseline_sft/`. Names are underscored, since they become directory names.
+The three data layers are distinguished by **what is in a file**, not by which stage reads it. That is what decides the two cases people get wrong: the RL parquet holds prompts and ground truth and no generations, so it belongs in `problems_with_format/`; and `sft_datasets/` is SFT-stage-only by construction rather than by convention, since nothing else ever carries generations.
 
-`--run-id` names the run directory verbatim and is **required** wherever a model path is derived. Nothing is inferred from the base checkpoint: run names are a convention (`1.5b`, `4b`, `4b-instruct`, `1.5b__extend-quad-a0.5`), and a name guessed from a checkpoint would only drift from it.
+Names come from the method's config filename, so `baseline.yaml` produces `sft_whole__baseline.json` and `models/baseline_sft/`. Fields are separated by `__` throughout — `{split}__{method}` and `{split}__{method}__{desc}` — because method names contain single underscores (`method_b`, `method_ac`) and a single-underscore separator would make `sft_whole__method_b_probe` ambiguous. Hyphens stay legal *inside* a field, which is what carries model slugs (`qwen3-4b-base`) and run descriptions (`quad-a0.5`).
+
+`--run-id` names the run directory verbatim and is **required** wherever a model path is derived. A run is `{model_slug}` or `{model_slug}__{desc}`, where `{desc}` marks a deviation from the default recipe — so a default run is the bare slug (`qwen2.5-1.5b`) and only the varying part is named (`qwen2.5-1.5b__quad-a0.5`, `qwen3-4b-base__s2`). Nothing is inferred from the base checkpoint; a name guessed in code would only drift from the convention.
 
 ## Repository layout
 
