@@ -38,7 +38,7 @@ python -m pipeline create_partitions --task countdown --seed 42 \
 
 `create_partitions` writes one file per split (`sft_whole`, `sft_train`, `sft_val`, `rl_train`, `rl_val`, `eval`). Every method formats those same files, so the split is fixed once and recorded rather than recomputed per method.
 
-### 1. Baseline — answer directly, never ask for a hint
+### 1. Baseline Training
 
 ```bash
 # Apply the baseline template to each partition
@@ -71,9 +71,7 @@ python -m pipeline evaluate --task countdown --method baseline --model rl --asyn
     --output artifacts/countdown/models/baseline_models/qwen2.5-1.5b/evals/eval.json
 ```
 
-### 2. Method B — request hints mid-reasoning
-
-Method B starts from the *baseline model*, not from the base checkpoint: reasoning is sharpened first, hint-seeking second.
+### 2. Method B Training
 
 ```bash
 # Apply the method_b template to the same partitions
@@ -244,29 +242,127 @@ Splits are disjoint slices of a seeded shuffle of the primitives, so no problem 
 
 ## Artifacts
 
-Generated data and model weights are written under `artifacts/`. The tree is organized by **stage**, not by method: each layer is one directory per task, and a method's files are told apart by name.
+Generated data and model weights are written under `artifacts/`, one tree per task. Three data layers, distinguished by what is *in* a file rather than by which stage reads it:
 
+* `problems/` — problems, no template.
+* `problems_with_format/` — a partition with a method's template applied. Model-ready input, nothing generated yet.
+* `sft_datasets/` — the above plus generations (teacher rollouts + correctness labels).
+
+The RL parquet lives in `problems_with_format/`, not `sft_datasets/`: verl produces its own rollouts, so the file holds prompts and ground truth and no generations. Eval prompts sit there for the same reason; eval *results* go inside the run that produced them.
+
+Names are `{partition}__{method}` and `{partition}__{method}__{optional_desc}`. Every field is separated by `__`, because method names contain single underscores (`method_b`, `method_ac`) and a single-underscore desc separator would make `sft_whole__method_b_generations` ambiguous. Hyphens are legal inside a field — that is what carries model slugs (`qwen3-4b-base`) and run descs (`quad-a0.5`).
+
+```yaml
+{task}/
+    problems/   # raw (question, answer, list of hint) partitions
+
+        primitives.json
+        sft_train.json
+        sft_val.json                # needed; the predictor models are trained by SFT only
+        sft_whole.json              # by construction: train + val
+        rl_train.json
+        rl_val.json
+        eval.json
+
+    problems_with_format/   # partition + template + hints. no generations.
+
+        sft_whole__baseline.json
+        sft_train__baseline.json
+        sft_val__baseline.json
+        rl_train__baseline.parquet
+        rl_val__baseline.parquet
+        eval__baseline.json
+
+        sft_whole__method_b.json
+        sft_train__method_b.json
+        sft_val__method_b.json
+        rl_train__method_b.parquet
+        rl_val__method_b.parquet
+        eval__method_b.json
+
+        sft_whole__method_ac.json   # A and C share one generation model
+        sft_train__method_ac.json
+        sft_val__method_ac.json
+        rl_train__method_ac.parquet
+        rl_val__method_ac.parquet
+        eval__method_ac.json
+
+        sft_train__method_a__qh_predictions.json    # predictors: SFT only, no RL
+        sft_val__method_a__qh_predictions.json
+        sft_train__method_c__qhr_predictions.json
+        sft_val__method_c__qhr_predictions.json
+
+    sft_datasets/   # + teacher rollouts and correctness labels.
+        sft_whole__baseline.json
+        sft_train__baseline.json
+        sft_val__baseline.json
+
+        sft_whole__method_b.json
+        sft_train__method_b.json
+        sft_val__method_b.json
+
+        sft_whole__method_ac.json
+        sft_train__method_ac.json
+        sft_val__method_ac.json
+        sft_whole__method_ac__generations.internal.json  # not used for training. self-generated
+        sft_val__method_ac__generations.internal.json
+
+        sft_train__method_a__qh_predictions.json
+        sft_val__method_a__qh_predictions.json
+        sft_train__method_c__qhr_predictions.json
+        sft_val__method_c__qhr_predictions.json
+
+    models/     # {method}_sft = SFT intermediate, {method}_models = finished model, post-RL.
+                # {method}_predictors = predictor, SFT only
+        baseline_sft/
+            qwen2.5-1.5b/
+                model/              # contains the hugging face.
+                evals/              # goes into the actual model folder not decoupled
+            qwen2.5-3b/
+            qwen3-4b-base/
+            qwen3-4b/
+        baseline_models/
+            qwen2.5-1.5b/
+            qwen2.5-3b/
+            qwen3-4b-base/
+            qwen3-4b-base__s2/      # seed replicate
+            qwen3-4b/
+        method_b_sft/
+            qwen2.5-1.5b/           # SFT on top of baseline_models
+            qwen2.5-3b/
+            qwen3-4b-base/
+        method_b_models/
+            qwen2.5-1.5b__quad-a0.5/
+            qwen2.5-3b__quad-a0.5/
+            qwen3-4b-base__quad-a0.5/
+        method_ac_sft/
+            qwen2.5-1.5b/
+            qwen2.5-3b/
+            qwen3-4b-base/
+            qwen3-4b/
+        method_ac_models/
+            qwen2.5-1.5b/
+            qwen2.5-3b/
+            qwen3-4b-base/
+            qwen3-4b/
+        method_a_predictors/
+            qwen2.5-1.5b/
+            qwen2.5-3b/
+            qwen3-4b-base/
+            qwen3-4b/
+        method_c_predictors/
+            qwen2.5-1.5b/
+            qwen2.5-3b/
+            qwen3-4b-base/
+            qwen3-4b/
+
+    .scratch/   # intermediates read back by a later step, never trained on
+        sft_whole__baseline__probe.json
 ```
-artifacts/{task}/
-├── problems/                              problems. no template.
-│   ├── primitives.json                    raw, shared by every method
-│   └── {split}.json                       one per split, written by create_partitions
-├── problems_with_format/                  + a method's template. model-ready, nothing generated.
-│   ├── {split}__{method}.json             sft_whole, sft_train, sft_val, eval
-│   └── rl_{train,val}__{method}.parquet   verl rolls out itself, so no generations here
-├── sft_datasets/                          + generations and correctness labels
-│   └── {split}__{method}.json
-├── models/{method}_{sft,models}/{run_id}/
-│   ├── model/                             HuggingFace weights, or a symlink to last/ or best/
-│   ├── last/  best/  rollouts/            RL only
-│   └── evals/{split}.json                 results live inside the run that produced them
-└── .scratch/                              intermediates read back by a later step,
-    └── {split}__{method}__probe.json      never trained on
-```
 
-The three data layers are distinguished by **what is in a file**, not by which stage reads it. That is what decides the two cases people get wrong: the RL parquet holds prompts and ground truth and no generations, so it belongs in `problems_with_format/`; and `sft_datasets/` is SFT-stage-only by construction rather than by convention, since nothing else ever carries generations.
+`method_ac`, `method_a` and `method_c` are the Method A and C setups, which are not implemented yet; everything above them exists today.
 
-Names come from the method's config filename, so `baseline.yaml` produces `sft_whole__baseline.json` and `models/baseline_sft/`. Fields are separated by `__` throughout — `{split}__{method}` and `{split}__{method}__{desc}` — because method names contain single underscores (`method_b`, `method_ac`) and a single-underscore separator would make `sft_whole__method_b_probe` ambiguous. Hyphens stay legal *inside* a field, which is what carries model slugs (`qwen3-4b-base`) and run descriptions (`quad-a0.5`).
+Names come from the method's config filename, so `baseline.yaml` produces `sft_whole__baseline.json` and `models/baseline_sft/`.
 
 `--run-id` names the run directory verbatim and is **required** wherever a model path is derived. A run is `{model_slug}` or `{model_slug}__{desc}`, where `{desc}` marks a deviation from the default recipe — so a default run is the bare slug (`qwen2.5-1.5b`) and only the varying part is named (`qwen2.5-1.5b__quad-a0.5`, `qwen3-4b-base__s2`). Nothing is inferred from the base checkpoint; a name guessed in code would only drift from the convention.
 
