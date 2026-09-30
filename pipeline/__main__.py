@@ -83,6 +83,8 @@ def cmd_create_primitives(args):
     task_options = {}
     if args.tracer is not None:
         task_options["tracer"] = args.tracer
+    if args.all_types:
+        task_options["all_types"] = True
     commands.create_primitives(
         task_name=args.task,
         output_path=output_path,
@@ -376,6 +378,8 @@ def main():
     p.add_argument("--tracer", choices=["original", "uniform"], default=None,
                    help="code_output only. Tracer for hint generation: 'uniform' (execution-uniform, "
                         "used for the shipped primitives) or 'original' (top-level). Default: uniform.")
+    p.add_argument("--all-types", action="store_true",
+                   help="competition_math only. Keep all 7 problem types, not just the 4 harder ones.")
     p.set_defaults(func=cmd_create_primitives)
 
     # create_partitions

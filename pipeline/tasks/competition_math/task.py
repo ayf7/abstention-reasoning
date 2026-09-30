@@ -57,13 +57,16 @@ class CompetitionMathTask(BaseTask):
         "Counting & Probability",
     )
 
-    def create_primitives(self, num_puzzles: int | None, seed: int = 42) -> list[dict]:
+    def create_primitives(
+        self, num_puzzles: int | None, seed: int = 42, all_types: bool = False
+    ) -> list[dict]:
         """
         Load competition math problems from HuggingFace, balanced across types.
 
         Args:
             num_puzzles: Number of problems to load (None = all matching filter)
             seed: Random seed for shuffling
+            all_types: Keep every problem type instead of only ALLOWED_TYPES
         """
         import random
         from datasets import load_dataset
@@ -72,10 +75,13 @@ class CompetitionMathTask(BaseTask):
 
         ds = load_dataset("qwedsacf/competition_math", split="train")
 
+        # Sorted so the full type list is as seed-reproducible as ALLOWED_TYPES
+        types = tuple(sorted(set(ds["type"]))) if all_types else self.ALLOWED_TYPES
+
         # Group by type
-        by_type: dict[str, list] = {t: [] for t in self.ALLOWED_TYPES}
+        by_type: dict[str, list] = {t: [] for t in types}
         for row in ds:
-            if row["type"] in self.ALLOWED_TYPES:
+            if row["type"] in types:
                 by_type[row["type"]].append(row)
 
         # Shuffle each type
@@ -86,7 +92,7 @@ class CompetitionMathTask(BaseTask):
         # alone truncates: it yielded 0 primitives for any num_puzzles below the
         # type count, and under-delivered by up to len(ALLOWED_TYPES)-1
         # otherwise. Spread the remainder so --num-puzzles N really means N.
-        n_types = len(self.ALLOWED_TYPES)
+        n_types = len(types)
         if num_puzzles is not None:
             base, remainder = divmod(num_puzzles, n_types)
             per_type_limits = [
@@ -97,7 +103,7 @@ class CompetitionMathTask(BaseTask):
 
         # Sample from each type (balanced)
         selected = []
-        for t, limit in zip(self.ALLOWED_TYPES, per_type_limits):
+        for t, limit in zip(types, per_type_limits):
             pool = by_type[t]
             if limit is not None:
                 pool = pool[:limit]
