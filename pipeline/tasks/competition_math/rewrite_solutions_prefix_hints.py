@@ -119,6 +119,8 @@ Your task: Given a problem and its solution, divide the solution into exactly 5 
 
 Return ONLY a JSON object with this exact structure (no markdown code blocks):
 {"hint_1": "...", "hint_2": "...", "hint_3": "...", "hint_4": "...", "hint_5": "..."}
+
+Write exactly 5 hints: the keys hint_1 through hint_5 and no other keys. Do not add a 6th hint or split a hint across extra keys.
 """
 
 PREFIX_HINTS_USER_TEMPLATE = """\
@@ -128,7 +130,7 @@ Problem:
 Solution:
 {solution}
 
-Break this solution into 5 sequential steps (1-2 sentences each). Each hint should be INDEPENDENT (not repeating previous hints):"""
+Break this solution into exactly 5 sequential steps (1-2 sentences each). Each hint should be INDEPENDENT (not repeating previous hints):"""
 
 
 def detect_repetition(text: str, min_pattern_len: int = 2, min_repeats: int = 10) -> bool:
@@ -146,6 +148,10 @@ def detect_repetition(text: str, min_pattern_len: int = 2, min_repeats: int = 10
     return False
 
 
+NUM_HINTS = 5
+HINT_KEYS = [f"hint_{i}" for i in range(1, NUM_HINTS + 1)]
+
+
 def validate_hints(
     hints: dict,
     max_tokens_per_hint: int = 200,
@@ -154,10 +160,8 @@ def validate_hints(
     """Validate hints for quality issues. Returns (is_valid, error_message)."""
     total_tokens = 0
 
-    for i in range(1, 7):
-        key = f"hint_{i}"
+    for key in HINT_KEYS:
         hint = hints[key]
-
         # Check for repetition patterns (model breakdown)
         if detect_repetition(hint):
             return False, f"{key} contains repetitive pattern (model breakdown)"
@@ -204,9 +208,8 @@ def parse_hints_response(content: str) -> dict | None:
 
     try:
         hints = json.loads(content)
-        required_keys = {"hint_1", "hint_2", "hint_3", "hint_4", "hint_5"}
-        if not required_keys.issubset(hints.keys()):
-            print(f"  Warning: Missing keys in response. Got: {hints.keys()}")
+        if set(hints.keys()) != set(HINT_KEYS):
+            print(f"  Warning: Expected exactly {HINT_KEYS}. Got: {list(hints.keys())}")
             return None
 
         # Validate hint quality
@@ -224,12 +227,12 @@ def parse_hints_response(content: str) -> dict | None:
 
 def validate_hint_structure(hints: dict) -> dict:
     """Compute stats for incremental hints (in tokens)."""
-    tokens = [count_tokens(hints[f"hint_{i}"]) for i in range(1, 7)]
+    tokens = [count_tokens(hints[key]) for key in HINT_KEYS]
     total = sum(tokens)
     return {
         "tokens": tokens,  # Token counts per hint
         "total_tokens": total,  # Total when concatenated
-        "avg_tokens": total / 5,  # Average per hint
+        "avg_tokens": total / NUM_HINTS,  # Average per hint
         "max_tokens": max(tokens),  # Longest hint
         "distribution": [round(t / total * 100, 1) if total > 0 else 0 for t in tokens],  # % contribution
     }

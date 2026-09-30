@@ -5,7 +5,7 @@ mathematics problems across 7 categories and 5 difficulty levels.
 
 Dataset: https://huggingface.co/datasets/qwedsacf/competition_math
 
-Hints come from each primitive's prefix_hints (6-hint progressive system).
+Hints come from each primitive's prefix_hints (5-hint progressive system).
 """
 
 import importlib.util
@@ -280,7 +280,7 @@ class CompetitionMathTask(BaseTask):
     def get_ground_truth(self, primitive: dict) -> dict:
         """Extract ground truth for embedding in prompts and RL interactions.
 
-        Hints come from the primitive's prefix_hints (6-hint progressive system).
+        Hints come from the primitive's prefix_hints (5-hint progressive system).
         """
         gt = {
             "level": primitive["level"],
