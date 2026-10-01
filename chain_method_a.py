@@ -50,15 +50,18 @@ chain_method_c.py for the method_c verifier, which checks a candidate
 *solution* instead of asking "can you solve this given the hints so far?").
 
 Usage:
+    TASK="competition_math"
+    RUN_ID="qwen3-4b-base_v3"
+
     python chain_method_a.py \
-        --task countdown \
-        --eval-dataset artifacts/countdown/problems/eval.json \
-        --verifier-model artifacts/countdown/models/method_a_predictors/qwen2.5-1.5b/model \
-        --solver-model artifacts/countdown/models/method_ac_models/qwen2.5-1.5b/model \
+        --task "${TASK}" \
+        --eval-dataset artifacts/${TASK}/problems/eval.json \
+        --verifier-model artifacts/${TASK}/models/method_a_predictors/${RUN_ID}/model \
+        --solver-model artifacts/${TASK}/models/method_ac_models/${RUN_ID}/model \
         --num-samples 1 \
         --max-hints 5 \
         --async \
-        --output artifacts/countdown/models/method_a_predictors/qwen2.5-1.5b/evals/eval__chained_1s.json
+        --output artifacts/${TASK}/models/method_a_predictors/${RUN_ID}/evals/eval__chained_1s.json
 """
 
 import argparse

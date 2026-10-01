@@ -22,5 +22,8 @@ pip uninstall -y torchao
 pip install -e . 
 pip install -e verl/
 
+# Authenticate W&B without storing the API key in Git.
+wandb login --relogin "$(cat /data/tanyagoyal/.wandb/api_key)"
+
 #hf download tanyagoyal-p/abstention-reasoning-data   --repo-type dataset   --local-dir /data/tanyagoyal/artifacts
 ln -sfn /data/tanyagoyal/artifacts artifacts
