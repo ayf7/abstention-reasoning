@@ -126,7 +126,7 @@ Pass `--async` to `generate` and `evaluate` for the batched async vLLM path; it 
 | Task | Problem |
 |---|---|
 | `countdown` | Reach a target number by combining given operands with `+ - * /` |
-| `competition_math` | Competition math problems (HuggingFace MATH) |
+| `math` | Competition math problems (HuggingFace MATH) |
 | `code_output` | Predict the stdout of a short program |
 
 Each lives in `pipeline/tasks/{task}/` and implements the `BaseTask` interface: `create_primitives`, `format_prompt`, `check_correctness`.
@@ -225,7 +225,7 @@ models/{method}_{sft,models}/{run_id}/evals/{split}.json
 
 Splits are disjoint slices of a seeded shuffle of the primitives, so no problem appears in both training and evaluation. **Tasks declare their own layout**, and not every task defines every split:
 
-| Split | `countdown`, `competition_math` | `code_output` |
+| Split | `countdown`, `math` | `code_output` |
 |---|---|---|
 | `sft_whole` | 0–30% | 0–19.2% |
 | `sft_train` | 0–27% | 0–17.28% |

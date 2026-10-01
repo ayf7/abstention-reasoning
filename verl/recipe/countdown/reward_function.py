@@ -86,7 +86,7 @@ def hint_cost(hints_used: int, hint_penalty: float, shape: str = "linear",
     alpha is the sweep knob; it scales both shapes and defaults to 1.0, so a
     linear run with alpha unset scores exactly as it did before.
 
-    Duplicated from recipe/competition_math/reward_function.py: the two recipes
+    Duplicated from recipe/math/reward_function.py: the two recipes
     have no cross-import path today and this runs inside the rollout workers,
     where a new import is the wrong thing to discover at step 1. Keep in step.
 

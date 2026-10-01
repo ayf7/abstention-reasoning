@@ -11,9 +11,9 @@ Each hint is stored INDEPENDENTLY (not cumulative) for token efficiency.
 At runtime, concatenate: hint_1 + hint_2 + ... + hint_k to get the first k/5 of the solution.
 
 Usage:
-    python -m pipeline.tasks.competition_math.rewrite_solutions_prefix_hints \
-        --input artifacts/competition_math/primitives.json \
-        --output artifacts/competition_math/primitives_prefix_hints.json \
+    python -m pipeline.tasks.math.rewrite_solutions_prefix_hints \
+        --input artifacts/math/primitives.json \
+        --output artifacts/math/primitives_prefix_hints.json \
         --batch-size 20 \
         --max-samples 100
 """
@@ -540,13 +540,13 @@ def main():
     parser.add_argument(
         "--input", "-i",
         type=Path,
-        default=ARTIFACTS_ROOT / "competition_math" / "primitives.json",
+        default=ARTIFACTS_ROOT / "math" / "primitives.json",
         help="Input primitives file",
     )
     parser.add_argument(
         "--output", "-o",
         type=Path,
-        default=ARTIFACTS_ROOT / "competition_math" / "primitives_prefix_hints.json",
+        default=ARTIFACTS_ROOT / "math" / "primitives_prefix_hints.json",
         help="Output file with prefix hints",
     )
     parser.add_argument(

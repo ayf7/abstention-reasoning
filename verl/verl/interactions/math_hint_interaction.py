@@ -1,7 +1,7 @@
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
 # Licensed under the Apache License, Version 2.0
 
-"""Interaction handler for competition_math task with sequential hint support.
+"""Interaction handler for math task with sequential hint support.
 
 This implements the 'hints_naive' strategy: hints are provided sequentially
 (hint_1, hint_2, ..., hint_5) regardless of model's current progress.
@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-class CompetitionMathHintInteraction(BaseInteraction):
-    """Interaction handler for competition_math with hint support.
+class MathHintInteraction(BaseInteraction):
+    """Interaction handler for math with hint support.
 
     During RL rollouts, when the model outputs <request></request>, this handler
     provides hints from prefix_hints. Supports both sequential and smart selection.
@@ -89,7 +89,7 @@ class CompetitionMathHintInteraction(BaseInteraction):
             "ground_truth": ground_truth,
         }
 
-        logger.debug(f"Started competition_math hint interaction {instance_id} with {len(hints)} hints")
+        logger.debug(f"Started math hint interaction {instance_id} with {len(hints)} hints")
         return instance_id
 
     async def generate_response(

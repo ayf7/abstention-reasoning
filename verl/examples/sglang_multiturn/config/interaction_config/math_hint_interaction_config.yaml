@@ -1,0 +1,4 @@
+interaction:
+  - name: "math_hint"
+    class_name: "verl.interactions.math_hint_interaction.MathHintInteraction"
+    config: {}

@@ -227,7 +227,7 @@ def create_prompts(
 def _extract_hints_list(primitive: dict) -> list[str]:
     """Hint text per level, from whichever field the task populates:
     `hint_exprs` (list, e.g. countdown) or `prefix_hints` (dict `hint_1..hint_6`,
-    e.g. competition_math)."""
+    e.g. math)."""
     hints_list = primitive.get("hint_exprs", [])
     if not hints_list:
         prefix_hints = primitive.get("prefix_hints", {})
@@ -269,7 +269,7 @@ def _sample_hint_levels(
 def _hint_sequence_for_level(hints_list: list[str], hint_level: int, task_name: str) -> str:
     if hint_level == 0:
         return "No partial solution"
-    if task_name == "competition_math":
+    if task_name == "math":
         return "\n".join(hints_list[:hint_level])
     return hints_list[hint_level - 1]
 
@@ -883,7 +883,7 @@ def create_ood_prompts(
     can be passed to `evaluate --prompts <path>`.
 
     Args:
-        task_name: Task whose templates/check_correctness to use (e.g., "competition_math")
+        task_name: Task whose templates/check_correctness to use (e.g., "math")
         dataset_name: OOD dataset key (math500, olympiad_bench, gsm8k, aime2024)
         method_name: Method name for template selection and output path derivation
         output_path: Explicit output path (default: artifacts/{task}/problems_with_format/eval__{method}_ood-{dataset}.json)

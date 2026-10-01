@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODEL="qwen3-4b-base"
-TASK="competition_math"
+TASK="math"
 
 CUDA_VISIBLE_DEVICES=2 python -m pipeline generate \
   --task "${TASK}" \

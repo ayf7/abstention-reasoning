@@ -1,4 +1,4 @@
-"""Reward functions for competition_math task."""
+"""Reward functions for math task."""
 
 import re
 
@@ -227,7 +227,7 @@ def compute_score(
     **kwargs,
 ) -> dict:
     """
-    Compute reward score for competition_math task.
+    Compute reward score for math task.
 
     Args:
         data_source: Data source identifier

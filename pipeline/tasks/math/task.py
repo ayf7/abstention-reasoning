@@ -1,4 +1,4 @@
-"""Competition Math task implementation.
+"""Math task implementation.
 
 Uses the MATH dataset (competition_math) from HuggingFace with 12,500 competition
 mathematics problems across 7 categories and 5 difficulty levels.
@@ -6,10 +6,14 @@ mathematics problems across 7 categories and 5 difficulty levels.
 Dataset: https://huggingface.co/datasets/qwedsacf/competition_math
 
 Hints come from each primitive's prefix_hints (6-hint progressive system).
+
+This task does not implement create_primitives(): primitives are produced
+upstream by rewrite_solutions_prefix_hints.py (adds prefix_hints) and then
+filter_using_heuristics.py (drops problems whose solution is too short to
+support 5 genuinely distinct hints), not generated fresh per run.
 """
 
 import importlib.util
-import re
 from pathlib import Path
 
 from pipeline.tasks.base import BaseTask
@@ -19,16 +23,16 @@ from pipeline.tasks.base import BaseTask
 # drifting apart; it is loaded by path because the recipe is a standalone file,
 # not a package.
 _REWARD_PATH = (Path(__file__).resolve().parents[3]
-                / "verl" / "recipe" / "competition_math" / "reward_function.py")
-_spec = importlib.util.spec_from_file_location("competition_math_reward", _REWARD_PATH)
+                / "verl" / "recipe" / "math" / "reward_function.py")
+_spec = importlib.util.spec_from_file_location("math_reward", _REWARD_PATH)
 _reward = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_reward)
 _has_malformed_structure_nested = _reward.has_malformed_structure_nested
 
 
-class CompetitionMathTask(BaseTask):
+class MathTask(BaseTask):
     """
-    Competition Math reasoning task.
+    Math reasoning task.
 
     Problems span 7 categories: Algebra, Counting & Probability, Geometry,
     Intermediate Algebra, Number Theory, Prealgebra, Precalculus.
@@ -36,7 +40,7 @@ class CompetitionMathTask(BaseTask):
     Difficulty levels: Level 1 (easiest) to Level 5 (hardest).
     """
 
-    name = "competition_math"
+    name = "math"
 
     system_message = (
         "A conversation between User and Assistant. The user asks a question, "
@@ -45,104 +49,6 @@ class CompetitionMathTask(BaseTask):
     )
 
     assistant_prefix = "<think>\nLet me work through this problem step by step."
-
-    # Only include harder problem types (exclude Algebra, Prealgebra, Precalculus)
-    # Ordered, not a set: iteration order feeds the selection list *before* the
-    # seeded shuffle, and set iteration order varies across processes under
-    # hash randomization. A set here made --seed non-reproducible.
-    ALLOWED_TYPES = (
-        "Intermediate Algebra",
-        "Geometry",
-        "Number Theory",
-        "Counting & Probability",
-    )
-
-    def create_primitives(self, num_puzzles: int | None, seed: int = 42) -> list[dict]:
-        """
-        Load competition math problems from HuggingFace, balanced across types.
-
-        Args:
-            num_puzzles: Number of problems to load (None = all matching filter)
-            seed: Random seed for shuffling
-        """
-        import random
-        from datasets import load_dataset
-
-        rng = random.Random(seed)
-
-        ds = load_dataset("qwedsacf/competition_math", split="train")
-
-        # Group by type
-        by_type: dict[str, list] = {t: [] for t in self.ALLOWED_TYPES}
-        for row in ds:
-            if row["type"] in self.ALLOWED_TYPES:
-                by_type[row["type"]].append(row)
-
-        # Shuffle each type
-        for t in by_type:
-            rng.shuffle(by_type[t])
-
-        # Determine per-type limits for balanced sampling. Integer division
-        # alone truncates: it yielded 0 primitives for any num_puzzles below the
-        # type count, and under-delivered by up to len(ALLOWED_TYPES)-1
-        # otherwise. Spread the remainder so --num-puzzles N really means N.
-        n_types = len(self.ALLOWED_TYPES)
-        if num_puzzles is not None:
-            base, remainder = divmod(num_puzzles, n_types)
-            per_type_limits = [
-                base + (1 if i < remainder else 0) for i in range(n_types)
-            ]
-        else:
-            per_type_limits = [None] * n_types
-
-        # Sample from each type (balanced)
-        selected = []
-        for t, limit in zip(self.ALLOWED_TYPES, per_type_limits):
-            pool = by_type[t]
-            if limit is not None:
-                pool = pool[:limit]
-            selected.extend(pool)
-
-        # Final shuffle
-        rng.shuffle(selected)
-
-        primitives = []
-        for idx, row in enumerate(selected):
-            # Extract answer from solution's \boxed{} format
-            answer = self._extract_boxed_answer(row["solution"])
-
-            primitives.append({
-                "index": idx,
-                "variant": row["type"],  # Problem category
-                "level": row["level"],   # Difficulty level (Level 1-5)
-                "problem": row["problem"],
-                "solution": row["solution"],
-                "answer": answer,
-            })
-
-        return primitives
-
-    def _extract_boxed_answer(self, solution: str) -> str | None:
-        """Extract the answer from \\boxed{...} in the solution."""
-        # Handle nested braces by finding matching closing brace
-        match = re.search(r'\\boxed\{', solution)
-        if not match:
-            return None
-
-        start = match.end()
-        depth = 1
-        pos = start
-
-        while pos < len(solution) and depth > 0:
-            if solution[pos] == '{':
-                depth += 1
-            elif solution[pos] == '}':
-                depth -= 1
-            pos += 1
-
-        if depth == 0:
-            return solution[start:pos - 1]
-        return None
 
     def format_prompt(
         self,
@@ -362,7 +268,7 @@ class CompetitionMathTask(BaseTask):
 
     def compute_metrics(self, results: list[dict]) -> dict:
         """
-        Compute competition_math-specific metrics.
+        Compute math-specific metrics.
 
         Groups by both problem type and difficulty level.
         """
@@ -399,7 +305,7 @@ class CompetitionMathTask(BaseTask):
         return metrics
 
     def format_metrics(self, metrics: dict, model_name: str | None = None) -> str:
-        """Format competition_math metrics as tables by level and type."""
+        """Format math metrics as tables by level and type."""
         lines = ["", "=== Evaluation Results ==="]
         if model_name:
             lines.append(f"Model: {model_name}")

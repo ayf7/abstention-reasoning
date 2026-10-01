@@ -471,7 +471,7 @@ class CodeOutputTask(BaseTask):
     # moving them would repartition existing artifacts -- but no code_output
     # dataset, model or eval was ever produced, so there was nothing to
     # protect, and the asymmetric budget would have quietly confounded any
-    # comparison drawn against countdown or competition_math.
+    # comparison drawn against countdown or math.
 
     def _categorize_result(self, r: dict) -> str:
         """Categorize a result into: correct, incomplete, wrong.

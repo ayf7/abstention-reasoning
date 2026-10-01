@@ -466,7 +466,7 @@ def main():
     # create_ood_prompts
     ood_names = ", ".join(sorted(commands.OOD_DATASETS.keys()))
     p = subparsers.add_parser("create_ood_prompts", help="Create eval prompts from an OOD math benchmark")
-    p.add_argument("--task", required=True, help="Task whose templates to use (e.g., competition_math)")
+    p.add_argument("--task", required=True, help="Task whose templates to use (e.g., math)")
     p.add_argument("--dataset", required=True, help=f"OOD dataset name ({ood_names})")
     p.add_argument("--method", help="Method name for template selection and output path")
     p.add_argument("--output", help="Output path (default: artifacts/{task}/problems_with_format/eval__{method}_ood-{dataset}.json)")

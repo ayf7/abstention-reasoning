@@ -58,7 +58,7 @@ given the hints so far?" instead of checking a candidate solution).
 
 Usage:
     MODEL="qwen3-4b-base"
-    TASK="competition_math"
+    TASK="math"
 
     CUDA_VISIBLE_DEVICES=2 python chain_method_c.py \
         --task "${TASK}" \
@@ -92,11 +92,11 @@ VERIFIER_METHOD_NAME = "method_c"
 
 
 def get_hints_list(primitive: dict) -> list[str]:
-    """Available hints for a primitive, countdown or competition_math.
+    """Available hints for a primitive, countdown or math.
 
     Mirrors pipeline/commands/data.py's extraction exactly: countdown carries
     a flat `hint_exprs` list (each entry already the full cumulative partial
-    expression up to that point); competition_math carries a `prefix_hints`
+    expression up to that point); math carries a `prefix_hints`
     dict of up to 6 standalone steps (`hint_1`..`hint_6`).
     """
     hints_list = list(primitive.get("hint_exprs", []))
@@ -113,14 +113,14 @@ def hint_sequence_for_level(task_name: str, hints_list: list[str], level: int) -
     """Render the `{hint_sequence}` placeholder text for a given hint level.
 
     Matches pipeline/commands/data.py exactly. Level 0 has no partial
-    solution. competition_math's hints are independent steps, so the partial
+    solution. math's hints are independent steps, so the partial
     solution is every step up to `level` concatenated; countdown's hint_exprs
     are each already the full cumulative expression, so only the single entry
     at `level` is shown.
     """
     if level == 0:
         return "No partial solution"
-    if task_name == "competition_math":
+    if task_name == "math":
         return "\n".join(hints_list[:level])
     return hints_list[level - 1]
 
@@ -431,7 +431,7 @@ def build_details(task, items: list[ChainItem]) -> list[dict]:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--task", required=True, help="Task name (countdown, competition_math)")
+    p.add_argument("--task", required=True, help="Task name (countdown, math)")
     p.add_argument("--eval-dataset", required=True, type=Path,
         help="Path to the raw eval partition (artifacts/{task}/problems/eval.json)")
     p.add_argument("--verifier-model", required=True, help="Verifier (method_c) model path")
