@@ -29,46 +29,39 @@ The full `baseline` → `method_b` pipeline on `countdown` with a 1.5B student a
 
 ```bash
 python -m pipeline create_primitives --task countdown --num-puzzles 5000 --seed 42 \
-    --output artifacts/countdown/problems/primitives.json
+    --output data/countdown/problems/primitives.json
 
 python -m pipeline create_partitions --task countdown --seed 42 \
-    --primitives artifacts/countdown/problems/primitives.json \
-    --output artifacts/countdown/problems
+    --primitives data/countdown/problems/primitives.json \
+    --output data/countdown/problems
 ```
 
-`create_partitions` writes one file per split (`sft_whole`, `sft_train`, `sft_val`, `rl_train`, `rl_val`, `eval`). Every method formats those same files, so the split is fixed once and recorded rather than recomputed per method.
+`create_partitions` writes one file per split (`sft_train`, `sft_val`, `rl_train`, `rl_val`, `eval`). Every method formats those same files, so the split is fixed once and recorded rather than recomputed per method.
 
 ### 1. Baseline Training
 
 ```bash
 # Apply the baseline template to each partition
 python -m pipeline create_prompts --task countdown --method baseline --split all \
-    --primitives artifacts/countdown/problems/primitives.json \
-    --output artifacts/countdown/problems_with_format
+    --data-name countdown
 
 # Teacher rollouts -> SFT data
 python -m pipeline generate --task countdown --method baseline --async \
-    --model Qwen/Qwen3-14B --split sft_whole \
-    --prompts artifacts/countdown/problems_with_format/sft_whole__baseline.json \
-    --output artifacts/countdown/sft_datasets/sft_whole__baseline.json
+    --model Qwen/Qwen3-14B --split sft_train \
+    --data-name countdown
 
 # SFT the student on those rollouts
 python -m pipeline train_sft --task countdown --method baseline --run-id qwen2.5-1.5b \
     --base-model Qwen/Qwen2.5-1.5B \
-    --dataset artifacts/countdown/sft_datasets/sft_whole__baseline.json \
-    --output artifacts/countdown/models/baseline_sft/qwen2.5-1.5b/model
+    --data-name countdown
 
 # RL from that SFT checkpoint -> the baseline model
 python -m pipeline train_rl --task countdown --method baseline --run-id qwen2.5-1.5b \
-    --sft-model artifacts/countdown/models/baseline_sft/qwen2.5-1.5b/model \
-    --train-prompts artifacts/countdown/problems_with_format/rl_train__baseline.parquet \
-    --val-prompts artifacts/countdown/problems_with_format/rl_val__baseline.parquet \
-    --output artifacts/countdown/models/baseline_models/qwen2.5-1.5b/model
+    --data-name countdown
 
 python -m pipeline evaluate --task countdown --method baseline --model rl --async \
     --run-id qwen2.5-1.5b --split eval \
-    --prompts artifacts/countdown/problems_with_format/eval__baseline.json \
-    --output artifacts/countdown/models/baseline_models/qwen2.5-1.5b/evals/eval.json
+    --data-name countdown
 ```
 
 ### 2. Method B Training
@@ -76,47 +69,41 @@ python -m pipeline evaluate --task countdown --method baseline --model rl --asyn
 ```bash
 # Apply the method_b template to the same partitions
 python -m pipeline create_prompts --task countdown --method method_b --split all \
-    --primitives artifacts/countdown/problems/primitives.json \
-    --output artifacts/countdown/problems_with_format
+    --data-name countdown
 
 # Probe: how often does the teacher solve each problem unaided?
 python -m pipeline generate --task countdown --method baseline --async \
-    --model Qwen/Qwen3-14B --split sft_whole --no-hints --num-samples 8 \
-    --prompts artifacts/countdown/problems_with_format/sft_whole__baseline.json \
-    --output artifacts/countdown/.scratch/sft_whole__baseline__probe.json
+    --model Qwen/Qwen3-14B --split sft_train --no-hints --num-samples 8 \
+    --data-name countdown \
+    --output data/countdown/.scratch/sft_train__baseline__probe.json
 
 # Schedule hints from that probe -- harder problems get more -- and oversample
 # until half the set is correct. The profile is derived in memory; only the
 # dataset is written.
 python -m pipeline generate --task countdown --method method_b --async \
-    --model Qwen/Qwen3-14B --split sft_whole \
-    --hint-schedule artifacts/countdown/.scratch/sft_whole__baseline__probe.json \
+    --model Qwen/Qwen3-14B --split sft_train \
+    --hint-schedule data/countdown/.scratch/sft_train__baseline__probe.json \
     --hint-target-fraction 0.5 --max-hints 4 --target-correct-rate 0.5 \
-    --prompts artifacts/countdown/problems_with_format/sft_whole__method_b.json \
-    --output artifacts/countdown/sft_datasets/sft_whole__method_b.json
+    --data-name countdown
 
 # Hint SFT on top of the baseline model
 python -m pipeline train_sft --task countdown --method method_b --run-id qwen2.5-1.5b \
-    --base-model artifacts/countdown/models/baseline_models/qwen2.5-1.5b/model \
-    --dataset artifacts/countdown/sft_datasets/sft_whole__method_b.json \
-    --output artifacts/countdown/models/method_b_sft/qwen2.5-1.5b/model
+    --base-model models/countdown/baseline_rl/qwen2.5-1.5b/model \
+    --data-name countdown
 
 # RL with the quadratic hint penalty. alpha is the swept parameter and is not
 # in the method config, so it must be passed here -- and it is the only thing
 # distinguishing the runs, which is why it is in the run id.
 python -m pipeline train_rl --task countdown --method method_b \
     --run-id qwen2.5-1.5b__quad-a0.5 \
-    --sft-model artifacts/countdown/models/method_b_sft/qwen2.5-1.5b/model \
-    --train-prompts artifacts/countdown/problems_with_format/rl_train__method_b.parquet \
-    --val-prompts artifacts/countdown/problems_with_format/rl_val__method_b.parquet \
+    --sft-model models/countdown/method_b_sft/qwen2.5-1.5b/model \
     --reward-kwargs hint_penalty=0.1 hint_penalty_shape=quadratic hint_penalty_alpha=0.5 \
     --override algorithm.norm_adv_by_std_in_grpo=True \
-    --output artifacts/countdown/models/method_b_models/qwen2.5-1.5b__quad-a0.5/model
+    --data-name countdown
 
 python -m pipeline evaluate --task countdown --method method_b --model rl --async \
     --run-id qwen2.5-1.5b__quad-a0.5 --split eval \
-    --prompts artifacts/countdown/problems_with_format/eval__method_b.json \
-    --output artifacts/countdown/models/method_b_models/qwen2.5-1.5b__quad-a0.5/evals/eval.json
+    --data-name countdown
 ```
 
 Pass `--async` to `generate` and `evaluate` for the batched async vLLM path; it is the standard mode here. `--multi-turn` is read from the method config and does not need passing.
@@ -227,14 +214,13 @@ Splits are disjoint slices of a seeded shuffle of the primitives, so no problem 
 
 | Split | `countdown`, `math` | `code_output` |
 |---|---|---|
-| `sft_whole` | 0–30% | 0–19.2% |
 | `sft_train` | 0–27% | 0–17.28% |
 | `sft_val` | 27–30% | 17.28–19.2% |
 | `rl_train` | 30–65% | 19.2–67.2% |
 | `rl_val` | 65–70% | — |
 | `eval` | 70–100% | 67.2–100% |
 
-`sft_whole` is the one overlap, and it is an identity rather than an exception: it is exactly `sft_train` + `sft_val`, index for index, because the three share a left edge and `sft_val` is carved off the tail. `BaseTask.__init_subclass__` checks that at import time, so a task cannot override the table into a layout where the name lies. Materialize whichever of the three a stage needs — train on `sft_train`, early-stop on `sft_val`, or train on `sft_whole` when there is nothing to early-stop against.
+Materialize whichever of `sft_train`/`sft_val` a stage needs — train on `sft_train`, and (optionally) compute validation loss during that training on `sft_val`.
 
 `code_output` allocates its whole range across three regions, so it has no `rl_val`.
 
@@ -242,46 +228,49 @@ Splits are disjoint slices of a seeded shuffle of the primitives, so no problem 
 
 ## Artifacts
 
-Generated data and model weights are written under `artifacts/`, one tree per task. Three data layers, distinguished by what is *in* a file rather than by which stage reads it:
+Generated data and model weights are written under two separate roots, each keyed by its own name and one tree per `{data_name}`/`{models_name}`:
+
+* `data/{data_name}/` — problems, formatted prompts, and SFT datasets. Small, text, meant to be committed to git.
+* `models/{models_name}/` — model weight checkpoints. Large, binary, meant to be pushed to a Hugging Face hub (see `upload_tools/`), not git — `models/` is gitignored.
+
+`data_name` defaults to `--task` and `models_name` defaults to `data_name`; both can be overridden independently with `--data-name`/`--models-name`. For example `--task math --data-name math_o1` reads/writes under `data/math_o1/` and, unless `--models-name` is also given, `models/math_o1/`.
+
+Three data layers under `data/{data_name}/`, distinguished by what is *in* a file rather than by which stage reads it:
 
 * `problems/` — problems, no template.
 * `problems_with_format/` — a partition with a method's template applied. Model-ready input, nothing generated yet.
 * `sft_datasets/` — the above plus generations (teacher rollouts + correctness labels).
 
-The RL parquet lives in `problems_with_format/`, not `sft_datasets/`: verl produces its own rollouts, so the file holds prompts and ground truth and no generations. Eval prompts sit there for the same reason; eval *results* go inside the run that produced them.
+The RL parquet lives in `problems_with_format/`, not `sft_datasets/`: verl produces its own rollouts, so the file holds prompts and ground truth and no generations. Eval prompts sit there for the same reason; eval *results* go inside the run that produced them, under `models/{models_name}/`.
 
-Names are `{partition}__{method}` and `{partition}__{method}__{optional_desc}`. Every field is separated by `__`, because method names contain single underscores (`method_b`, `method_ac`) and a single-underscore desc separator would make `sft_whole__method_b_generations` ambiguous. Hyphens are legal inside a field — that is what carries model slugs (`qwen3-4b-base`) and run descs (`quad-a0.5`).
+Names are `{partition}__{method}` and `{partition}__{method}__{optional_desc}`. Every field is separated by `__`, because method names contain single underscores (`method_b`, `method_ac`) and a single-underscore desc separator would make `sft_train__method_b_generations` ambiguous. Hyphens are legal inside a field — that is what carries model slugs (`qwen3-4b-base`) and run descs (`quad-a0.5`).
 
 ```yaml
-{task}/
+data/{data_name}/
     problems/   # raw (question, answer, list of hint) partitions
 
         primitives.json
         sft_train.json
         sft_val.json                # needed; the predictor models are trained by SFT only
-        sft_whole.json              # by construction: train + val
         rl_train.json
         rl_val.json
         eval.json
 
     problems_with_format/   # partition + template + hints. no generations.
 
-        sft_whole__baseline.json
         sft_train__baseline.json
         sft_val__baseline.json
         rl_train__baseline.parquet
         rl_val__baseline.parquet
         eval__baseline.json
 
-        sft_whole__method_b.json
         sft_train__method_b.json
         sft_val__method_b.json
         rl_train__method_b.parquet
         rl_val__method_b.parquet
         eval__method_b.json
 
-        sft_whole__method_ac.json   # A and C share one generation model
-        sft_train__method_ac.json
+        sft_train__method_ac.json   # A and C share one generation model
         sft_val__method_ac.json
         rl_train__method_ac.parquet
         rl_val__method_ac.parquet
@@ -293,18 +282,15 @@ Names are `{partition}__{method}` and `{partition}__{method}__{optional_desc}`. 
         sft_val__method_c__qhr_predictions.json
 
     sft_datasets/   # + teacher rollouts and correctness labels.
-        sft_whole__baseline.json
         sft_train__baseline.json
         sft_val__baseline.json
 
-        sft_whole__method_b.json
         sft_train__method_b.json
         sft_val__method_b.json
 
-        sft_whole__method_ac.json
         sft_train__method_ac.json
         sft_val__method_ac.json
-        sft_whole__method_ac__generations.internal.json  # not used for training. self-generated
+        sft_train__method_ac__generations.internal.json  # not used for training. self-generated
         sft_val__method_ac__generations.internal.json
 
         sft_train__method_a__qh_predictions.json
@@ -312,8 +298,11 @@ Names are `{partition}__{method}` and `{partition}__{method}__{optional_desc}`. 
         sft_train__method_c__qhr_predictions.json
         sft_val__method_c__qhr_predictions.json
 
-    models/     # {method}_sft = SFT intermediate, {method}_models = finished model, post-RL.
-                # {method}_predictors = predictor, SFT only
+    .scratch/   # intermediates read back by a later step, never trained on
+        sft_train__baseline__probe.json
+
+models/{models_name}/     # {method}_sft = SFT intermediate, {method}_rl = finished model, post-RL.
+                           # {method}_predictors = SFT-only predictor (method_a only).
         baseline_sft/
             qwen2.5-1.5b/
                 model/              # contains the hugging face.
@@ -321,17 +310,17 @@ Names are `{partition}__{method}` and `{partition}__{method}__{optional_desc}`. 
             qwen2.5-3b/
             qwen3-4b-base/
             qwen3-4b/
-        baseline_models/
+        baseline_rl/
             qwen2.5-1.5b/
             qwen2.5-3b/
             qwen3-4b-base/
             qwen3-4b-base__s2/      # seed replicate
             qwen3-4b/
         method_b_sft/
-            qwen2.5-1.5b/           # SFT on top of baseline_models
+            qwen2.5-1.5b/           # SFT on top of baseline_rl
             qwen2.5-3b/
             qwen3-4b-base/
-        method_b_models/
+        method_b_rl/
             qwen2.5-1.5b__quad-a0.5/
             qwen2.5-3b__quad-a0.5/
             qwen3-4b-base__quad-a0.5/
@@ -340,29 +329,31 @@ Names are `{partition}__{method}` and `{partition}__{method}__{optional_desc}`. 
             qwen2.5-3b/
             qwen3-4b-base/
             qwen3-4b/
-        method_ac_models/
+        method_ac_rl/
             qwen2.5-1.5b/
             qwen2.5-3b/
             qwen3-4b-base/
             qwen3-4b/
-        method_a_predictors/
+        method_a_predictors/       # SFT only, warm-started from method_ac_rl
             qwen2.5-1.5b/
             qwen2.5-3b/
             qwen3-4b-base/
             qwen3-4b/
-        method_c_predictors/
+        method_c_predictors_sft/   # SFT warm-start for the method_c verifier
             qwen2.5-1.5b/
             qwen2.5-3b/
             qwen3-4b-base/
             qwen3-4b/
-
-    .scratch/   # intermediates read back by a later step, never trained on
-        sft_whole__baseline__probe.json
+        method_c_rl/               # RL-trained method_c verifier
+            qwen2.5-1.5b/
+            qwen2.5-3b/
+            qwen3-4b-base/
+            qwen3-4b/
 ```
 
-`method_ac`, `method_a` and `method_c` are the Method A and C setups, which are not implemented yet; everything above them exists today.
+`method_ac` is the fixed-hint solver shared by Method A and C, trained the ordinary SFT+RL way. `method_a` and `method_c` are their respective verifiers (`method_a` predicts "can this be solved given the hints so far?", `method_c` checks a candidate solution): `method_a` is SFT-only, warm-started from `method_ac_rl` and landing straight in `models/{models_name}/method_a_predictors/`; `method_c` also gets an RL stage on top of its SFT warm-start (`models/{models_name}/method_c_predictors_sft/` -> `models/{models_name}/method_c_rl/`, the latter auto-derived like any other method).
 
-Names come from the method's config filename, so `baseline.yaml` produces `sft_whole__baseline.json` and `models/baseline_sft/`.
+Names come from the method's config filename, so `baseline.yaml` produces `data/{data_name}/problems_with_format/sft_train__baseline.json` and `models/{models_name}/baseline_sft/`.
 
 `--run-id` names the run directory verbatim and is **required** wherever a model path is derived. A run is `{model_slug}` or `{model_slug}__{desc}`, where `{desc}` marks a deviation from the default recipe — so a default run is the bare slug (`qwen2.5-1.5b`) and only the varying part is named (`qwen2.5-1.5b__quad-a0.5`, `qwen3-4b-base__s2`). Nothing is inferred from the base checkpoint; a name guessed in code would only drift from the convention.
 

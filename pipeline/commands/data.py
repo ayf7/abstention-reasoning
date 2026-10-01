@@ -14,7 +14,7 @@ HINT_LEVELS_PER_PROBLEM = 2
 HINT_LEVEL_DECAY = 0.7
 
 from pipeline.core.io import load_json, save_json, save_parquet
-from pipeline.core.method import TASKS_ROOT, Method, get_primitives_path, partition_path
+from pipeline.core.method import TASKS_ROOT, Method, get_primitives_path, partition_path, resolve_data_name
 from pipeline.tasks import get_task
 
 
@@ -23,6 +23,7 @@ def create_primitives(
     output_path: Path | None = None,
     num_puzzles: int | None = None,
     seed: int = 42,
+    data_name: str | None = None,
     **kwargs,
 ) -> Path:
     """
@@ -30,14 +31,16 @@ def create_primitives(
 
     Args:
         task_name: Name of task (e.g., "countdown")
-        output_path: Where to save primitives.json (default: artifacts/{task}/primitives.json)
+        output_path: Where to save primitives.json (default: data/{data_name}/problems/primitives.json)
         num_puzzles: Number of puzzles to generate (None = all available)
         seed: Random seed
+        data_name: Data directory name (default: task_name)
         **kwargs: Additional task-specific options (e.g., tracer="uniform" for code_output)
 
     Returns:
         Path to created primitives.json
     """
+    data_name = resolve_data_name(task_name, data_name)
     task = get_task(task_name)
 
     # Validate task-specific options against the task's actual signature. Tasks
@@ -61,7 +64,7 @@ def create_primitives(
 
     # Default output path
     if output_path is None:
-        output_path = get_primitives_path(task_name)
+        output_path = get_primitives_path(data_name)
 
     count_str = str(num_puzzles) if num_puzzles is not None else "all"
     print(f"Generating {count_str} primitives for task '{task_name}'...")
@@ -80,6 +83,7 @@ def create_partitions(
     primitives_path: Path | None = None,
     output_dir: Path | None = None,
     seed: int = 42,
+    data_name: str | None = None,
 ) -> dict[str, Path]:
     """Split primitives into per-split problem files under problems/.
 
@@ -92,16 +96,17 @@ def create_partitions(
     Returns:
         {split: path} for every split the task defines.
     """
+    data_name = resolve_data_name(task_name, data_name)
     task = get_task(task_name)
     if primitives_path is None:
-        primitives_path = get_primitives_path(task_name)
+        primitives_path = get_primitives_path(data_name)
     primitives = load_json(primitives_path)
 
     written = {}
     for split in task.supported_splits():
         indices = set(task.get_split_indices(len(primitives), split, seed, primitives))
         rows = [p for p in primitives if p["index"] in indices]
-        path = (output_dir / f"{split}.json") if output_dir else partition_path(task_name, split)
+        path = (output_dir / f"{split}.json") if output_dir else partition_path(data_name, split)
         save_json(path, rows)
         print(f"  {split:<10} {len(rows):>6} problems -> {path}")
         written[split] = path
@@ -132,6 +137,7 @@ def create_prompts(
     include_assistant_prefix: bool = True,
     num_hints: int | None = None,
     force_json: bool = False,
+    data_name: str | None = None,
 ) -> Path | dict[str, Path]:
     """
     Create prompts from primitives for a given split (or all splits).
@@ -142,17 +148,19 @@ def create_prompts(
     Args:
         task_name: Name of task
         method_name: Method name for auto-derived paths and template selection
-        primitives_path: Path to primitives.json (default: artifacts/{task}/primitives.json)
-        output_dir: Directory to save prompts (default: artifacts/{task}/problems_with_format/)
-        split_name: Name of split (sft_whole, sft_train, sft_val, rl_train,
+        primitives_path: Path to primitives.json (default: data/{data_name}/problems/primitives.json)
+        output_dir: Directory to save prompts (default: data/{data_name}/problems_with_format/)
+        split_name: Name of split (sft_train, sft_val, rl_train,
             rl_val, eval, or 'all')
         seed: Random seed for split assignment
         include_assistant_prefix: Whether to include assistant's opening
         num_hints: Number of hints to extract from prefix_hints (0-6). If None, no hint injection.
+        data_name: Data directory name (default: task_name)
 
     Returns:
         Path to created prompts file, or dict of paths if split="all"
     """
+    data_name = resolve_data_name(task_name, data_name)
     task = get_task(task_name)
 
     # Load method config if specified
@@ -162,7 +170,7 @@ def create_prompts(
 
     # Default primitives path
     if primitives_path is None:
-        primitives_path = get_primitives_path(task_name)
+        primitives_path = get_primitives_path(data_name)
 
     # Default output directory
     if output_dir is None:
@@ -171,7 +179,7 @@ def create_prompts(
                 "Either --method or --output must be specified. "
                 "Use --method to auto-derive paths, or --output for explicit paths."
             )
-        output_dir = method.formatted_dir(task_name)
+        output_dir = method.formatted_dir(data_name)
 
     # Get template variant from method or task default
     template_variant = None
@@ -195,6 +203,7 @@ def create_prompts(
             results[split] = _create_prompts_single(
                 task=task,
                 task_name=task_name,
+                data_name=data_name,
                 primitives_path=primitives_path,
                 output_path=output_path,
                 split_name=split,
@@ -212,6 +221,7 @@ def create_prompts(
     return _create_prompts_single(
         task=task,
         task_name=task_name,
+        data_name=data_name,
         primitives_path=primitives_path,
         output_path=output_path,
         split_name=split_name,
@@ -286,13 +296,15 @@ def _create_prompts_single(
     assistant_prefix: str | None = None,
     method: "Method | None" = None,
     num_hints: int | None = None,
+    data_name: str | None = None,
 ) -> Path:
     """Apply a method's template to one materialized partition."""
+    data_name = resolve_data_name(task_name, data_name)
     # Read the partition rather than recomputing it. create_partitions wrote it
     # down precisely so that every method formats the *same* problems, and so
     # that editing a SPLITS boundary later cannot silently repartition work
     # that has already been generated against the old one.
-    partition = partition_path(task_name, split_name)
+    partition = partition_path(data_name, split_name)
     if not partition.exists():
         raise FileNotFoundError(
             f"No {split_name} partition at {partition}. "
@@ -463,6 +475,7 @@ def _create_verification_data_method_c(
     seed: int = 42,
     run_id: str | None = None,
     split: str = "train",
+    data_name: str | None = None,
 ) -> Path:
     """Build verifier prompts for method_c from single representative solves.
 
@@ -483,14 +496,15 @@ def _create_verification_data_method_c(
     `sft_{split}__method_c__{run_id}.json` and `rl_{split}__method_c__{run_id}.parquet`
     (run-id suffix omitted if not given).
     """
+    data_name = resolve_data_name(task_name, data_name)
     if not 0 < sft_fraction < 1:
         raise ValueError(f"sft_fraction must be in (0, 1), got {sft_fraction}")
     if split not in ("train", "val"):
         raise ValueError(f"split must be 'train' or 'val', got {split!r}")
 
     method = Method.load("method_c", task_name)
-    output_path_sft = method.formatted_path(task_name, f"sft_{split}", desc=run_id)
-    output_path_rl = method.formatted_path(task_name, f"rl_{split}", desc=run_id)
+    output_path_sft = method.formatted_path(data_name, f"sft_{split}", desc=run_id)
+    output_path_rl = method.formatted_path(data_name, f"rl_{split}", desc=run_id)
 
     task = get_task(task_name)
     template = method.load_template(task_name, "sft")
@@ -575,6 +589,7 @@ def create_verification_data(
     seed: int = 42,
     run_id: str | None = None,
     split: str = "train",
+    data_name: str | None = None,
 ) -> Path:
     """Convert multi-sample solver aggregates into binary predictor SFT data."""
     if method_name == "method_c":
@@ -585,6 +600,7 @@ def create_verification_data(
             seed=seed,
             run_id=run_id,
             split=split,
+            data_name=data_name,
         )
 
     if output_path is None:
@@ -874,6 +890,7 @@ def create_ood_prompts(
     num_problems: int | None = None,
     seed: int = 42,
     include_assistant_prefix: bool = True,
+    data_name: str | None = None,
 ) -> Path:
     """
     Create evaluation prompts from an out-of-distribution dataset.
@@ -886,14 +903,16 @@ def create_ood_prompts(
         task_name: Task whose templates/check_correctness to use (e.g., "math")
         dataset_name: OOD dataset key (math500, olympiad_bench, gsm8k, aime2024)
         method_name: Method name for template selection and output path derivation
-        output_path: Explicit output path (default: artifacts/{task}/problems_with_format/eval__{method}_ood-{dataset}.json)
+        output_path: Explicit output path (default: data/{data_name}/problems_with_format/eval__{method}_ood-{dataset}.json)
         num_problems: Limit number of problems (None = all)
         seed: Random seed for shuffling
         include_assistant_prefix: Whether to include assistant's opening in prompt
+        data_name: Data directory name (default: task_name)
 
     Returns:
         Path to created prompts file
     """
+    data_name = resolve_data_name(task_name, data_name)
     if dataset_name not in _OOD_LOADERS:
         available = ", ".join(sorted(_OOD_LOADERS.keys()))
         raise ValueError(f"Unknown OOD dataset: {dataset_name}. Available: {available}")
@@ -912,7 +931,7 @@ def create_ood_prompts(
                 "Either --method or --output must be specified. "
                 "Use --method to auto-derive paths, or --output for explicit paths."
             )
-        output_path = method.formatted_dir(task_name) / (
+        output_path = method.formatted_dir(data_name) / (
             f"{method.artifact_stem('eval', desc=f'ood-{dataset_name}')}.json"
         )
 

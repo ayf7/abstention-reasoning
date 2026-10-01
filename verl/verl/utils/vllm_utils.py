@@ -67,7 +67,10 @@ try:
     from vllm.model_executor.models.kimi_vl import KimiVLForConditionalGeneration
 
     SUPPORTED_MOE_MODELS.append(KimiVLForConditionalGeneration)
-except ImportError:
+except Exception:
+    # Some vLLM/flash-attn/cutlass-dsl version combinations raise errors other than
+    # ImportError (e.g. AttributeError) deep inside kimi_vl's transitive imports.
+    # KimiVL support is optional (MoE-only), so swallow any failure here.
     pass
 
 

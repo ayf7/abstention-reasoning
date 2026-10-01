@@ -32,11 +32,14 @@ Examples:
 
     # Artifacts are organized by stage, not by method: prompts, datasets and
     # models each share one directory per task, and a method's files are told
-    # apart by its name.
-    # artifacts/countdown/problems/primitives.json
-    # artifacts/countdown/problems_with_format/{split}__{method}.json
-    # artifacts/countdown/sft_datasets/{split}__{method}.json
-    # artifacts/countdown/models/{method}_{sft,models}/{run_id}/{model,evals,...}
+    # apart by its name. Data (prompts/datasets) and models live in separate
+    # roots so that data/ can be committed to git while models/ is pushed to
+    # a model hub. --data-name/--models-name default to the task name and can
+    # be overridden independently (e.g. --task math --data-name math_o1).
+    # data/math/problems/primitives.json
+    # data/math/problems_with_format/{split}__{method}.json
+    # data/math/sft_datasets/{split}__{method}.json
+    # models/math/{method}_{sft,rl}/{run_id}/{model,evals,...}
 """
 
 # IMPORTANT: Set VLLM's multiprocessing method before any imports.
@@ -88,6 +91,7 @@ def cmd_create_primitives(args):
         output_path=output_path,
         num_puzzles=args.num_puzzles,
         seed=args.seed,
+        data_name=args.data_name,
         **task_options,
     )
 
@@ -99,6 +103,7 @@ def cmd_create_partitions(args):
         primitives_path=Path(args.primitives) if args.primitives else None,
         output_dir=Path(args.output) if args.output else None,
         seed=args.seed,
+        data_name=args.data_name,
     )
 
 
@@ -117,6 +122,7 @@ def cmd_create_prompts(args):
         include_assistant_prefix=not args.no_assistant_prefix,
         num_hints=args.num_hints,
         force_json=args.json,
+        data_name=args.data_name,
     )
 
 
@@ -133,6 +139,7 @@ def cmd_create_verification_data(args):
         seed=args.seed,  # only relevant for method_c
         run_id=args.run_id,  # only relevant for method_c
         split=args.split,  # only relevant for method_c
+        data_name=args.data_name,
     )
 
 
@@ -147,7 +154,9 @@ def cmd_create_ood_prompts(args):
         num_problems=args.num_problems,
         seed=args.seed,
         include_assistant_prefix=not args.no_assistant_prefix,
+        data_name=args.data_name,
     )
+
 
 
 def cmd_generate(args):
@@ -213,6 +222,8 @@ def cmd_generate(args):
         hint_target_fraction=getattr(args, "hint_target_fraction", None),
         max_hints=getattr(args, "max_hints", 4),
         drop_exhausted=getattr(args, "drop_exhausted", False),
+        data_name=args.data_name,
+        models_name=args.models_name,
     )
 
     # A target correct rate turns generation into the phase-3 oversampling loop:
@@ -253,6 +264,8 @@ def cmd_evaluate(args):
         use_async=getattr(args, "use_async", False),
         seed=args.seed,
         no_hints=args.no_hints,
+        data_name=args.data_name,
+        models_name=args.models_name,
     )
 
 
@@ -278,6 +291,7 @@ def cmd_analyze(args):
 def cmd_train_sft(args):
     """Train SFT model."""
     dataset_path = Path(args.dataset) if args.dataset else None
+    eval_dataset_path = Path(args.eval_dataset) if args.eval_dataset else None
     output_path = Path(args.output) if args.output else None
 
     commands.train_sft(
@@ -286,6 +300,7 @@ def cmd_train_sft(args):
         method_name=args.method,
         run_id=getattr(args, "run_id", None),
         dataset_path=dataset_path,
+        eval_dataset_path=eval_dataset_path,
         output_path=output_path,
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -302,6 +317,8 @@ def cmd_train_sft(args):
         strip_think_tokens=getattr(args, "strip_think_tokens", False),
         max_correct=args.max_correct,
         completion_only_loss=args.completion_only_loss,
+        data_name=args.data_name,
+        models_name=args.models_name,
     )
 
 
@@ -365,6 +382,8 @@ def cmd_train_rl(args):
         save_best=args.save_best,
         best_metric=args.best_metric,
         max_ckpt_to_keep=args.max_ckpt_to_keep,
+        data_name=args.data_name,
+        models_name=args.models_name,
     )
 
 
@@ -397,40 +416,42 @@ def main():
     # create_primitives
     p = subparsers.add_parser("create_primitives", help="Generate raw puzzle data")
     p.add_argument("--task", required=True, help="Task name (e.g., countdown)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/problems/primitives.json)")
+    p.add_argument("--output", help="Output path (default: data/{data_name}/problems/primitives.json)")
     p.add_argument("--num-puzzles", type=int, default=None, help="Number of puzzles (omit to use all available)")
     p.add_argument("--seed", type=int, default=42, help="Random seed")
     p.add_argument("--tracer", choices=["original", "uniform"], default=None,
                    help="code_output only. Tracer for hint generation: 'uniform' (execution-uniform, "
                         "used for the shipped primitives) or 'original' (top-level). Default: uniform.")
+    p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.set_defaults(func=cmd_create_primitives)
 
     # create_partitions
     p = subparsers.add_parser("create_partitions",
         help="Split primitives into per-split problem files under problems/")
     p.add_argument("--task", required=True, help="Task name")
-    p.add_argument("--primitives", help="Path to primitives.json (default: artifacts/{task}/problems/primitives.json)")
-    p.add_argument("--output", help="Output directory (default: artifacts/{task}/problems/)")
+    p.add_argument("--primitives", help="Path to primitives.json (default: data/{data_name}/problems/primitives.json)")
+    p.add_argument("--output", help="Output directory (default: data/{data_name}/problems/)")
     p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
+    p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.set_defaults(func=cmd_create_partitions)
 
     # create_prompts
     p = subparsers.add_parser("create_prompts", help="Create prompts from primitives")
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--method", help="Method name for auto-derived paths and templates")
-    p.add_argument("--primitives", help="Path to primitives.json (default: artifacts/{task}/problems/primitives.json)")
-    p.add_argument("--output", help="Output directory (default: artifacts/{task}/problems_with_format/)")
+    p.add_argument("--primitives", help="Path to primitives.json (default: data/{data_name}/problems/primitives.json)")
+    p.add_argument("--output", help="Output directory (default: data/{data_name}/problems_with_format/)")
     p.add_argument("--split", default="all",
                    help="Split name, or 'all' for every split this task defines. Most tasks: "
-                   "sft_whole, sft_train, sft_val, rl_train, rl_val, eval; "
-                   "code_output has no rl_val. sft_whole is the union of "
-                   "sft_train and sft_val, not a separate region.")
+                   "sft_train, sft_val, rl_train, rl_val, eval; "
+                   "code_output has no rl_val.")
     p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
     p.add_argument("--num-hints", type=int, default=None,
         help="Maximum hint level. method_ac samples one level for SFT/RL and "
              "creates every level for eval; other methods include the first N hints.")
     p.add_argument("--json", action="store_true", help="Force JSON output for all splits (instead of parquet for RL)")
+    p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.set_defaults(func=cmd_create_prompts)
 
     # create_verification_data
@@ -461,6 +482,7 @@ def main():
     p.add_argument("--split", default="train", choices=["train", "val"],
                    help="method_c only: 'train' writes sft_train/rl_train, 'val' writes "
                         "sft_val/rl_val (default: train)")
+    p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.set_defaults(func=cmd_create_verification_data)
 
     # create_ood_prompts
@@ -469,10 +491,11 @@ def main():
     p.add_argument("--task", required=True, help="Task whose templates to use (e.g., math)")
     p.add_argument("--dataset", required=True, help=f"OOD dataset name ({ood_names})")
     p.add_argument("--method", help="Method name for template selection and output path")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/problems_with_format/eval__{method}_ood-{dataset}.json)")
+    p.add_argument("--output", help="Output path (default: data/{data_name}/problems_with_format/eval__{method}_ood-{dataset}.json)")
     p.add_argument("--num-problems", type=int, default=None, help="Limit number of problems (omit for all)")
     p.add_argument("--seed", type=int, default=42, help="Random seed for shuffling")
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
+    p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.set_defaults(func=cmd_create_ood_prompts)
 
     # generate
@@ -480,10 +503,10 @@ def main():
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--model", required=True, help="Model name or path")
     p.add_argument("--method", help="Method name for auto-derived paths")
-    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,models}/. Required with --method; nothing is derived from the base checkpoint.")
-    p.add_argument("--prompts", help="Path to prompts file (default: artifacts/{task}/problems_with_format/{split}__{method}.json)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/sft_sft_datasets/{split}__{method}.json)")
-    p.add_argument("--split", default="sft_whole", help="Which split to generate from (default: sft_whole)")
+    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,rl}/. Required with --method; nothing is derived from the base checkpoint.")
+    p.add_argument("--prompts", help="Path to prompts file (default: data/{data_name}/problems_with_format/{split}__{method}.json)")
+    p.add_argument("--output", help="Output path (default: data/{data_name}/sft_datasets/{split}__{method}.json)")
+    p.add_argument("--split", default="sft_train", help="Which split to generate from (default: sft_train)")
     p.add_argument("--batch-size", type=int, default=16, help="Batch size")
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
     p.add_argument("--temperature", type=float, default=0.7, help="Temperature")
@@ -557,6 +580,8 @@ def main():
              "makes no progress.")
     p.add_argument("--max-oversample", type=int, default=5,
         help="Cap on --target-correct-rate resampling rounds (default 5).")
+    p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
+    p.add_argument("--models-name", help="Models directory name under models/ (default: data-name)")
     p.set_defaults(func=cmd_generate)
 
     # evaluate
@@ -564,10 +589,10 @@ def main():
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--model", required=True, help="Model name/path, or 'sft'/'rl' to use method's model")
     p.add_argument("--method", help="Method name for auto-derived paths")
-    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,models}/. Required with --method; nothing is derived from the base checkpoint.")
+    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,rl}/. Required with --method; nothing is derived from the base checkpoint.")
     p.add_argument("--split", default="eval", help="Prompts split to evaluate (default: eval)")
-    p.add_argument("--prompts", help="Path to eval prompts (default: artifacts/{task}/problems_with_format/{split}__{method}.json)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/models/{method}_{sft,models}/{run_id}/evals/{split}.json)")
+    p.add_argument("--prompts", help="Path to eval prompts (default: data/{data_name}/problems_with_format/{split}__{method}.json)")
+    p.add_argument("--output", help="Output path (default: models/{models_name}/{method}_{sft,rl}/{run_id}/evals/{split}.json)")
     p.add_argument("--batch-size", type=int, default=16, help="Batch size")
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
     p.add_argument("--temperature", type=float, default=1.0, help="Temperature")
@@ -584,6 +609,8 @@ def main():
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput)")
     p.add_argument("--seed", type=int, default=42, help="Random seed for generation (default: 42)")
     p.add_argument("--no-hints", action="store_true", help="Counterfactual eval: block hint requests during decoding so the model must answer alone")
+    p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
+    p.add_argument("--models-name", help="Models directory name under models/ (default: data-name)")
     p.set_defaults(func=cmd_evaluate)
 
     # combine_verifier_eval
@@ -614,9 +641,12 @@ def main():
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--base-model", required=True, help="Base model to fine-tune")
     p.add_argument("--method", help="Method name for auto-derived paths")
-    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,models}/. Required with --method; nothing is derived from the base checkpoint.")
+    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,rl}/. Required with --method; nothing is derived from the base checkpoint.")
     p.add_argument("--dataset", help="Path to generated dataset (default: auto-detect from method)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/models/{method}_sft/{run_id}/model)")
+    p.add_argument("--eval-dataset", help="Path to held-out dataset for validation loss "
+                   "(default: data/{data_name}/sft_datasets/sft_val__{method}.json if it exists; "
+                   "validation is skipped if not found)")
+    p.add_argument("--output", help="Output path (default: models/{models_name}/{method}_sft/{run_id}/model)")
     p.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
     p.add_argument("--batch-size", type=int, default=4, help="Per-device batch size")
     p.add_argument("--gradient-accumulation-steps", type=int, default=4, help="Gradient accumulation steps")
@@ -638,18 +668,20 @@ def main():
              "purely so both base models see identical tokenization of the same "
              "data and their SFT runs stay comparable. Use for Qwen3-* models.")
     p.add_argument("--completion-only-loss", action="store_true", help="Mask the prompt and the injected <response> hints out of the loss. Off by default: every RL parent was trained on the full sequence, and the masked ablation scored lower")
+    p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
+    p.add_argument("--models-name", help="Models directory name under models/ (default: data-name)")
     p.set_defaults(func=cmd_train_sft)
 
     # train_rl
     p = subparsers.add_parser("train_rl", help="Train RL model using verl (GRPO)")
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--method", help="Method name for auto-derived paths, template, and reward config")
-    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,models}/. Required with --method; nothing is derived from the base checkpoint.")
+    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,rl}/. Required with --method; nothing is derived from the base checkpoint.")
     p.add_argument("--base-model", help="Base model for cold-start RL (mutually exclusive with --sft-model)")
-    p.add_argument("--train-prompts", help="Path to RL train prompts (default: artifacts/{task}/problems_with_format/rl_train__{method}.parquet)")
-    p.add_argument("--val-prompts", help="Path to RL validation prompts (default: artifacts/{task}/problems_with_format/rl_val__{method}.parquet)")
+    p.add_argument("--train-prompts", help="Path to RL train prompts (default: data/{data_name}/problems_with_format/rl_train__{method}.parquet)")
+    p.add_argument("--val-prompts", help="Path to RL validation prompts (default: data/{data_name}/problems_with_format/rl_val__{method}.parquet)")
     p.add_argument("--sft-model", help="Path to SFT model (mutually exclusive with --base-model)")
-    p.add_argument("--output", help="Output path (default: artifacts/{task}/models/{method}_models/{run_id}/model)")
+    p.add_argument("--output", help="Output path (default: models/{models_name}/{method}_rl/{run_id}/model)")
     p.add_argument("--reward-function", help="Path to reward function (default: task's reward function)")
     p.add_argument("--train-batch-size", type=int, default=64, help="Training batch size")
     p.add_argument("--val-batch-size", type=int, default=64, help="Validation batch size")
@@ -670,7 +702,7 @@ def main():
     p.add_argument("--resume", help="Path to resume from existing run")
     p.add_argument("--overwrite", action="store_true", help="Discard an existing run at this run-id and train from scratch")
     p.add_argument("--continue-run", action="store_true", help="Resume the existing run at this run-id from its latest checkpoint")
-    p.add_argument("--save-best", action="store_true", help="Also emit best/, the checkpoint with the highest validation score (last/ is always written)")
+    p.add_argument("--save-best", action=argparse.BooleanOptionalAction, default=True, help="Also emit best/, the checkpoint with the highest validation score (last/ is always written). Use --no-save-best to disable (default: enabled)")
     p.add_argument("--best-metric", default="auto", help="Validation metric selecting the best checkpoint (default: auto, verl's headline val-core scalar)")
     p.add_argument("--max-ckpt-to-keep", type=int, default=None, help="Checkpoints to retain during training (default: 1, or 2 with --save-best so best and last both survive)")
     p.add_argument("--keep-checkpoints", action="store_true", help="Keep checkpoints and rollouts after training (by default they are deleted)")
@@ -678,6 +710,8 @@ def main():
     p.add_argument("--reward-kwargs", nargs="*", metavar="KEY=VALUE", help="Override reward kwargs (e.g., --reward-kwargs hint_penalty=0.05 hint_bonus=0.1)")
     p.add_argument("--override", nargs="*", default=None, metavar="KEY=VALUE", help="Raw hydra overrides appended verbatim (e.g., --override ray_init.num_cpus=8)")
     p.add_argument("--shuffle-seed", type=int, default=None, help="Seed for shuffling training data (default: 1, set to randomize order across runs)")
+    p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
+    p.add_argument("--models-name", help="Models directory name under models/ (default: data-name)")
     p.set_defaults(func=cmd_train_rl)
 
     # convert_checkpoint

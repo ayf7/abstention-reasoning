@@ -15,24 +15,46 @@ import yaml
 # anywhere else.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Default artifacts root
-ARTIFACTS_ROOT = REPO_ROOT / "artifacts"
+# Data and models used to share one `artifacts/{task}/...` tree. They are now
+# two independent roots so that `data/` (problems, formatted prompts, SFT
+# datasets -- small, text, meant for git) can be committed, while `models/`
+# (checkpoints -- large, binary, meant for a HuggingFace hub instead) stays
+# out of git entirely. Each is keyed by its own name rather than always the
+# task name: by default data_name/models_name both fall back to task_name, so
+# nothing changes for a task with one dataset. But a task can have more than
+# one dataset variant under trial (e.g. `data/math_o1/` instead of
+# `data/math/`), in which case passing --data-name picks that data directory,
+# and --models-name (or, left unset, the data name) picks where its models go
+# -- so experimental data and its models stay paired without colliding with
+# the task's default data/models.
+DATA_ROOT = REPO_ROOT / "data"
+MODELS_ROOT = REPO_ROOT / "models"
 
 # Roots for repo-owned lookups (method configs and task templates)
 CONFIGS_ROOT = REPO_ROOT / "pipeline" / "configs" / "methods"
 TASKS_ROOT = REPO_ROOT / "pipeline" / "tasks"
 
-# External storage for models (symlinked from artifacts)
-# Model weights used to live outside the repo at /share/goyal/ayf7/models and
-# were symlinked in per run. The whole artifacts tree now lives on shared
-# storage (artifacts -> /share/goyal/ayf7/artifacts), so run directories are
-# plain directories inside it and the indirection is no longer needed.
-# Set EXTERNAL_MODELS_ROOT env var to re-enable the symlink behavior.
+# External storage for models. If model weights should live outside the repo
+# (e.g. on shared storage, since models/ is gitignored and can get huge), set
+# EXTERNAL_MODELS_ROOT and a run that doesn't exist yet is created there and
+# symlinked into models/ instead of being written in place.
 EXTERNAL_MODELS_ROOT = (
     Path(os.environ["EXTERNAL_MODELS_ROOT"])
     if "EXTERNAL_MODELS_ROOT" in os.environ
     else None
 )
+
+
+def resolve_data_name(task_name: str, data_name: str | None = None) -> str:
+    """data_name falls back to task_name when not given explicitly."""
+    return data_name or task_name
+
+
+def resolve_models_name(data_name: str, models_name: str | None = None) -> str:
+    """models_name falls back to data_name when not given explicitly -- so a
+    custom --data-name (e.g. "math_o1") also repoints the models default
+    (models/math_o1/...) unless --models-name overrides it separately."""
+    return models_name or data_name
 
 
 @dataclass
@@ -150,11 +172,11 @@ class Method:
     # =========================================================================
     # Artifact path utilities
     # =========================================================================
-    def task_dir(self, task_name: str) -> Path:
-        """Root of a task's artifacts. Method-independent: prompts, datasets and
-        models all live in shared directories and are told apart by name, not by
-        sitting under a per-method subtree."""
-        return ARTIFACTS_ROOT / task_name
+    def data_dir(self, data_name: str) -> Path:
+        """Root of one data tree: problems, formatted prompts and SFT datasets.
+        Method-independent: everything in it lives in shared directories and is
+        told apart by name, not by sitting under a per-method subtree."""
+        return DATA_ROOT / data_name
 
     # -- prompts and datasets -------------------------------------------------
 
@@ -163,7 +185,7 @@ class Method:
 
         Every field is separated by a double underscore. Method names contain
         single underscores (`method_b`, `method_ac`), so a single-underscore
-        desc separator would make `sft_whole__method_b_generations` ambiguous --
+        desc separator would make `sft_train__method_b_generations` ambiguous --
         method `method_b` with desc `generations`, or a method actually named
         `method_b_generations`. Hyphens stay legal *inside* a field, which is
         what carries model slugs (`qwen3-4b-base`) and run descs
@@ -172,52 +194,50 @@ class Method:
         stem = f"{split}__{self.name}"
         return f"{stem}__{desc}" if desc else stem
 
-    def formatted_dir(self, task_name: str) -> Path:
+    def formatted_dir(self, data_name: str) -> Path:
         """`problems_with_format/` -- a partition with the method's template
         applied, and nothing generated yet. Model-ready input, no rollouts."""
-        return self.task_dir(task_name) / "problems_with_format"
+        return self.data_dir(data_name) / "problems_with_format"
 
-    def formatted_path(self, task_name: str, split: str, desc: str | None = None) -> Path:
+    def formatted_path(self, data_name: str, split: str, desc: str | None = None) -> Path:
         ext = ".parquet" if split.startswith("rl") else ".json"
-        return self.formatted_dir(task_name) / f"{self.artifact_stem(split, desc)}{ext}"
+        return self.formatted_dir(data_name) / f"{self.artifact_stem(split, desc)}{ext}"
 
-    def datasets_dir(self, task_name: str) -> Path:
+    def datasets_dir(self, data_name: str) -> Path:
         """`sft_datasets/` -- generations with correctness labels. SFT-stage only:
         the RL parquets carry no generations, so they stay in the formatted layer
         and never reach here."""
-        return self.task_dir(task_name) / "sft_datasets"
+        return self.data_dir(data_name) / "sft_datasets"
 
-    def dataset_path(self, task_name: str, split: str, desc: str | None = None) -> Path:
-        return self.datasets_dir(task_name) / f"{self.artifact_stem(split, desc)}.json"
+    def dataset_path(self, data_name: str, split: str, desc: str | None = None) -> Path:
+        return self.datasets_dir(data_name) / f"{self.artifact_stem(split, desc)}.json"
 
-    def scratch_path(self, task_name: str, split: str, desc: str | None = None) -> Path:
+    def scratch_path(self, data_name: str, split: str, desc: str | None = None) -> Path:
         """Same naming as a dataset, but under .scratch/ -- for intermediates
         that are read back by a later step and never trained on."""
-        return scratch_dir(task_name) / f"{self.artifact_stem(split, desc)}.json"
+        return scratch_dir(data_name) / f"{self.artifact_stem(split, desc)}.json"
 
     # -- models ---------------------------------------------------------------
 
-    def models_dir(self, task_name: str) -> Path:
-        return self.task_dir(task_name) / "models"
+    def models_dir(self, models_name: str) -> Path:
+        return MODELS_ROOT / models_name
 
-    # Directory suffix per training stage. RL output is the finished model for
-    # a method, so it lands in `_models`; `_sft` holds the intermediate it was
-    # initialized from. The stage is still spelled "rl" everywhere in the code
-    # and on the command line -- only the directory reads as the result.
-    GROUP_SUFFIX = {"sft": "sft", "rl": "models"}
+    # Directory suffix per training stage. `_sft` holds the intermediate a
+    # method was initialized from; `_rl` holds the finished model, post-RL.
+    GROUP_SUFFIX = {"sft": "sft", "rl": "rl"}
 
-    def group_dir(self, task_name: str, stage: str) -> Path:
-        """`models/{method}_{sft,models}` -- e.g. models/baseline_sft, models/method_b_models."""
+    def group_dir(self, models_name: str, stage: str) -> Path:
+        """`models/{method}_{sft,rl}` -- e.g. models/baseline_sft, models/method_b_rl."""
         try:
             suffix = self.GROUP_SUFFIX[stage]
         except KeyError:
             raise ValueError(
                 f"stage must be one of {sorted(self.GROUP_SUFFIX)}, got {stage!r}"
             ) from None
-        return self.models_dir(task_name) / f"{self.name}_{suffix}"
+        return self.models_dir(models_name) / f"{self.name}_{suffix}"
 
-    def run_dir(self, task_name: str, stage: str, run_id: str) -> Path:
-        """One training run: `models/{method}_{sft,models}/{run_id}`.
+    def run_dir(self, models_name: str, stage: str, run_id: str) -> Path:
+        """One training run: `models/{models_name}/{method}_{sft,rl}/{run_id}`.
 
         run_id is the directory name verbatim and is always required. Nothing
         derives it from the base checkpoint: the convention (`1.5b`, `4b`,
@@ -227,11 +247,11 @@ class Method:
         if not run_id:
             raise ValueError(
                 f"--run-id is required: it names the directory under "
-                f"{self.group_dir(task_name, stage).relative_to(ARTIFACTS_ROOT.parent)}."
+                f"{self.group_dir(models_name, stage).relative_to(MODELS_ROOT.parent)}."
             )
-        return self.group_dir(task_name, stage) / run_id
+        return self.group_dir(models_name, stage) / run_id
 
-    def _ensure_run_dir(self, run_dir: Path, task_name: str) -> Path:
+    def _ensure_run_dir(self, run_dir: Path, models_name: str) -> Path:
         """Create a run directory, or resolve it to external storage.
 
         With EXTERNAL_MODELS_ROOT set, a run that does not exist yet is created
@@ -260,8 +280,8 @@ class Method:
             return run_dir
 
         if EXTERNAL_MODELS_ROOT is not None:
-            rel_to_models = run_dir.relative_to(self.models_dir(task_name))
-            external_path = EXTERNAL_MODELS_ROOT / task_name / rel_to_models
+            rel_to_models = run_dir.relative_to(self.models_dir(models_name))
+            external_path = EXTERNAL_MODELS_ROOT / models_name / rel_to_models
             external_path.mkdir(parents=True, exist_ok=True)
             run_dir.parent.mkdir(parents=True, exist_ok=True)
             run_dir.symlink_to(external_path)
@@ -271,63 +291,63 @@ class Method:
 
         return run_dir
 
-    def sft_run_dir(self, task_name: str, run_id: str) -> Path:
-        return self.run_dir(task_name, "sft", run_id)
+    def sft_run_dir(self, models_name: str, run_id: str) -> Path:
+        return self.run_dir(models_name, "sft", run_id)
 
-    def rl_run_dir(self, task_name: str, run_id: str) -> Path:
-        return self.run_dir(task_name, "rl", run_id)
+    def rl_run_dir(self, models_name: str, run_id: str) -> Path:
+        return self.run_dir(models_name, "rl", run_id)
 
-    def ensure_sft_run_dir(self, task_name: str, run_id: str) -> Path:
-        return self._ensure_run_dir(self.sft_run_dir(task_name, run_id), task_name)
+    def ensure_sft_run_dir(self, models_name: str, run_id: str) -> Path:
+        return self._ensure_run_dir(self.sft_run_dir(models_name, run_id), models_name)
 
-    def ensure_rl_run_dir(self, task_name: str, run_id: str) -> Path:
-        return self._ensure_run_dir(self.rl_run_dir(task_name, run_id), task_name)
+    def ensure_rl_run_dir(self, models_name: str, run_id: str) -> Path:
+        return self._ensure_run_dir(self.rl_run_dir(models_name, run_id), models_name)
 
-    def sft_model_path(self, task_name: str, run_id: str) -> Path:
-        return self.sft_run_dir(task_name, run_id) / "model"
+    def sft_model_path(self, models_name: str, run_id: str) -> Path:
+        return self.sft_run_dir(models_name, run_id) / "model"
 
-    def rl_model_path(self, task_name: str, run_id: str) -> Path:
-        return self.rl_run_dir(task_name, run_id) / "model"
+    def rl_model_path(self, models_name: str, run_id: str) -> Path:
+        return self.rl_run_dir(models_name, run_id) / "model"
 
-    def rl_checkpoints_dir(self, task_name: str, run_id: str) -> Path:
-        return self.rl_run_dir(task_name, run_id) / "checkpoints"
+    def rl_checkpoints_dir(self, models_name: str, run_id: str) -> Path:
+        return self.rl_run_dir(models_name, run_id) / "checkpoints"
 
-    def rl_rollouts_dir(self, task_name: str, run_id: str) -> Path:
-        return self.rl_run_dir(task_name, run_id) / "rollouts"
+    def rl_rollouts_dir(self, models_name: str, run_id: str) -> Path:
+        return self.rl_run_dir(models_name, run_id) / "rollouts"
 
     # -- evaluations ----------------------------------------------------------
 
-    def evals_dir(self, task_name: str, stage: str, run_id: str) -> Path:
-        """`models/{method}_{sft,models}/{run_id}/evals` -- results live inside the
+    def evals_dir(self, models_name: str, stage: str, run_id: str) -> Path:
+        """`models/{method}_{sft,rl}/{run_id}/evals` -- results live inside the
         run that produced them, not in a task-wide results/ pool."""
-        return self.run_dir(task_name, stage, run_id) / "evals"
+        return self.run_dir(models_name, stage, run_id) / "evals"
 
-    def eval_path(self, task_name: str, stage: str, run_id: str,
+    def eval_path(self, models_name: str, stage: str, run_id: str,
                   split: str, suffix: str = "") -> Path:
         """`.../evals/{split}{suffix}.json`. The run directory already carries
         the model identity, so the filename only has to say which split and
         under what deviation from the default settings."""
-        return self.evals_dir(task_name, stage, run_id) / f"{split}{suffix}.json"
+        return self.evals_dir(models_name, stage, run_id) / f"{split}{suffix}.json"
 
 
-def scratch_dir(task_name: str) -> Path:
-    """`artifacts/{task}/.scratch` -- intermediates that feed a later step but are
-    not themselves training data or results.
+def scratch_dir(data_name: str) -> Path:
+    """`data/{data_name}/.scratch` -- intermediates that feed a later step but
+    are not themselves training data or results.
 
     The no-hint difficulty probe is the case that forced this: it is a real
     generate output, so it looks like a dataset, but nothing is ever trained on
     it and it only exists to be read back by --hint-schedule. Dot-prefixed so it
     sorts and greps out of the way of the artifacts that matter.
     """
-    return ARTIFACTS_ROOT / task_name / ".scratch"
+    return DATA_ROOT / data_name / ".scratch"
 
 
-def problems_dir(task_name: str) -> Path:
-    """`artifacts/{task}/problems` -- raw problems, shared by every method."""
-    return ARTIFACTS_ROOT / task_name / "problems"
+def problems_dir(data_name: str) -> Path:
+    """`data/{data_name}/problems` -- raw problems, shared by every method."""
+    return DATA_ROOT / data_name / "problems"
 
 
-def partition_path(task_name: str, split: str) -> Path:
+def partition_path(data_name: str, split: str) -> Path:
     """`problems/{split}.json` -- the problems belonging to one split.
 
     Materialized rather than recomputed. The partition used to exist only as
@@ -336,9 +356,9 @@ def partition_path(task_name: str, split: str) -> Path:
     down makes the split a fact about the data instead of a fact about the code
     that happens to be checked out.
     """
-    return problems_dir(task_name) / f"{split}.json"
+    return problems_dir(data_name) / f"{split}.json"
 
 
-def get_primitives_path(task_name: str) -> Path:
-    """Get the shared primitives path for a task."""
-    return problems_dir(task_name) / "primitives.json"
+def get_primitives_path(data_name: str) -> Path:
+    """Get the shared primitives path for a data directory."""
+    return problems_dir(data_name) / "primitives.json"

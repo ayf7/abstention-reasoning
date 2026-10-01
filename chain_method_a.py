@@ -55,13 +55,13 @@ Usage:
 
     python chain_method_a.py \
         --task "${TASK}" \
-        --eval-dataset artifacts/${TASK}/problems/eval.json \
-        --verifier-model artifacts/${TASK}/models/method_a_predictors/${RUN_ID}/model \
-        --solver-model artifacts/${TASK}/models/method_ac_models/${RUN_ID}/model \
+        --eval-dataset data/${TASK}/problems/eval.json \
+        --verifier-model models/${TASK}/method_a_predictors/${RUN_ID}/model \
+        --solver-model models/${TASK}/method_ac_rl/${RUN_ID}/model \
         --num-samples 1 \
         --max-hints 5 \
         --async \
-        --output artifacts/${TASK}/models/method_a_predictors/${RUN_ID}/evals/eval__chained_1s.json
+        --output models/${TASK}/method_a_predictors/${RUN_ID}/evals/eval__chained_1s.json
 """
 
 import argparse
@@ -383,7 +383,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--task", required=True, help="Task name (countdown, math)")
     p.add_argument("--eval-dataset", required=True, type=Path,
-        help="Path to the raw eval partition (artifacts/{task}/problems/eval.json)")
+        help="Path to the raw eval partition (data/{task}/problems/eval.json)")
     p.add_argument("--verifier-model", required=True, help="Verifier (method_a) model path")
     p.add_argument("--solver-model", required=True, help="Solver (method_ac) model path")
     p.add_argument("--output", required=True, type=Path, help="Output path for combined results")

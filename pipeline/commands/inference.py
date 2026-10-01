@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pipeline.core.io import load_json, save_json
 from pipeline.core.generator import Generator, GenerationConfig, AsyncGenerator
-from pipeline.core.method import Method
+from pipeline.core.method import Method, resolve_data_name, resolve_models_name
 from pipeline.core.utils import extract_answer, model_short_name
 from pipeline.tasks import get_task
 
@@ -523,6 +523,8 @@ def generate(
     drop_exhausted: bool = False,
     target_correct_rate: float | None = None,
     max_oversample: int = 5,
+    data_name: str | None = None,
+    models_name: str | None = None,
 ) -> Path:
     """
     Generate model outputs on prompts.
@@ -535,8 +537,8 @@ def generate(
         model_name: Model to use for generation
         method_name: Method name for auto-derived paths
         run_id: Run identifier for model resolution (used when model_name="sft" or "rl")
-        prompts_path: Path to prompts file (default: artifacts/{task}/problems_with_format/{split}__{method}.json)
-        output_path: Where to save dataset (default: artifacts/{task}/sft_sft_datasets/{split}__{method}.json)
+        prompts_path: Path to prompts file (default: data/{data_name}/problems_with_format/{split}__{method}.json)
+        output_path: Where to save dataset (default: data/{data_name}/sft_datasets/{split}__{method}.json)
         split: Which split to generate from (default: sft)
         retry_incorrect: If True, re-run incorrect examples
         answer_budget: Tokens held back for a forced answer. A generation that runs
@@ -571,12 +573,17 @@ def generate(
         target_correct_rate: Keep resampling incorrect problems until this fraction
             is answered correctly (phase 3). None disables the loop.
         max_oversample: Cap on phase-3 resampling rounds.
+        data_name: Data directory name (default: task_name)
+        models_name: Models directory name (default: data_name)
         ... generation config ...
 
     Returns:
         Path to created dataset file
     """
     task = get_task(task_name)
+
+    data_name = resolve_data_name(task_name, data_name)
+    models_name = resolve_models_name(data_name, models_name)
 
     # Load method config if specified
     method = None
@@ -603,9 +610,9 @@ def generate(
     actual_model_name = model_name
     if method is not None:
         if model_name == "sft":
-            actual_model_name = str(method.sft_model_path(task_name, run_id))
+            actual_model_name = str(method.sft_model_path(models_name, run_id))
         elif model_name == "rl":
-            actual_model_name = str(method.rl_model_path(task_name, run_id))
+            actual_model_name = str(method.rl_model_path(models_name, run_id))
 
     # Default prompts path
     if prompts_path is None:
@@ -614,7 +621,7 @@ def generate(
                 "Either --method or --prompts must be specified. "
                 "Use --method to auto-derive paths, or --prompts for explicit paths."
             )
-        prompts_path = method.formatted_path(task_name, split)
+        prompts_path = method.formatted_path(data_name, split)
 
     # Default output path
     if output_path is None:
@@ -623,7 +630,7 @@ def generate(
                 "Either --method or --output must be specified. "
                 "Use --method to auto-derive paths, or --output for explicit paths."
             )
-        output_path = method.dataset_path(task_name, split)
+        output_path = method.dataset_path(data_name, split)
 
     # Load prompts
     prompts_data = load_json(prompts_path)
@@ -1274,6 +1281,8 @@ def evaluate(
     use_async: bool = False,
     seed: int | None = 42,
     no_hints: bool = False,
+    data_name: str | None = None,
+    models_name: str | None = None,
 ) -> Path:
     """
     Evaluate a model on prompts and compute metrics.
@@ -1283,19 +1292,24 @@ def evaluate(
         model_name: Model to evaluate (can be "sft" or "rl" to use method's model paths)
         method_name: Method name for auto-derived paths
         run_id: Run identifier for model resolution (used when model_name="sft" or "rl")
-        prompts_path: Path to eval prompts (default: artifacts/{task}/problems_with_format/{split}__{method}.json)
-        output_path: Where to save results (default: artifacts/{task}/models/{method}_{sft,models}/{run_id}/evals/{split}.json)
+        prompts_path: Path to eval prompts (default: data/{data_name}/problems_with_format/{split}__{method}.json)
+        output_path: Where to save results (default: models/{models_name}/{method}_{sft,rl}/{run_id}/evals/{split}.json)
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
         use_async: Use async generation for optimal throughput.
         no_hints: Counterfactual eval -- ban the hint request so the model must
             answer on its own. Everything else about the eval is unchanged, so
             the drop against a normal run measures what the hints were worth.
+        data_name: Data directory name (default: task_name)
+        models_name: Models directory name (default: data_name)
         ... generation config ...
 
     Returns:
         Path to results file
     """
     task = get_task(task_name)
+
+    data_name = resolve_data_name(task_name, data_name)
+    models_name = resolve_models_name(data_name, models_name)
 
     # Load method config if specified
     method = None
@@ -1310,9 +1324,9 @@ def evaluate(
     actual_model_name = model_name
     if method is not None:
         if model_name == "sft":
-            actual_model_name = str(method.sft_model_path(task_name, run_id))
+            actual_model_name = str(method.sft_model_path(models_name, run_id))
         elif model_name == "rl":
-            actual_model_name = str(method.rl_model_path(task_name, run_id))
+            actual_model_name = str(method.rl_model_path(models_name, run_id))
 
     # Default prompts path
     if prompts_path is None:
@@ -1321,7 +1335,7 @@ def evaluate(
                 "Either --method or --prompts must be specified. "
                 "Use --method to auto-derive paths, or --prompts for explicit paths."
             )
-        prompts_path = method.formatted_path(task_name, split)
+        prompts_path = method.formatted_path(data_name, split)
 
     # Default output path
     if output_path is None:
@@ -1337,13 +1351,13 @@ def evaluate(
         hint_suffix = "_nohint" if no_hints else ""
         suffix = f"{samples_suffix}{hint_suffix}"
         if model_name in ("sft", "rl"):
-            output_path = method.eval_path(task_name, model_name, run_id, split, suffix)
+            output_path = method.eval_path(models_name, model_name, run_id, split, suffix)
         else:
             # A checkpoint evaluated outside any run of ours -- a stock
             # HuggingFace model, or a path handed in directly. It has no run
             # directory, so it gets one under _stock keyed by the model name.
             slug = model_short_name(model_name)
-            output_path = (method.models_dir(task_name) / "_stock" / slug
+            output_path = (method.models_dir(models_name) / "_stock" / slug
                            / "evals" / f"{split}{suffix}.json")
 
     # Load prompts

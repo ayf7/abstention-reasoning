@@ -4,10 +4,11 @@ Training commands - SFT, RL, and checkpoint conversion.
 
 import os
 import re
+import shutil
 from pathlib import Path
 
 from pipeline.core.io import load_json
-from pipeline.core.method import Method
+from pipeline.core.method import Method, resolve_data_name, resolve_models_name
 from pipeline.core.utils import model_short_name as _get_model_short_name
 from pipeline.tasks import get_task
 
@@ -33,6 +34,7 @@ def train_sft(
     method_name: str | None = None,
     run_id: str | None = None,
     dataset_path: Path | None = None,
+    eval_dataset_path: Path | None = None,
     output_path: Path | None = None,
     epochs: int = 3,
     batch_size: int = 4,
@@ -49,6 +51,8 @@ def train_sft(
     max_correct: int | None = None,
     completion_only_loss: bool = False,
     strip_think_tokens: bool = False,
+    data_name: str | None = None,
+    models_name: str | None = None,
 ) -> Path:
     """
     Train an SFT model on generated dataset.
@@ -56,13 +60,26 @@ def train_sft(
     Filters to correct examples, formats as prompt/completion pairs, and
     trains using TRL's SFTTrainer.
 
+    When a validation set is available (see eval_dataset_path), checkpoints
+    every epoch and keeps two: best/ (lowest eval_loss) and last/ (final
+    epoch), with model/ symlinked to best/ -- mirroring train_rl's
+    best/last/model layout. Without a validation set there is no signal to
+    pick a "best" epoch by, so only the final weights are saved, directly
+    at model/ (no best/last split).
+
     Args:
         task_name: Name of task
         base_model: Base model to fine-tune
         method_name: Method name for auto-derived paths
         run_id: Run identifier for organizing outputs (default: "default")
-        dataset_path: Path to generated dataset (default: artifacts/{task}/sft_datasets/sft_whole__{method}.json)
-        output_path: Where to save trained model (default: artifacts/{task}/models/{method}_sft/{run_id}/model)
+        dataset_path: Path to generated dataset (default: data/{data_name}/sft_datasets/sft_train__{method}.json)
+        eval_dataset_path: Path to held-out dataset for validation loss (default:
+            data/{data_name}/sft_datasets/sft_val__{method}.json if it exists;
+            validation is skipped if neither this nor a method-derived default is found)
+        output_path: Where to save trained model (default: models/{models_name}/{method}_sft/{run_id}/model,
+            a symlink to best/ when a validation set is used)
+        data_name: Data directory name (default: task_name)
+        models_name: Models directory name (default: data_name)
         epochs: Number of training epochs
         batch_size: Per-device batch size
         gradient_accumulation_steps: Gradient accumulation steps
@@ -82,36 +99,41 @@ def train_sft(
     from trl import SFTTrainer, SFTConfig
     from transformers import AutoTokenizer
 
+    data_name = resolve_data_name(task_name, data_name)
+    models_name = resolve_models_name(data_name, models_name)
+
     # Load method config if specified
     method = None
     if method_name is not None:
         method = Method.load(method_name, task_name)
 
-    # Default dataset path - look for any sft_*.json in datasets dir
+    # Default dataset path - look for the method's generated sft_train dataset
     if dataset_path is None:
         if method is None:
             raise ValueError(
                 "Either --method or --dataset must be specified. "
                 "Use --method to auto-derive paths, or --dataset for explicit paths."
             )
-        # Prefer sft_whole, fall back to sft_train, and never pick sft_val --
-        # it is the held-out tail, so training on it would be training on the
-        # validation split. Every method's datasets share one directory, so the
-        # lookup is by exact name rather than a glob that would also match a
-        # sibling method's files.
-        for split in ("sft_whole", "sft_train"):
-            candidate = method.dataset_path(task_name, split)
-            if candidate.exists():
-                dataset_path = candidate
-                break
+        # Never pick sft_val -- it is the held-out validation split, so
+        # training on it would be training on the validation set.
+        candidate = method.dataset_path(data_name, "sft_train")
+        if candidate.exists():
+            dataset_path = candidate
         else:
             raise FileNotFoundError(
                 f"No SFT dataset for method '{method.name}' in "
-                f"{method.datasets_dir(task_name)} (looked for "
-                f"{method.artifact_stem('sft_whole')}.json and "
+                f"{method.datasets_dir(data_name)} (looked for "
                 f"{method.artifact_stem('sft_train')}.json). "
                 f"Run 'python -m pipeline generate --task {task_name} --method {method_name}' first."
             )
+
+    # Default eval (validation-loss) dataset path: sft_val, if a generated
+    # dataset exists for it. Optional -- unlike the train dataset, its absence
+    # is not an error; we just skip validation.
+    if eval_dataset_path is None and method is not None:
+        candidate = method.dataset_path(data_name, "sft_val")
+        if candidate.exists():
+            eval_dataset_path = candidate
 
     # Default output path
     if output_path is None:
@@ -120,8 +142,8 @@ def train_sft(
                 "Either --method or --output must be specified. "
                 "Use --method to auto-derive paths, or --output for explicit paths."
             )
-        method.ensure_sft_run_dir(task_name, run_id)
-        output_path = method.sft_model_path(task_name, run_id)
+        method.ensure_sft_run_dir(models_name, run_id)
+        output_path = method.sft_model_path(models_name, run_id)
 
     # Generate project name if not provided: {task}-sft-{model_short_name}
     if project_name is None:
@@ -142,6 +164,7 @@ def train_sft(
     print(f"Run ID: {run_id_display}")
     print(f"Base Model: {base_model}")
     print(f"Dataset: {dataset_path}")
+    print(f"Eval Dataset: {eval_dataset_path or '(none -- validation loss disabled)'}")
     print(f"Output: {output_path}")
     print(f"Project: {project_name}")
     print(f"Experiment: {experiment_name}")
@@ -253,90 +276,121 @@ def train_sft(
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     # Format data for SFT
+    def format_examples(examples: list[dict]) -> list[dict]:
+        formatted = []
+        if mask_response_tokens:
+            # Pre-tokenize with response masking for clean boundaries
+            from pipeline.core.utils import tokenize_with_response_mask
+
+            for ex in examples:
+                # Apply chat template to prompt messages (excluding assistant prefix)
+                messages = ex["prompt"]
+                if messages and messages[-1]["role"] == "assistant":
+                    conversation = messages[:-1]
+                    assistant_prefix = messages[-1]["content"]
+                else:
+                    conversation = messages
+                    assistant_prefix = ""
+
+                prompt = tokenizer.apply_chat_template(
+                    conversation,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+
+                # Completion is assistant prefix + generation
+                completion = assistant_prefix + ex["generation"]
+
+                # Tokenize prompt (all masked, completion_mask=0)
+                prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
+
+                # Tokenize completion with response masking
+                completion_tokens, response_mask = tokenize_with_response_mask(
+                    completion, tokenizer
+                )
+
+                # Combine: prompt (mask=0) + completion (mask from response_mask)
+                input_ids = prompt_tokens + completion_tokens
+                completion_mask = [0] * len(prompt_tokens) + response_mask
+
+                formatted.append({
+                    "input_ids": input_ids,
+                    "completion_mask": completion_mask,
+                })
+        else:
+            # Standard prompt/completion format (SFTTrainer handles tokenization)
+            for ex in examples:
+                messages = ex["prompt"]
+                if messages and messages[-1]["role"] == "assistant":
+                    conversation = messages[:-1]
+                    assistant_prefix = messages[-1]["content"]
+                else:
+                    conversation = messages
+                    assistant_prefix = ""
+
+                prompt = tokenizer.apply_chat_template(
+                    conversation,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+
+                completion = assistant_prefix + ex["generation"]
+
+                formatted.append({
+                    "prompt": prompt,
+                    "completion": completion,
+                })
+        return formatted
+
     print("Formatting for SFT...")
-    formatted = []
-
     if mask_response_tokens:
-        # Pre-tokenize with response masking for clean boundaries
-        from pipeline.core.utils import tokenize_with_response_mask
-
         print("  Using segmented tokenization for response masking")
         print("  Masking \\n<response>...</response>\\n spans")
 
-        for ex in filtered_examples:
-            # Apply chat template to prompt messages (excluding assistant prefix)
-            messages = ex["prompt"]
-            if messages and messages[-1]["role"] == "assistant":
-                conversation = messages[:-1]
-                assistant_prefix = messages[-1]["content"]
-            else:
-                conversation = messages
-                assistant_prefix = ""
-
-            prompt = tokenizer.apply_chat_template(
-                conversation,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-
-            # Completion is assistant prefix + generation
-            completion = assistant_prefix + ex["generation"]
-
-            # Tokenize prompt (all masked, completion_mask=0)
-            prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
-
-            # Tokenize completion with response masking
-            completion_tokens, response_mask = tokenize_with_response_mask(
-                completion, tokenizer
-            )
-
-            # Combine: prompt (mask=0) + completion (mask from response_mask)
-            input_ids = prompt_tokens + completion_tokens
-            completion_mask = [0] * len(prompt_tokens) + response_mask
-
-            formatted.append({
-                "input_ids": input_ids,
-                "completion_mask": completion_mask,
-            })
-    else:
-        # Standard prompt/completion format (SFTTrainer handles tokenization)
-        for ex in filtered_examples:
-            messages = ex["prompt"]
-            if messages and messages[-1]["role"] == "assistant":
-                conversation = messages[:-1]
-                assistant_prefix = messages[-1]["content"]
-            else:
-                conversation = messages
-                assistant_prefix = ""
-
-            prompt = tokenizer.apply_chat_template(
-                conversation,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-
-            completion = assistant_prefix + ex["generation"]
-
-            formatted.append({
-                "prompt": prompt,
-                "completion": completion,
-            })
-
-    dataset = Dataset.from_list(formatted)
-
-    train_dataset = dataset
+    train_dataset = Dataset.from_list(format_examples(filtered_examples))
     print(f"Train: {len(train_dataset)}")
+
+    # Load, filter (correctness only -- no downsample/upsample, this is a
+    # fixed held-out set for measuring validation loss, not a training
+    # signal to rebalance), and format the eval set, if one was found/given.
+    eval_dataset = None
+    if eval_dataset_path is not None:
+        print(f"Loading eval dataset from {eval_dataset_path}")
+        eval_data = load_json(eval_dataset_path)
+        if hasattr(task, 'filter_for_sft'):
+            filtered_eval_examples = task.filter_for_sft(
+                eval_data,
+                include_wrong_valid_format=include_wrong_valid_format,
+                **({"nested_request": True}
+                   if method is not None and method.nested_request else {}),
+            )
+        else:
+            filtered_eval_examples = [ex for ex in eval_data if ex.get("correct", False)]
+        if filtered_eval_examples:
+            eval_dataset = Dataset.from_list(format_examples(filtered_eval_examples))
+            print(f"Eval: {len(eval_dataset)}")
+        else:
+            print("  No valid examples found in eval dataset -- skipping validation.")
 
     # Data collator - standard collator handles completion_mask
     data_collator = None
 
-    # Training config. SFT keeps only the final weights: intermediate
-    # checkpointing and a held-out eval split were dropped after every recorded
-    # run turned out to consume just the final model.
+    # run_root holds best/, last/, and the model/ symlink, mirroring
+    # train_rl's checkpoint layout. Raw trainer checkpoints land directly in
+    # run_root too (as checkpoint-N/) and are cleaned up once best/last are
+    # extracted.
+    run_root = output_path.parent
+    has_eval = eval_dataset is not None
+
+    # Training config. With a validation set, checkpoint every epoch and
+    # keep the best (lowest eval_loss) one alongside the last -- otherwise
+    # there is no signal to pick a "best" epoch by, so only the final
+    # weights are saved (previous behavior).
     training_args = SFTConfig(
-        output_dir=str(output_path),
+        output_dir=str(run_root),
         num_train_epochs=epochs,
         per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,
         learning_rate=learning_rate,
         warmup_ratio=warmup_ratio,
@@ -349,8 +403,12 @@ def train_sft(
         # way, and the masked ablation (qwen3-4b-up4x-tok) scored lower.
         completion_only_loss=completion_only_loss,
         logging_steps=10,
-        save_strategy="no",
-        eval_strategy="no",
+        save_strategy="epoch" if has_eval else "no",
+        eval_strategy="epoch" if has_eval else "no",
+        save_total_limit=2 if has_eval else None,
+        load_best_model_at_end=has_eval,
+        metric_for_best_model="eval_loss" if has_eval else None,
+        greater_is_better=False if has_eval else None,
         bf16=bf16,
         report_to=report_to,
         run_name=experiment_name,
@@ -367,15 +425,88 @@ def train_sft(
         model=base_model,
         args=training_args,
         train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         data_collator=data_collator,
     )
 
     trainer.train()
 
-    # Save final model
-    trainer.save_model(str(output_path))
-    tokenizer.save_pretrained(str(output_path))
-    print(f"Saved model to {output_path}")
+    def _clear(path: Path) -> None:
+        if path.is_symlink():
+            path.unlink()
+        elif path.exists():
+            shutil.rmtree(path)
+
+    if not has_eval:
+        # No validation signal -- nothing to pick a "best" epoch by, so
+        # just save the final weights as before.
+        trainer.save_model(str(output_path))
+        tokenizer.save_pretrained(str(output_path))
+        print(f"Saved model to {output_path}")
+        return output_path
+
+    # Every epoch's weights already live on disk under run_root/checkpoint-N
+    # (the trainer's own rotation keeps at most save_total_limit of these,
+    # with load_best_model_at_end exempting the best one -- so this is never
+    # "all" epochs, just the 1-2 that matter). Move those directories straight
+    # into best/last rather than re-saving or copying full weights a second
+    # time, so disk usage never doubles.
+    checkpoint_dirs = sorted(
+        (d for d in run_root.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")),
+        key=lambda d: int(d.name.split("-")[-1]),
+    )
+    best_ckpt_path = (
+        Path(trainer.state.best_model_checkpoint).resolve()
+        if trainer.state.best_model_checkpoint else None
+    )
+    last_ckpt_dir = checkpoint_dirs[-1] if checkpoint_dirs else None
+    best_ckpt_dir = next(
+        (d for d in checkpoint_dirs if best_ckpt_path is not None and d.resolve() == best_ckpt_path),
+        None,
+    )
+
+    best_dest = run_root / "best"
+    last_dest = run_root / "last"
+    _clear(best_dest)
+    _clear(last_dest)
+
+    if best_ckpt_dir is not None:
+        shutil.move(str(best_ckpt_dir), str(best_dest))
+        tokenizer.save_pretrained(str(best_dest))  # cheap -- just ensures tokenizer files are present
+        print(f"Saved best model (eval_loss) to {best_dest}")
+    else:
+        # Rotation pruned the recorded best checkpoint (or there's none to
+        # find, e.g. a single epoch) -- load_best_model_at_end already
+        # reloaded those weights into trainer.model, so fall back to saving
+        # from memory.
+        trainer.save_model(str(best_dest))
+        tokenizer.save_pretrained(str(best_dest))
+        print(f"Saved best model (eval_loss) to {best_dest} (re-saved; raw checkpoint unavailable)")
+
+    if last_ckpt_dir is not None and last_ckpt_dir == best_ckpt_dir:
+        # Same epoch -- symlink instead of duplicating the weights on disk.
+        last_dest.symlink_to("best", target_is_directory=True)
+        print(f"last/ is the same checkpoint as best/ ({last_ckpt_dir.name}); symlinked")
+    elif last_ckpt_dir is not None:
+        shutil.move(str(last_ckpt_dir), str(last_dest))
+        tokenizer.save_pretrained(str(last_dest))
+        print(f"Saved last model (final epoch) to {last_dest}")
+    else:
+        # Shouldn't happen with save_strategy="epoch", but fall back to the
+        # best model rather than erroring.
+        last_dest.symlink_to("best", target_is_directory=True)
+
+    # Clean up any raw checkpoint dirs still on disk (there should be none
+    # left beyond what was just moved into best/last, but be defensive).
+    for d in checkpoint_dirs:
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+
+    # model/ -> best/, mirroring train_rl: the canonical path points at the
+    # checkpoint the run should be judged on.
+    _clear(output_path)
+    output_path.symlink_to("best", target_is_directory=True)
+    print(f"Saved model to {run_root} (best/, last/, model/ -> best/)")
 
     return output_path
 
@@ -532,6 +663,8 @@ def train_rl(
     save_best: bool = False,
     best_metric: str = "auto",
     max_ckpt_to_keep: int | None = None,
+    data_name: str | None = None,
+    models_name: str | None = None,
 ) -> Path:
     """
     Train RL model using verl (GRPO algorithm).
@@ -566,6 +699,8 @@ def train_rl(
         resume_path: Path to resume from existing run (overrides output_path)
         cleanup_checkpoints: Delete checkpoints after training (default: True)
         keep_state: Keep the last optimizer state checkpoint after training (default: False)
+        data_name: Data directory name (default: task_name)
+        models_name: Models directory name (default: data_name)
 
     Returns:
         Path to trained model
@@ -574,6 +709,9 @@ def train_rl(
     import os
 
     from pipeline.tasks import get_task
+
+    data_name = resolve_data_name(task_name, data_name)
+    models_name = resolve_models_name(data_name, models_name)
 
     # Get repo root (assumes we're running from repo root)
     repo_root = Path.cwd()
@@ -610,9 +748,9 @@ def train_rl(
     # Default paths from method
     if method is not None:
         if train_prompts_path is None:
-            train_prompts_path = method.formatted_path(task_name, "rl_train")
+            train_prompts_path = method.formatted_path(data_name, "rl_train")
         if val_prompts_path is None:
-            candidate = method.formatted_path(task_name, "rl_val")
+            candidate = method.formatted_path(data_name, "rl_val")
             if candidate.exists():
                 val_prompts_path = candidate
 
@@ -622,7 +760,7 @@ def train_rl(
     elif sft_model_path is not None:
         actor_model = str(sft_model_path)
     elif method is not None and run_id:
-        actor_model = str(method.sft_model_path(task_name, run_id))
+        actor_model = str(method.sft_model_path(models_name, run_id))
     else:
         raise ValueError("Either --base-model or --sft-model is required (or use --method and --run-id)")
 
@@ -631,11 +769,11 @@ def train_rl(
     checkpoints_dir = None
     rollouts_dir = None
     if method is not None and output_path is None:
-        method.ensure_rl_run_dir(task_name, run_id)
-        run_dir = method.rl_run_dir(task_name, run_id)
-        checkpoints_dir = method.rl_checkpoints_dir(task_name, run_id)
-        rollouts_dir = method.rl_rollouts_dir(task_name, run_id)
-        output_path = method.rl_model_path(task_name, run_id)
+        method.ensure_rl_run_dir(models_name, run_id)
+        run_dir = method.rl_run_dir(models_name, run_id)
+        checkpoints_dir = method.rl_checkpoints_dir(models_name, run_id)
+        rollouts_dir = method.rl_rollouts_dir(models_name, run_id)
+        output_path = method.rl_model_path(models_name, run_id)
     elif output_path is not None:
         # Custom output path - derive subdirectories from it
         run_dir = output_path.parent if output_path.name == "model" else output_path
@@ -964,12 +1102,13 @@ def train_rl(
             _convert("best", best_ckpt)
 
         if best_ckpt is not None and best_ckpt == last_ckpt and "best" in converted:
-            # The final step also won; copying beats merging the same shards twice.
+            # The final step also won; symlink instead of duplicating the
+            # converted weights on disk.
             dest = run_root / "last"
             _clear(dest)
-            shutil.copytree(converted["best"], dest)
+            dest.symlink_to("best", target_is_directory=True)
             converted["last"] = dest
-            print(f"last/ is the same checkpoint as best/ ({last_ckpt.name}); copied")
+            print(f"last/ is the same checkpoint as best/ ({last_ckpt.name}); symlinked")
         else:
             _convert("last", last_ckpt)
 
