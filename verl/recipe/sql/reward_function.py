@@ -29,10 +29,7 @@ else:
 # Database path search location.
 # DATABASE_PATH points directly at a `databases/` folder containing every DB
 # the active dataset variant's primitives.json needs (e.g.
-# data/sql_conceptual/databases or data/sql_partial_sql/databases). It is
-# intentionally independent of --data-name / the repo's data/ layout, since
-# the actual .sqlite files can live anywhere (shared storage, a different
-# disk, etc.) rather than being tied to where primitives.json lives.
+# data/sql_conceptual/databases or data/sql_partial_sql/databases). 
 #
 # Read lazily (per-call) rather than cached at import time: this module gets
 # imported once (and cached) by pipeline.tasks.sql.task the first time any
@@ -52,7 +49,32 @@ def _get_db_search_paths() -> list[Path]:
 _DB_PATH_CACHE: dict[tuple[str | None, str], Path | None] = {}
 _CONN_CACHE: dict[str, sqlite3.Connection] = {}
 _GOLD_CACHE: dict[tuple[str, str], tuple[bool, list[tuple] | None, str | None]] = {}
-_LOCK = threading.Lock()
+
+# Guards the small cache dicts above only (cheap, in-memory lookups) -- never
+# held across a query execution.
+_CACHE_LOCK = threading.Lock()
+
+# Per-db_id locks guarding actual query execution on that db's cached
+# connection. A single global lock here would serialize every query across
+# every database process-wide, which is the real bottleneck when callers try
+# to parallelize verification (e.g. a ThreadPoolExecutor in the caller):
+# with one lock, only one query runs at a time no matter how many threads are
+# used. Per-connection locks still serialize concurrent use of the *same*
+# SQLite connection (needed because set_progress_handler mutates shared
+# connection state) while letting queries against different databases run
+# truly concurrently -- which is exactly the I/O-bound, many-small-files
+# workload this verifier sees (Spider/BIRD/CoSQL split across hundreds of
+# separate .sqlite files).
+_CONN_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _get_conn_lock(db_id: str) -> threading.Lock:
+    with _CACHE_LOCK:
+        lock = _CONN_LOCKS.get(db_id)
+        if lock is None:
+            lock = threading.Lock()
+            _CONN_LOCKS[db_id] = lock
+        return lock
 
 NO_MORE_HINTS = "No more hints available."
 
@@ -63,7 +85,7 @@ def _find_db_path(db_id: str) -> Path | None:
         return None
     database_path = os.environ.get("DATABASE_PATH")
     cache_key = (database_path, db_id)
-    with _LOCK:
+    with _CACHE_LOCK:
         if cache_key in _DB_PATH_CACHE:
             return _DB_PATH_CACHE[cache_key]
 
@@ -84,14 +106,14 @@ def _find_db_path(db_id: str) -> Path | None:
         if found:
             break
 
-    with _LOCK:
+    with _CACHE_LOCK:
         _DB_PATH_CACHE[cache_key] = found
     return found
 
 
 def _get_connection(db_id: str, db_path: Path) -> sqlite3.Connection:
     """Get or open a cached read-only SQLite connection."""
-    with _LOCK:
+    with _CACHE_LOCK:
         if db_id in _CONN_CACHE:
             return _CONN_CACHE[db_id]
 
@@ -135,7 +157,7 @@ def _execute_query(
             return 1  # Abort query
         return 0
 
-    with _LOCK:
+    with _get_conn_lock(db_id):
         try:
             conn.set_progress_handler(_timeout_handler, 1000)
             cursor = conn.cursor()
@@ -165,14 +187,14 @@ def _verify_sql(
         )
 
     cache_key = (db_id, gold_sql)
-    with _LOCK:
+    with _CACHE_LOCK:
         cached_gold = _GOLD_CACHE.get(cache_key)
 
     if cached_gold is not None:
         gold_ok, gold_res, gold_err = cached_gold
     else:
         gold_ok, gold_res, gold_err = _execute_query(db_id, db_path, gold_sql)
-        with _LOCK:
+        with _CACHE_LOCK:
             _GOLD_CACHE[cache_key] = (gold_ok, gold_res, gold_err)
 
     if not gold_ok:

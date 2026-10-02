@@ -366,6 +366,7 @@ def select_best_sample(
     strategy: str = "shortest_cot",
     exclude_exhausted: bool = False,
     rng=None,
+    executor=None,
 ) -> dict | None:
     """
     Select the best sample from multiple generations.
@@ -392,23 +393,37 @@ def select_best_sample(
         task: Task instance for checking correctness
         primitive: Primitive data with ground truth
         strategy: Selection strategy ("shortest_cot", "most_hints", "random_correct", "random")
+        executor: Optional ThreadPoolExecutor used to run check_correctness for
+            all samples concurrently. check_correctness is often I/O-bound
+            (e.g. the SQL task executes queries against on-disk SQLite files
+            spread across many separate .sqlite files -- cold reads dominate
+            wall time, and the GIL is released during I/O), so submitting the
+            whole batch to a shared pool turns what would otherwise be a
+            fully serial loop into a concurrent one. Defaults to None, which
+            preserves the original sequential behavior for callers that don't
+            pass one.
 
     Returns:
         Best sample dict with added 'correct' and 'metadata' fields
     """
-    # Check correctness for all samples
-    evaluated_samples = []
-    for sample in samples:
+    # Check correctness for all samples. When an executor is supplied, run the
+    # (often I/O-bound) checks concurrently instead of one at a time.
+    def _check(sample):
         is_correct, meta = task.check_correctness(primitive, sample["text"])
         cot_length = extract_cot_length(sample["text"])
         num_hints = sample["text"].count("<request>")
-        evaluated_samples.append({
+        return {
             **sample,
             "correct": is_correct,
             "metadata": meta,
             "cot_length": cot_length,
             "_num_hints": num_hints,
-        })
+        }
+
+    if executor is not None:
+        evaluated_samples = list(executor.map(_check, samples))
+    else:
+        evaluated_samples = [_check(sample) for sample in samples]
 
     # Drop samples that ran the hint pool dry before choosing. This matters most
     # for strategy="most_hints", which maximises request count and would
@@ -657,6 +672,25 @@ def generate(
     generator = Generator(config)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Shared pool for the per-sample correctness checks in select_best_sample.
+    # Those checks are frequently I/O-bound (the SQL task executes queries
+    # against on-disk SQLite files spread across many separate .sqlite
+    # files -- cold reads dominate wall time, and the GIL is released
+    # during I/O), so checking num_samples completions for a prompt one at
+    # a time left most of the wall-clock in the correctness-check phase
+    # idle. Created once here (not per retry attempt) so a `--retry-truncated`
+    # run with multiple attempts doesn't leak a new pool's worker threads on
+    # every iteration of the loop below -- concurrent.futures.ThreadPoolExecutor
+    # worker threads block forever on an internal queue until shutdown() is
+    # called, so an abandoned pool's threads are never reclaimed until process
+    # exit. concurrent.futures.ThreadPoolExecutor has an atexit hook that joins
+    # its threads automatically, so no explicit shutdown is needed for this
+    # process-lifetime, one-shot CLI command.
+    import concurrent.futures
+    correctness_pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(8, min(64, num_samples * 2))
+    )
+
     total_attempts = (max_retries + 1) if retry_truncated else 1
     for attempt in range(total_attempts):
         if attempt > 0:
@@ -838,7 +872,7 @@ def generate(
                     best_sample = select_best_sample(gen_samples, task, primitive,
                                                      strategy=sample_strategy,
                                                      exclude_exhausted=drop_exhausted,
-                                                     rng=_rng)
+                                                     rng=_rng, executor=correctness_pool)
                     if best_sample is None:
                         # strategy="random_correct" and nothing was correct.
                         n_no_correct += 1
@@ -955,7 +989,8 @@ def generate(
                             best_sample = select_best_sample(
                                 gen_samples, task, primitive,
                                 strategy=sample_strategy,
-                                exclude_exhausted=drop_exhausted, rng=_rng)
+                                exclude_exhausted=drop_exhausted, rng=_rng,
+                                executor=correctness_pool)
                             if best_sample is None:
                                 # random_correct: nothing correct -> drop the problem
                                 n_no_correct += 1
@@ -1061,7 +1096,7 @@ def generate(
                     best_sample = select_best_sample(gen_samples, task, primitive,
                                                      strategy=sample_strategy,
                                                      exclude_exhausted=drop_exhausted,
-                                                     rng=_rng)
+                                                     rng=_rng, executor=correctness_pool)
                     if best_sample is None:
                         # strategy="random_correct" and nothing was correct.
                         n_no_correct += 1

@@ -14,12 +14,23 @@
 
 import multiprocessing
 import os
+import types
 from functools import partial
 
 import ray
 
 from verl import DataProto
 from verl.utils.reward_score import default_compute_score
+
+# Cache loaded custom reward modules by resolved file path, keyed per
+# process. Reward functions like the SQL one keep process-level state
+# (cached SQLite connections, memoized gold-query results) that is only
+# useful if the module survives across calls. Without this cache,
+# get_custom_reward_fn() would re-exec the module file from scratch on
+# every call -- e.g. every RL training step via compute_reward_async --
+# wiping that state and forcing cold database reads each time even when
+# the same Ray worker process handles the call repeatedly.
+_CUSTOM_REWARD_MODULE_CACHE: dict[str, types.ModuleType] = {}
 
 
 def get_custom_reward_fn(config):
@@ -31,17 +42,20 @@ def get_custom_reward_fn(config):
     if not file_path:
         return None
 
-
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Reward function file '{file_path}' not found.")
 
-    spec = importlib.util.spec_from_file_location("custom_module", file_path)
-    module = importlib.util.module_from_spec(spec)
-    try:
-        sys.modules["custom_module"] = module
-        spec.loader.exec_module(module)
-    except Exception as e:
-        raise RuntimeError(f"Error loading module from '{file_path}': {e}") from e
+    resolved_path = os.path.realpath(file_path)
+    module = _CUSTOM_REWARD_MODULE_CACHE.get(resolved_path)
+    if module is None:
+        spec = importlib.util.spec_from_file_location("custom_module", file_path)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            sys.modules["custom_module"] = module
+            spec.loader.exec_module(module)
+        except Exception as e:
+            raise RuntimeError(f"Error loading module from '{file_path}': {e}") from e
+        _CUSTOM_REWARD_MODULE_CACHE[resolved_path] = module
 
     function_name = reward_fn_config.get("name")
     if not hasattr(module, function_name):
