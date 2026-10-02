@@ -25,5 +25,5 @@ python -m pipeline train_rl \
   --run-id "${RUN_ID}" \
   --sft-model "models/math_o1/baseline_sft/${RUN_ID}/model" \
   --data-name math_o1 \
-  --overwrite  --learning-rate 5e-6
+  --overwrite  --learning-rate 5e-7
 
