@@ -859,7 +859,11 @@ def generate(
 
             sample_strategy = sample_strategy or ("most_hints" if multi_turn else "shortest_cot")
             n_no_correct = 0  # dropped by strategy="random_correct"
-            for prompt_data, gen_samples in zip(remaining_prompts, all_results):
+            from tqdm.auto import tqdm
+            for prompt_data, gen_samples in tqdm(
+                zip(remaining_prompts, all_results), total=len(remaining_prompts),
+                desc="Verifying", unit="prompt",
+            ):
                 primitive = {
                     "index": prompt_data["index"],
                     **prompt_data["ground_truth"],
@@ -977,7 +981,11 @@ def generate(
                     print(f"Running async generation on {len(all_prompts)} prompts...")
                     all_results = await async_generator.generate_async(all_prompts, num_samples=num_samples)
 
-                    for prompt_data, gen_samples in zip(current_prompts, all_results):
+                    from tqdm.auto import tqdm
+                    for prompt_data, gen_samples in tqdm(
+                        zip(current_prompts, all_results), total=len(current_prompts),
+                        desc="Verifying", unit="prompt",
+                    ):
                         primitive = {
                             "index": prompt_data["index"],
                             **prompt_data["ground_truth"],
@@ -1083,7 +1091,11 @@ def generate(
             sample_strategy = sample_strategy or ("most_hints" if multi_turn else "shortest_cot")
             n_no_correct = 0  # dropped by strategy="random_correct"
             batch_correct = 0
-            for prompt_data, gen_samples in zip(batch_prompts_data, batch_results):
+            from tqdm.auto import tqdm
+            for prompt_data, gen_samples in tqdm(
+                zip(batch_prompts_data, batch_results), total=len(batch_prompts_data),
+                desc="Verifying", unit="prompt",
+            ):
                 primitive = {
                     "index": prompt_data["index"],
                     **prompt_data["ground_truth"],

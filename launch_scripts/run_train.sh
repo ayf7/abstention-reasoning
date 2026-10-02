@@ -22,8 +22,9 @@ RUN_ID="${MODEL}"
 python -m pipeline train_rl \
   --task "${TASK}" \
   --method baseline \
-  --run-id "${RUN_ID}" \
+  --run-id "${RUN_ID}_seqmean" \
   --sft-model "models/math_o1/baseline_sft/${RUN_ID}/model" \
   --data-name math_o1 \
-  --overwrite  --learning-rate 5e-7
+  --overwrite  --override actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean
+
 
