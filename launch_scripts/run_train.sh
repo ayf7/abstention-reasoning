@@ -25,6 +25,9 @@ python -m pipeline train_rl \
   --run-id "${RUN_ID}_seqmean" \
   --sft-model "models/math_o1/baseline_sft/${RUN_ID}/model" \
   --data-name math_o1 \
-  --overwrite  --override actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean
+  --overwrite  \
+  --override actor_rollout_ref.rollout.val_kwargs.do_sample=True \
+  --override actor_rollout_ref.rollout.val_kwargs.temperature=1 \
+  --override actor_rollout_ref.rollout.val_kwargs.n=8 #\#--override actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean
 
 
