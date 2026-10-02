@@ -12,22 +12,35 @@ MODEL="$2"
 HF_MODEL="$3"
 RUN_ID="${MODEL}"
 
-# python -m pipeline train_sft \
-#   --task "${TASK}" \
-#   --method baseline \
-#   --run-id "${RUN_ID}" \
-#   --base-model "${HF_MODEL}" \
-#   --data-name math_o1
+# Qwen3 ships <think>/</think> as atomic special tokens (151667/151668) that a
+# base model has no pretrained prior for, so it rarely emits </think> and RL
+# burns its reward budget recovering format instead of learning to reason.
+# Stripping the added-token entries makes Qwen3 tokenize the tags as ordinary
+# text (as Qwen2.5 already does); the stripped tokenizer is saved with the SFT
+# model and inherited by the downstream RL run. Qwen2.5 needs no such flag.
+STRIP_THINK=""
+if [[ "${MODEL,,}" == *qwen3* ]]; then
+  STRIP_THINK="--strip-think-tokens"
+fi
+
+python -m pipeline train_sft \
+  --task "${TASK}" \
+  --method baseline \
+  --run-id "${RUN_ID}" \
+  --base-model "${HF_MODEL}" \
+  --data-name math_o1 \
+  ${STRIP_THINK}
 
 python -m pipeline train_rl \
   --task "${TASK}" \
   --method baseline \
-  --run-id "${RUN_ID}_seqmean" \
+  --run-id "${RUN_ID}" \
   --sft-model "models/math_o1/baseline_sft/${RUN_ID}/model" \
   --data-name math_o1 \
   --overwrite  \
   --override actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-  --override actor_rollout_ref.rollout.val_kwargs.temperature=1 \
-  --override actor_rollout_ref.rollout.val_kwargs.n=8 #\#--override actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean
+             actor_rollout_ref.rollout.val_kwargs.temperature=1 \
+             actor_rollout_ref.rollout.val_kwargs.n=1
+             # add actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean above to change loss aggregation
 
 

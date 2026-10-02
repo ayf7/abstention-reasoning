@@ -32,7 +32,15 @@ TRAIN_PREFIXES = [
 ]
 
 
-def combine_files(file_prefixes: list[str], style: str, output_path: Path):
+def combine_files(file_prefixes: list[str], style: str, output_path: Path, start_index: int = 0) -> int:
+    """Combine the given per-source hint files into output_path.
+
+    Indices are assigned globally starting at `start_index`, so that callers can
+    chain multiple combine_files() calls (e.g. dev then train) and still end up
+    with a single, globally-unique index space across all resulting files.
+    Returns the next available index (start_index + len(combined)) so the caller
+    can pass it to the next combine_files() call.
+    """
     combined = []
     total_loaded = 0
     total_with_hints = 0
@@ -51,16 +59,18 @@ def combine_files(file_prefixes: list[str], style: str, output_path: Path):
         total_loaded += len(valid_items)
         total_with_hints += len(with_hints)
 
-    # Re-index combined items cleanly while keeping original indices in metadata
-    for new_idx, item in enumerate(combined):
+    # Re-index combined items cleanly (continuing from start_index) while keeping
+    # original per-source indices in metadata for traceability.
+    for offset, item in enumerate(combined):
         item["metadata"]["original_split_index"] = item["index"]
-        item["index"] = new_idx
+        item["index"] = start_index + offset
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(combined, f, indent=2, ensure_ascii=False)
 
     logger.info(f"Wrote {len(combined)} records ({total_with_hints} with hints) to {output_path}")
+    return start_index + len(combined)
 
 
 def main():
@@ -81,8 +91,11 @@ def main():
         dev_out = DATA_DIR / f"primitives_combined_dev_hints_{style}.json"
         train_out = DATA_DIR / f"primitives_combined_train_hints_{style}.json"
 
-        combine_files(DEV_PREFIXES, style, dev_out)
-        combine_files(TRAIN_PREFIXES, style, train_out)
+        # Dev is combined first, then train continues the index space from
+        # where dev left off, so indices are globally unique across BOTH
+        # output files (not just within each file individually).
+        next_index = combine_files(DEV_PREFIXES, style, dev_out, start_index=0)
+        combine_files(TRAIN_PREFIXES, style, train_out, start_index=next_index)
 
 
 if __name__ == "__main__":
