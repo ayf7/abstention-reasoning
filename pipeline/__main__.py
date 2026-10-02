@@ -367,6 +367,7 @@ def cmd_train_rl(args):
         max_response_length=args.max_response_length,
         max_model_len=args.max_model_len,
         tensor_parallel_size=args.tensor_parallel_size,
+        n_gpus_per_node=args.n_gpus_per_node,
         gpu_memory_utilization=args.gpu_memory_utilization,
         project_name=args.project_name,
         experiment_name=args.experiment_name,
@@ -694,7 +695,8 @@ def main():
     p.add_argument("--max-prompt-length", type=int, default=2048, help="Maximum prompt length in tokens")
     p.add_argument("--max-response-length", type=int, default=2048, help="Maximum response length in tokens")
     p.add_argument("--max-model-len", type=int, default=8192, help="Maximum model context length (default: 8192). Set higher for multi-turn.")
-    p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
+    p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size for vLLM rollout (GPUs per rollout replica)")
+    p.add_argument("--n-gpus-per-node", type=int, default=None, help="Total GPUs per node used by the trainer (actor/ref FSDP + rollout). Default: auto-detect all visible GPUs via torch.cuda.device_count(). Decoupled from --tensor-parallel-size.")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.4, help="GPU memory utilization")
     p.add_argument("--project-name", help="Wandb project name (default: {task}-rl)")
     p.add_argument("--experiment-name", help="Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})")

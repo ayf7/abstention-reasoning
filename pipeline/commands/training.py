@@ -648,6 +648,7 @@ def train_rl(
     max_response_length: int = 2048,
     max_model_len: int = 8192,
     tensor_parallel_size: int = 1,
+    n_gpus_per_node: int | None = None,
     gpu_memory_utilization: float = 0.5,
     project_name: str | None = None,
     experiment_name: str | None = None,
@@ -691,7 +692,13 @@ def train_rl(
         max_response_length: Maximum response length in tokens
         max_model_len: Maximum model context length (default: prompt + response length).
             Set higher than prompt + response for multi-turn hint mode.
-        tensor_parallel_size: Tensor parallel size
+        tensor_parallel_size: Tensor parallel size for vLLM rollout (how many GPUs each
+            rollout replica is split across)
+        n_gpus_per_node: Total GPUs per node used by the trainer (actor/ref FSDP +
+            rollout). Default: auto-detected via torch.cuda.device_count() so all
+            visible GPUs are used. Decoupled from tensor_parallel_size -- set this
+            higher than tensor_parallel_size to add data-parallel rollout/training
+            capacity rather than splitting the model further.
         gpu_memory_utilization: GPU memory utilization for vLLM
         project_name: Wandb project name (default: {task}-rl)
         experiment_name: Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})
@@ -707,8 +714,14 @@ def train_rl(
     """
     import subprocess
     import os
+    import torch
 
     from pipeline.tasks import get_task
+
+    # Decoupled from tensor_parallel_size (vLLM rollout TP): defaults to all
+    # visible GPUs so the trainer isn't silently pinned to 1 GPU.
+    if n_gpus_per_node is None:
+        n_gpus_per_node = torch.cuda.device_count() or 1
 
     data_name = resolve_data_name(task_name, data_name)
     models_name = resolve_models_name(data_name, models_name)
@@ -922,6 +935,7 @@ def train_rl(
     print(f"Batch Size: {train_batch_size}")
     print(f"Learning Rate: {learning_rate}")
     print(f"Total Steps: {total_steps}")
+    print(f"GPUs per Node: {n_gpus_per_node} (tensor_parallel_size={tensor_parallel_size})")
     print(f"Wandb: {wandb}")
     if template_content:
         print(f"Template: {method.template_variant}/rl.txt")
@@ -957,7 +971,7 @@ def train_rl(
         f"trainer.logger={logger_config}",
         "trainer.default_hdfs_dir=null",
         f"trainer.default_local_dir={checkpoints_dir}",
-        f"trainer.n_gpus_per_node={tensor_parallel_size}",
+        f"trainer.n_gpus_per_node={n_gpus_per_node}",
         "trainer.nnodes=1",
         f"trainer.save_freq={save_freq}",
         f"trainer.test_freq={test_freq}",
