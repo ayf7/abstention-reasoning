@@ -14,9 +14,11 @@ def _register_tasks():
     from .countdown.task import CountdownTask
     from .math.task import MathTask
     from .code_output.task import CodeOutputTask
+    from .sql.task import SqlTask
     TASKS["countdown"] = CountdownTask
     TASKS["math"] = MathTask
     TASKS["code_output"] = CodeOutputTask
+    TASKS["sql"] = SqlTask
 
 
 def get_task(name: str) -> "BaseTask":

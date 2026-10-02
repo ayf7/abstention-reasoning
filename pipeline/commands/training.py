@@ -7,7 +7,7 @@ import re
 import shutil
 from pathlib import Path
 
-from pipeline.core.io import load_json
+from pipeline.core.io import load_json, load_parquet_shards
 from pipeline.core.method import Method, resolve_data_name, resolve_models_name
 from pipeline.core.utils import model_short_name as _get_model_short_name
 from pipeline.tasks import get_task
@@ -818,12 +818,20 @@ def train_rl(
     # A prompts file that does not exist used to be handed straight to verl,
     # which then failed much later with an opaque error. Only explicitly-passed
     # paths can be missing here: the auto-derived val path above is assigned
-    # solely when it exists.
+    # solely when it exists. A prompts path may also be sharded (see
+    # save_parquet/load_parquet_shards in pipeline/core/io.py) -- i.e. the
+    # single file doesn't exist but `<stem>.shard000.parquet` etc do -- so
+    # check for either before reporting it as missing.
+    def _prompts_exist(p: Path) -> bool:
+        if p.exists():
+            return True
+        return bool(list(p.parent.glob(f"{p.stem}.shard*{p.suffix}")))
+
     for flag, prompts_path in (
         ("--train-prompts", train_prompts_path),
         ("--val-prompts", val_prompts_path),
     ):
-        if prompts_path is None or prompts_path.exists():
+        if prompts_path is None or _prompts_exist(prompts_path):
             continue
         split = prompts_path.stem
         supported = get_task(task_name).supported_splits()
@@ -941,13 +949,28 @@ def train_rl(
         print(f"Template: {method.template_variant}/rl.txt")
     print(f"=================================")
 
+    # Resolve train/val prompts to their actual file(s) on disk -- a parquet
+    # prompts path written by save_parquet() may be sharded into
+    # `<stem>.shard000.parquet`, etc (see pipeline/core/io.py) rather than
+    # existing as a single file, since GitHub rejects individual files over
+    # 100MB. verl's RLDataset natively accepts a list of parquet paths, so we
+    # pass a Hydra list override `[a,b,c]` whenever there's more than one.
+    def _hydra_files_value(p: Path) -> str:
+        shards = load_parquet_shards(p)
+        if len(shards) == 1:
+            return str(shards[0])
+        return "[" + ",".join(str(s) for s in shards) + "]"
+
+    train_files_value = _hydra_files_value(train_prompts_path)
+    val_files_value = _hydra_files_value(val_prompts_path) if val_prompts_path else train_files_value
+
     # Build verl command
     cmd = [
         "python3", "-m", "verl.trainer.main_ppo",
         f"hydra.run.dir={checkpoints_dir}",
         "algorithm.adv_estimator=grpo",
-        f"data.train_files={train_prompts_path}",
-        f"data.val_files={val_prompts_path or train_prompts_path}",
+        f"data.train_files={train_files_value}",
+        f"data.val_files={val_files_value}",
         f"data.train_batch_size={train_batch_size}",
         f"data.val_batch_size={val_batch_size}",
         f"data.max_prompt_length={max_prompt_length}",

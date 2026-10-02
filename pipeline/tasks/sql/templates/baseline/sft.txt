@@ -1,0 +1,5 @@
+Write a SQL query to solve the following question for the given database schema.
+
+{problem}
+
+Think through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and IMMEDIATELY provide your final SQL query in <answer> \boxed{YOUR_SQL_QUERY} </answer> tags with no text in between.

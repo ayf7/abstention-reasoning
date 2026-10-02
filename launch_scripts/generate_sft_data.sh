@@ -1,10 +1,10 @@
-python -m pipeline generate --task math --method baseline --async \
-    --model Qwen/Qwen3-14B --split sft_train \
-    --data-name math_o1 --num-samples 10 \
+python -m pipeline generate --task sql --method baseline --async \
+    --model Qwen/Qwen3-32B --split sft_train \
+    --data-name sql_conceptual --num-samples 10 \
   --sample-strategy random 
 
-python -m pipeline generate --task math --method baseline --async \
-    --model Qwen/Qwen3-14B --split sft_val \
-    --data-name math_o1 --num-samples 10 \
+python -m pipeline generate --task sql --method baseline --async \
+    --model Qwen/Qwen3-32B --split sft_val \
+    --data-name sql_conceptual --num-samples 10 \
   --sample-strategy random
 

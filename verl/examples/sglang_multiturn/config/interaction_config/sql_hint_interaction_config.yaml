@@ -1,0 +1,4 @@
+interaction:
+  - name: "sql_hint"
+    class_name: "verl.interactions.sql_hint_interaction.SqlHintInteraction"
+    config: {}

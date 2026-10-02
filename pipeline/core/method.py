@@ -46,8 +46,25 @@ EXTERNAL_MODELS_ROOT = (
 
 
 def resolve_data_name(task_name: str, data_name: str | None = None) -> str:
-    """data_name falls back to task_name when not given explicitly."""
-    return data_name or task_name
+    """data_name falls back to task_name when not given explicitly.
+
+    Also exports DATABASE_PATH=<repo>/data/<data_name>/databases into the
+    environment (unless already set), so task-specific scorers that can't
+    take data_name as a normal argument (e.g.
+    verl/recipe/sql/reward_function.py, loaded standalone by both the
+    pipeline and verl's RL trainer) pick up the right dataset variant's
+    databases/ folder without every call site having to set it by hand.
+
+    DATABASE_PATH is deliberately a separate env var from --data-name /
+    pipeline's own DATA_ROOT path constant: the actual .sqlite files don't
+    have to live under data/<data_name>/ at all (e.g. they may live on
+    different storage, kept out of the git-tracked dataset folders). If the
+    caller has already exported DATABASE_PATH, we leave it untouched so that
+    override keeps working.
+    """
+    data_name = data_name or task_name
+    os.environ.setdefault("DATABASE_PATH", str(DATA_ROOT / data_name / "databases"))
+    return data_name
 
 
 def resolve_models_name(data_name: str, models_name: str | None = None) -> str:
