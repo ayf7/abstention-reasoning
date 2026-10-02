@@ -28,7 +28,7 @@ python -m pipeline train_sft \
   --method baseline \
   --run-id "${RUN_ID}" \
   --base-model "${HF_MODEL}" \
-  --data-name math_o1 \
+  --data-name sql_conceptual \
   ${STRIP_THINK}
 
 python -m pipeline train_rl \
@@ -36,7 +36,7 @@ python -m pipeline train_rl \
   --method baseline \
   --run-id "${RUN_ID}" \
   --sft-model "models/math_o1/baseline_sft/${RUN_ID}/model" \
-  --data-name math_o1 \
+  --data-name sql_conceptual \
   --overwrite  \
   --override actor_rollout_ref.rollout.val_kwargs.do_sample=True \
              actor_rollout_ref.rollout.val_kwargs.temperature=1 \
