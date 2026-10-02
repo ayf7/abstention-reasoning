@@ -14,9 +14,11 @@ def _register_tasks():
     from .countdown.task import CountdownTask
     from .math.task import MathTask
     from .code_output.task import CodeOutputTask
+    from .leetcode.task import LeetCodeTask
     TASKS["countdown"] = CountdownTask
     TASKS["math"] = MathTask
     TASKS["code_output"] = CodeOutputTask
+    TASKS["leetcode"] = LeetCodeTask
 
 
 def get_task(name: str) -> "BaseTask":

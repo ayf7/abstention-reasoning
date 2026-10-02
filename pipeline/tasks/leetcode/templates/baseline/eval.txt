@@ -1,0 +1,10 @@
+Solve this programming problem in Python.
+
+{problem}
+
+Your solution must complete this starter code:
+```python
+{starter_code}
+```
+
+Think through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and IMMEDIATELY provide your final answer in <answer> </answer> tags with no text in between. The answer must be a single ```python code block containing the complete Solution class.
