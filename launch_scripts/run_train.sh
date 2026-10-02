@@ -12,12 +12,12 @@ MODEL="$2"
 HF_MODEL="$3"
 RUN_ID="${MODEL}"
 
-python -m pipeline train_sft \
-  --task "${TASK}" \
-  --method baseline \
-  --run-id "${RUN_ID}" \
-  --base-model "${HF_MODEL}" \
-  --data-name math_o1
+# python -m pipeline train_sft \
+#   --task "${TASK}" \
+#   --method baseline \
+#   --run-id "${RUN_ID}" \
+#   --base-model "${HF_MODEL}" \
+#   --data-name math_o1
 
 python -m pipeline train_rl \
   --task "${TASK}" \
@@ -25,4 +25,5 @@ python -m pipeline train_rl \
   --run-id "${RUN_ID}" \
   --sft-model "models/math_o1/baseline_sft/${RUN_ID}/model" \
   --data-name math_o1 \
-  --overwrite
+  --overwrite  --learning-rate 5e-6
+
