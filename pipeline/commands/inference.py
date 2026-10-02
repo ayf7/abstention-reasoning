@@ -1534,23 +1534,34 @@ def evaluate(
             and not _is_binary_verifier_ground_truth(pd.get("ground_truth", {}))
         )
 
-    # --- Multi-sample path (num_samples > 1) ---
-    if num_samples > 1:
-        details = []
+    def _check_all(prompts_data, generations):
+        """(is_correct, meta) per sample, in order, scored in one batch call."""
+        primitives, texts, slots = [], [], []
         for prompt_data, gen_samples in zip(prompts_data, generations):
             primitive = {
                 "index": prompt_data["index"],
                 **prompt_data["ground_truth"],
                 "variant": prompt_data.get("variant", "unknown"),
             }
-            skip_check = _skip_correctness_check(prompt_data)
+            skip = _skip_correctness_check(prompt_data)
+            for s in gen_samples:
+                if skip:
+                    slots.append((None, {"predicted_answer": extract_answer(s["text"])}))
+                else:
+                    slots.append(None)
+                    primitives.append(primitive)
+                    texts.append(s["text"])
+        scored = iter(task.check_correctness_batch(primitives, texts))
+        return iter([slot if slot is not None else next(scored) for slot in slots])
 
+    # --- Multi-sample path (num_samples > 1) ---
+    if num_samples > 1:
+        checks = _check_all(prompts_data, generations)
+        details = []
+        for prompt_data, gen_samples in zip(prompts_data, generations):
             samples = []
             for s in gen_samples:
-                if skip_check:
-                    is_correct, meta = None, {"predicted_answer": extract_answer(s["text"])}
-                else:
-                    is_correct, meta = task.check_correctness(primitive, s["text"])
+                is_correct, meta = next(checks)
                 samples.append({
                     "generation": s["text"],
                     "correct": is_correct,
@@ -1601,22 +1612,14 @@ def evaluate(
         return output_path
 
     # --- Single-sample path (num_samples == 1) ---
+    checks = _check_all(prompts_data, [g[:1] for g in generations])
     details = []
     for prompt_data, gen_samples in zip(prompts_data, generations):
         # gen_samples is a list of samples (even if num_samples=1)
         # For evaluation, use the first sample
         gen_result = gen_samples[0]
 
-        primitive = {
-            "index": prompt_data["index"],
-            **prompt_data["ground_truth"],
-            "variant": prompt_data.get("variant", "unknown"),
-        }
-
-        if _skip_correctness_check(prompt_data):
-            is_correct, meta = None, {"predicted_answer": extract_answer(gen_result["text"])}
-        else:
-            is_correct, meta = task.check_correctness(primitive, gen_result["text"])
+        is_correct, meta = next(checks)
         finish_reason = gen_result.get("finish_reason", "unknown")
         token_count = gen_result.get("token_count", 0)
 

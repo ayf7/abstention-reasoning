@@ -1023,6 +1023,9 @@ def train_rl(
         for key, value in reward_kwargs.items():
             cmd.append(f"+custom_reward_function.reward_kwargs.{key}={value}")
 
+    if task.rl_reward_manager is not None:
+        cmd.append(f"reward_model.reward_manager={task.rl_reward_manager}")
+
     # Raw hydra overrides go last so they win over everything derived above.
     if extra_overrides:
         cmd.extend(extra_overrides)
@@ -1036,7 +1039,8 @@ def train_rl(
     print(f"Command: {' '.join(cmd[:5])}...")
 
     # Run training
-    result = subprocess.run(cmd, env=env, cwd=str(repo_root))
+    with task.rl_runtime(env):
+        result = subprocess.run(cmd, env=env, cwd=str(repo_root))
 
     if result.returncode != 0:
         raise RuntimeError(f"RL training failed with return code {result.returncode}")

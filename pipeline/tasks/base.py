@@ -1,6 +1,7 @@
 """Base task class with shared functionality."""
 
 from collections import defaultdict
+from contextlib import contextmanager
 
 from pipeline.core.utils import extract_answer
 
@@ -55,6 +56,21 @@ class BaseTask:
         raise NotImplementedError
 
     # === Optional methods (can override) ===
+
+    # verl reward manager for train_rl; None keeps verl's default (naive,
+    # one compute_score call per response).
+    rl_reward_manager: str | None = None
+
+    @contextmanager
+    def rl_runtime(self, env: dict):
+        """Context around the verl subprocess. Tasks that need a side service
+        (leetcode's verifier) start it here and add its address to `env`."""
+        yield
+
+    def check_correctness_batch(self, primitives: list[dict], generations: list[str]) -> list[tuple[bool, dict]]:
+        """Score many generations at once. Override when batching is cheaper
+        (leetcode sends one request to its verifier service)."""
+        return [self.check_correctness(p, g) for p, g in zip(primitives, generations)]
 
     # Fractional [start, end) ranges over the shuffled primitive order.
     # Tasks override this to declare their own layout; a task need not define
