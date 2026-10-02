@@ -1,0 +1,946 @@
+[
+  {
+    "index": 0,
+    "variant": "flight_2",
+    "level": "extra",
+    "problem": "Database Schema:\nCREATE TABLE `airlines` (\n  `uid` NUMBER,\n  `Airline` TEXT,\n  `Abbreviation` TEXT,\n  `Country` TEXT,\n  PRIMARY KEY (`uid`)\n);\n\nCREATE TABLE `airports` (\n  `City` TEXT,\n  `AirportCode` TEXT,\n  `AirportName` TEXT,\n  `Country` TEXT,\n  `CountryAbbrev` TEXT,\n  PRIMARY KEY (`AirportCode`)\n);\n\nCREATE TABLE `flights` (\n  `Airline` NUMBER,\n  `FlightNo` NUMBER,\n  `SourceAirport` TEXT REFERENCES `airports`(`AirportCode`),\n  `DestAirport` TEXT REFERENCES `airports`(`AirportCode`),\n  PRIMARY KEY (`Airline`)\n);\n\nQuestion:\nGive the code of the airport with the least flights.",
+    "answer": "SELECT T1.AirportCode FROM AIRPORTS AS T1 JOIN FLIGHTS AS T2 ON T1.AirportCode  =  T2.DestAirport OR T1.AirportCode  =  T2.SourceAirport GROUP BY T1.AirportCode ORDER BY count(*) LIMIT 1",
+    "prefix_hints": {
+      "hint_1": "Use `airports` to obtain airport codes and `flights` to determine how often each airport participates in a flight.",
+      "hint_2": "Match an airport when its code equals either endpoint of a flight: `T1.AirportCode = T2.DestAirport OR T1.AirportCode = T2.SourceAirport`.",
+      "hint_3": "No additional `WHERE` condition is required because every joined row represents a flight associated with that airport.",
+      "hint_4": "Group by `T1.AirportCode` and use `COUNT(*)` to measure the number of matching flights for each airport.",
+      "hint_5": "Project the airport code, sort the groups by their count in ascending order, and apply `LIMIT 1` to return the least-used airport."
+    },
+    "metadata": {
+      "source": "spider",
+      "split": "dev",
+      "db_id": "flight_2",
+      "question": "Give the code of the airport with the least flights.",
+      "evidence": null,
+      "difficulty": "extra"
+    },
+    "original_source_file": "primitives_spider_dev.json",
+    "hint_stats": {
+      "tokens": [
+        25,
+        39,
+        20,
+        27,
+        29
+      ],
+      "total_tokens": 140,
+      "avg_tokens": 28.0,
+      "max_tokens": 39,
+      "distribution": [
+        17.9,
+        27.9,
+        14.3,
+        19.3,
+        20.7
+      ]
+    }
+  },
+  {
+    "index": 1,
+    "variant": "pets_1",
+    "level": "medium",
+    "problem": "Database Schema:\nCREATE TABLE `Student` (\n  `StuID` NUMBER,\n  `LName` TEXT,\n  `Fname` TEXT,\n  `Age` NUMBER,\n  `Sex` TEXT,\n  `Major` NUMBER,\n  `Advisor` NUMBER,\n  `city_code` TEXT,\n  PRIMARY KEY (`StuID`)\n);\n\nCREATE TABLE `Has_Pet` (\n  `StuID` NUMBER REFERENCES `Student`(`StuID`),\n  `PetID` NUMBER REFERENCES `Pets`(`PetID`)\n);\n\nCREATE TABLE `Pets` (\n  `PetID` NUMBER,\n  `PetType` TEXT,\n  `pet_age` NUMBER,\n  `weight` NUMBER,\n  PRIMARY KEY (`PetID`)\n);\n\nQuestion:\nFind number of pets owned by students who are older than 20.",
+    "answer": "SELECT count(*) FROM student AS T1 JOIN has_pet AS T2 ON T1.stuid  =  T2.stuid WHERE T1.age  >  20",
+    "prefix_hints": {
+      "hint_1": "Use `Student` to identify students by age and `Has_Pet` to represent each pet ownership record.",
+      "hint_2": "Connect eligible students to their pet records with `JOIN Has_Pet AS T2 ON T1.StuID = T2.StuID`.",
+      "hint_3": "Restrict the joined rows to students older than 20 using `WHERE T1.Age > 20`.",
+      "hint_4": "Apply `COUNT(*)` to the remaining ownership rows so each linked pet contributes one to the total.",
+      "hint_5": "Return only the aggregate count; the `Pets` table is unnecessary because no pet attributes are requested."
+    },
+    "metadata": {
+      "source": "spider",
+      "split": "dev",
+      "db_id": "pets_1",
+      "question": "Find number of pets owned by students who are older than 20.",
+      "evidence": null,
+      "difficulty": "medium"
+    },
+    "original_source_file": "primitives_spider_dev.json",
+    "hint_stats": {
+      "tokens": [
+        22,
+        29,
+        21,
+        20,
+        20
+      ],
+      "total_tokens": 112,
+      "avg_tokens": 22.4,
+      "max_tokens": 29,
+      "distribution": [
+        19.6,
+        25.9,
+        18.8,
+        17.9,
+        17.9
+      ]
+    }
+  },
+  {
+    "index": 2,
+    "variant": "student_transcripts_tracking",
+    "level": "easy",
+    "problem": "Database Schema:\nCREATE TABLE `Addresses` (\n  `address_id` NUMBER,\n  `line_1` TEXT,\n  `line_2` TEXT,\n  `line_3` TEXT,\n  `city` TEXT,\n  `zip_postcode` TEXT,\n  `state_province_county` TEXT,\n  `country` TEXT,\n  `other_address_details` TEXT,\n  PRIMARY KEY (`address_id`)\n);\n\nCREATE TABLE `Courses` (\n  `course_id` NUMBER,\n  `course_name` TEXT,\n  `course_description` TEXT,\n  `other_details` TEXT,\n  PRIMARY KEY (`course_id`)\n);\n\nCREATE TABLE `Departments` (\n  `department_id` NUMBER,\n  `department_name` TEXT,\n  `department_description` TEXT,\n  `other_details` TEXT,\n  PRIMARY KEY (`department_id`)\n);\n\nCREATE TABLE `Degree_Programs` (\n  `degree_program_id` NUMBER,\n  `department_id` NUMBER REFERENCES `Departments`(`department_id`),\n  `degree_summary_name` TEXT,\n  `degree_summary_description` TEXT,\n  `other_details` TEXT,\n  PRIMARY KEY (`degree_program_id`)\n);\n\nCREATE TABLE `Sections` (\n  `section_id` NUMBER,\n  `course_id` NUMBER REFERENCES `Courses`(`course_id`),\n  `section_name` TEXT,\n  `section_description` TEXT,\n  `other_details` TEXT,\n  PRIMARY KEY (`section_id`)\n);\n\nCREATE TABLE `Semesters` (\n  `semester_id` NUMBER,\n  `semester_name` TEXT,\n  `semester_description` TEXT,\n  `other_details` TEXT,\n  PRIMARY KEY (`semester_id`)\n);\n\nCREATE TABLE `Students` (\n  `student_id` NUMBER,\n  `current_address_id` NUMBER REFERENCES `Addresses`(`address_id`),\n  `permanent_address_id` NUMBER REFERENCES `Addresses`(`address_id`),\n  `first_name` TEXT,\n  `middle_name` TEXT,\n  `last_name` TEXT,\n  `cell_mobile_number` TEXT,\n  `email_address` TEXT,\n  `ssn` TEXT,\n  `date_first_registered` TIME,\n  `date_left` TIME,\n  `other_student_details` TEXT,\n  PRIMARY KEY (`student_id`)\n);\n\nCREATE TABLE `Student_Enrolment` (\n  `student_enrolment_id` NUMBER,\n  `degree_program_id` NUMBER REFERENCES `Degree_Programs`(`degree_program_id`),\n  `semester_id` NUMBER REFERENCES `Semesters`(`semester_id`),\n  `student_id` NUMBER REFERENCES `Students`(`student_id`),\n  `other_details` TEXT,\n  PRIMARY KEY (`student_enrolment_id`)\n);\n\nCREATE TABLE `Student_Enrolment_Courses` (\n  `student_course_id` NUMBER,\n  `course_id` NUMBER REFERENCES `Courses`(`course_id`),\n  `student_enrolment_id` NUMBER REFERENCES `Student_Enrolment`(`student_enrolment_id`),\n  PRIMARY KEY (`student_course_id`)\n);\n\nCREATE TABLE `Transcripts` (\n  `transcript_id` NUMBER,\n  `transcript_date` TIME,\n  `other_details` TEXT,\n  PRIMARY KEY (`transcript_id`)\n);\n\nCREATE TABLE `Transcript_Contents` (\n  `student_course_id` NUMBER REFERENCES `Student_Enrolment_Courses`(`student_course_id`),\n  `transcript_id` NUMBER REFERENCES `Transcripts`(`transcript_id`)\n);\n\nQuestion:\nOn average, when were the transcripts printed?",
+    "answer": "SELECT avg(transcript_date) FROM Transcripts",
+    "prefix_hints": {
+      "hint_1": "Use the `Transcripts` table because it directly stores when each transcript was printed.",
+      "hint_2": "No joins are necessary; `transcript_date` is available in the same table being queried.",
+      "hint_3": "No filtering conditions are required because the average should include all transcript records.",
+      "hint_4": "Apply the aggregate function `AVG` to the `transcript_date` column to calculate the mean printing date or time.",
+      "hint_5": "Project only this aggregate result in the `SELECT` clause, using `Transcripts` as the source table."
+    },
+    "metadata": {
+      "source": "spider",
+      "split": "dev",
+      "db_id": "student_transcripts_tracking",
+      "question": "On average, when were the transcripts printed?",
+      "evidence": null,
+      "difficulty": "easy"
+    },
+    "original_source_file": "primitives_spider_dev.json",
+    "hint_stats": {
+      "tokens": [
+        17,
+        19,
+        14,
+        25,
+        22
+      ],
+      "total_tokens": 97,
+      "avg_tokens": 19.4,
+      "max_tokens": 25,
+      "distribution": [
+        17.5,
+        19.6,
+        14.4,
+        25.8,
+        22.7
+      ]
+    }
+  },
+  {
+    "index": 3,
+    "variant": "gas_company",
+    "level": "medium",
+    "problem": "Database Schema:\nCREATE TABLE `company` (\n  `Company_ID` NUMBER,\n  `Rank` NUMBER,\n  `Company` TEXT,\n  `Headquarters` TEXT,\n  `Main_Industry` TEXT,\n  `Sales_billion` NUMBER,\n  `Profits_billion` NUMBER,\n  `Assets_billion` NUMBER,\n  `Market_Value` NUMBER,\n  PRIMARY KEY (`Company_ID`)\n);\n\nCREATE TABLE `gas_station` (\n  `Station_ID` NUMBER,\n  `Open_Year` NUMBER,\n  `Location` TEXT,\n  `Manager_Name` TEXT,\n  `Vice_Manager_Name` TEXT,\n  `Representative_Name` TEXT,\n  PRIMARY KEY (`Station_ID`)\n);\n\nCREATE TABLE `station_company` (\n  `Station_ID` NUMBER REFERENCES `gas_station`(`Station_ID`),\n  `Company_ID` NUMBER REFERENCES `company`(`Company_ID`),\n  `Rank_of_the_Year` NUMBER,\n  PRIMARY KEY (`Station_ID`)\n);\n\nQuestion:\nFor each headquarter, what are the headquarter and how many companies are centered there?",
+    "answer": "SELECT headquarters ,  count(*) FROM company GROUP BY headquarters",
+    "prefix_hints": {
+      "hint_1": "Use the `company` table because it contains one row per company and the `Headquarters` attribute.",
+      "hint_2": "No joins are necessary; the station-related tables do not contribute to the requested result.",
+      "hint_3": "There are no filtering conditions because every company should be included in its headquarters count.",
+      "hint_4": "Group rows by `Headquarters` and use `COUNT(*)` to calculate the number of companies in each group.",
+      "hint_5": "Project the headquarters value alongside its computed company count; no particular ordering is required."
+    },
+    "metadata": {
+      "source": "spider",
+      "split": "train",
+      "db_id": "gas_company",
+      "question": "For each headquarter, what are the headquarter and how many companies are centered there?",
+      "evidence": null,
+      "difficulty": "medium"
+    },
+    "original_source_file": "primitives_spider_train.json",
+    "hint_stats": {
+      "tokens": [
+        21,
+        17,
+        16,
+        23,
+        16
+      ],
+      "total_tokens": 93,
+      "avg_tokens": 18.6,
+      "max_tokens": 23,
+      "distribution": [
+        22.6,
+        18.3,
+        17.2,
+        24.7,
+        17.2
+      ]
+    }
+  },
+  {
+    "index": 4,
+    "variant": "browser_web",
+    "level": "medium",
+    "problem": "Database Schema:\nCREATE TABLE `Web_client_accelerator` (\n  `id` NUMBER,\n  `name` TEXT,\n  `Operating_system` TEXT,\n  `Client` TEXT,\n  `Connection` TEXT,\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `browser` (\n  `id` NUMBER,\n  `name` TEXT,\n  `market_share` NUMBER,\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `accelerator_compatible_browser` (\n  `accelerator_id` NUMBER REFERENCES `Web_client_accelerator`(`id`),\n  `browser_id` NUMBER REFERENCES `browser`(`id`),\n  `compatible_since_year` NUMBER,\n  PRIMARY KEY (`accelerator_id`)\n);\n\nQuestion:\nList the ids, names and market shares of all browsers.",
+    "answer": "SELECT id ,  name ,  market_share FROM browser",
+    "prefix_hints": {
+      "hint_1": "The requested browser IDs, names, and market shares are all stored in the `browser` table.",
+      "hint_2": "No joins are necessary because compatibility and accelerator information are not requested.",
+      "hint_3": "Do not add a `WHERE` clause, since the question asks for all browsers.",
+      "hint_4": "No aggregation, grouping, or duplicate elimination is required; return each browser row directly.",
+      "hint_5": "Project the `id`, `name`, and `market_share` columns from the identified table, with no ordering or limit needed."
+    },
+    "metadata": {
+      "source": "spider",
+      "split": "train",
+      "db_id": "browser_web",
+      "question": "List the ids, names and market shares of all browsers.",
+      "evidence": null,
+      "difficulty": "medium"
+    },
+    "original_source_file": "primitives_spider_train.json",
+    "hint_stats": {
+      "tokens": [
+        20,
+        13,
+        17,
+        17,
+        26
+      ],
+      "total_tokens": 93,
+      "avg_tokens": 18.6,
+      "max_tokens": 26,
+      "distribution": [
+        21.5,
+        14.0,
+        18.3,
+        18.3,
+        28.0
+      ]
+    }
+  },
+  {
+    "index": 5,
+    "variant": "climbing",
+    "level": "hard",
+    "problem": "Database Schema:\nCREATE TABLE `mountain` (\n  `Mountain_ID` NUMBER,\n  `Name` TEXT,\n  `Height` NUMBER,\n  `Prominence` NUMBER,\n  `Range` TEXT,\n  `Country` TEXT,\n  PRIMARY KEY (`Mountain_ID`)\n);\n\nCREATE TABLE `climber` (\n  `Climber_ID` NUMBER,\n  `Name` TEXT,\n  `Country` TEXT,\n  `Time` TEXT,\n  `Points` NUMBER,\n  `Mountain_ID` NUMBER REFERENCES `mountain`(`Mountain_ID`),\n  PRIMARY KEY (`Climber_ID`)\n);\n\nQuestion:\nWhat are the names of countains that no climber has climbed?",
+    "answer": "SELECT Name FROM mountain WHERE Mountain_ID NOT IN (SELECT Mountain_ID FROM climber)",
+    "prefix_hints": {
+      "hint_1": "Use `mountain` as the main table because it contains the mountain names and identifiers.",
+      "hint_2": "The `climber.Mountain_ID` foreign key indicates which mountain is associated with each climber.",
+      "hint_3": "Identify unclaimed mountains by excluding IDs that appear in the climber records, using a condition such as `Mountain_ID NOT IN (...)`.",
+      "hint_4": "Build the exclusion subquery so that it returns only `Mountain_ID` values from `climber`.",
+      "hint_5": "Project the `Name` column from the remaining rows in `mountain`; no grouping or ordering is required."
+    },
+    "metadata": {
+      "source": "spider",
+      "split": "train",
+      "db_id": "climbing",
+      "question": "What are the names of countains that no climber has climbed?",
+      "evidence": null,
+      "difficulty": "hard"
+    },
+    "original_source_file": "primitives_spider_train.json",
+    "hint_stats": {
+      "tokens": [
+        18,
+        21,
+        28,
+        21,
+        22
+      ],
+      "total_tokens": 110,
+      "avg_tokens": 22.0,
+      "max_tokens": 28,
+      "distribution": [
+        16.4,
+        19.1,
+        25.5,
+        19.1,
+        20.0
+      ]
+    }
+  },
+  {
+    "index": 6,
+    "variant": "imdb",
+    "level": "hard",
+    "problem": "Database Schema:\nCREATE TABLE `actor` (\n  `aid` NUMBER,\n  `gender` TEXT,\n  `name` TEXT,\n  `nationality` TEXT,\n  `birth_city` TEXT,\n  `birth_year` NUMBER,\n  PRIMARY KEY (`aid`)\n);\n\nCREATE TABLE `copyright` (\n  `id` NUMBER,\n  `msid` NUMBER,\n  `cid` NUMBER,\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `cast` (\n  `id` NUMBER,\n  `msid` NUMBER REFERENCES `copyright`(`msid`),\n  `aid` NUMBER REFERENCES `actor`(`aid`),\n  `role` NUMBER,\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `genre` (\n  `gid` NUMBER,\n  `genre` TEXT,\n  PRIMARY KEY (`gid`)\n);\n\nCREATE TABLE `classification` (\n  `id` NUMBER,\n  `msid` NUMBER REFERENCES `copyright`(`msid`),\n  `gid` NUMBER REFERENCES `genre`(`gid`),\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `company` (\n  `id` NUMBER,\n  `name` TEXT,\n  `country_code` TEXT,\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `director` (\n  `did` NUMBER,\n  `gender` TEXT,\n  `name` TEXT,\n  `nationality` TEXT,\n  `birth_city` TEXT,\n  `birth_year` NUMBER,\n  PRIMARY KEY (`did`)\n);\n\nCREATE TABLE `producer` (\n  `pid` NUMBER,\n  `gender` TEXT,\n  `name` TEXT,\n  `nationality` TEXT,\n  `birth_city` TEXT,\n  `birth_year` NUMBER,\n  PRIMARY KEY (`pid`)\n);\n\nCREATE TABLE `directed_by` (\n  `id` NUMBER,\n  `msid` NUMBER REFERENCES `copyright`(`msid`),\n  `did` NUMBER REFERENCES `director`(`did`),\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `keyword` (\n  `id` NUMBER,\n  `keyword` TEXT,\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `made_by` (\n  `id` NUMBER,\n  `msid` NUMBER REFERENCES `copyright`(`msid`),\n  `pid` NUMBER REFERENCES `producer`(`pid`),\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `movie` (\n  `mid` NUMBER,\n  `title` TEXT,\n  `release_year` NUMBER,\n  `title_aka` TEXT,\n  `budget` TEXT,\n  PRIMARY KEY (`mid`)\n);\n\nCREATE TABLE `tags` (\n  `id` NUMBER,\n  `msid` NUMBER REFERENCES `copyright`(`msid`),\n  `kid` NUMBER,\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `tv_series` (\n  `sid` NUMBER,\n  `title` TEXT,\n  `release_year` NUMBER,\n  `num_of_seasons` NUMBER,\n  `num_of_episodes` NUMBER,\n  `title_aka` TEXT,\n  `budget` TEXT,\n  PRIMARY KEY (`sid`)\n);\n\nCREATE TABLE `writer` (\n  `wid` NUMBER,\n  `gender` TEXT,\n  `name` NUMBER,\n  `nationality` NUMBER,\n  `num_of_episodes` NUMBER,\n  `birth_city` TEXT,\n  `birth_year` NUMBER,\n  PRIMARY KEY (`wid`)\n);\n\nCREATE TABLE `written_by` (\n  `id` NUMBER,\n  `msid` NUMBER REFERENCES `copyright`(`msid`),\n  `wid` NUMBER REFERENCES `writer`(`wid`)\n);\n\nQuestion:\nWhat is the number of movies featuring \" Shahab Hosseini \" ?",
+    "answer": "SELECT COUNT ( DISTINCT t2.title  ) FROM CAST AS t3 JOIN actor AS t1 ON t3.aid  =  t1.aid JOIN movie AS t2 ON t2.mid  =  t3.msid WHERE t1.name  =  \"Shahab Hosseini\";",
+    "prefix_hints": {
+      "hint_1": "Use `actor` to identify Shahab Hosseini, `cast` to find works featuring him, and `movie` to restrict those works to movies.",
+      "hint_2": "Join `cast.aid` to `actor.aid`, then connect each cast record to its movie using `cast.msid = movie.mid`.",
+      "hint_3": "Apply an exact-name predicate such as `WHERE actor.name = 'Shahab Hosseini'`, without the extra spaces shown around the name in the question.",
+      "hint_4": "Count distinct movie titles with `COUNT(DISTINCT movie.title)` so repeated cast-related rows do not inflate the result.",
+      "hint_5": "Project only the aggregate count; no grouping or ordering is required because the desired output is one overall number."
+    },
+    "metadata": {
+      "source": "spider",
+      "split": "train_others",
+      "db_id": "imdb",
+      "question": "What is the number of movies featuring \" Shahab Hosseini \" ?",
+      "evidence": null,
+      "difficulty": "hard"
+    },
+    "original_source_file": "primitives_spider_train_others.json",
+    "hint_stats": {
+      "tokens": [
+        32,
+        29,
+        33,
+        24,
+        21
+      ],
+      "total_tokens": 139,
+      "avg_tokens": 27.8,
+      "max_tokens": 33,
+      "distribution": [
+        23.0,
+        20.9,
+        23.7,
+        17.3,
+        15.1
+      ]
+    }
+  },
+  {
+    "index": 7,
+    "variant": "geo",
+    "level": "easy",
+    "problem": "Database Schema:\nCREATE TABLE `state` (\n  `state_name` TEXT,\n  `population` NUMBER,\n  `area` NUMBER,\n  `country_name` TEXT,\n  `capital` TEXT,\n  `density` NUMBER,\n  PRIMARY KEY (`state_name`)\n);\n\nCREATE TABLE `city` (\n  `city_name` TEXT,\n  `population` NUMBER,\n  `country_name` TEXT,\n  `state_name` TEXT REFERENCES `state`(`state_name`),\n  PRIMARY KEY (`city_name`)\n);\n\nCREATE TABLE `border_info` (\n  `state_name` TEXT REFERENCES `state`(`state_name`),\n  `border` TEXT REFERENCES `state`(`state_name`),\n  PRIMARY KEY (`border`)\n);\n\nCREATE TABLE `highlow` (\n  `state_name` TEXT REFERENCES `state`(`state_name`),\n  `highest_elevation` TEXT,\n  `lowest_point` TEXT,\n  `highest_point` TEXT,\n  `lowest_elevation` TEXT,\n  PRIMARY KEY (`state_name`)\n);\n\nCREATE TABLE `lake` (\n  `lake_name` TEXT,\n  `area` NUMBER,\n  `country_name` TEXT,\n  `state_name` TEXT\n);\n\nCREATE TABLE `mountain` (\n  `mountain_name` TEXT,\n  `mountain_altitude` NUMBER,\n  `country_name` TEXT,\n  `state_name` TEXT REFERENCES `state`(`state_name`),\n  PRIMARY KEY (`mountain_name`)\n);\n\nCREATE TABLE `river` (\n  `river_name` TEXT,\n  `length` NUMBER,\n  `country_name` TEXT,\n  `traverse` TEXT REFERENCES `state`(`state_name`),\n  PRIMARY KEY (`river_name`)\n);\n\nQuestion:\nhow tall is guadalupe peak",
+    "answer": "SELECT highest_elevation FROM highlow WHERE highest_point  =  \"guadalupe peak\";",
+    "prefix_hints": {
+      "hint_1": "Use the `highlow` table because it stores named highest points and their elevations.",
+      "hint_2": "No joins are required; both the mountain name and requested height are available in the same row.",
+      "hint_3": "Identify the relevant record with `WHERE highest_point = 'guadalupe peak'`.",
+      "hint_4": "This is a direct lookup, so no aggregation, grouping, or subquery is needed.",
+      "hint_5": "Project only the `highest_elevation` column to return Guadalupe Peak's height."
+    },
+    "metadata": {
+      "source": "spider",
+      "split": "train_others",
+      "db_id": "geo",
+      "question": "how tall is guadalupe peak",
+      "evidence": null,
+      "difficulty": "easy"
+    },
+    "original_source_file": "primitives_spider_train_others.json",
+    "hint_stats": {
+      "tokens": [
+        18,
+        19,
+        19,
+        18,
+        19
+      ],
+      "total_tokens": 93,
+      "avg_tokens": 18.6,
+      "max_tokens": 19,
+      "distribution": [
+        19.4,
+        20.4,
+        20.4,
+        19.4,
+        20.4
+      ]
+    }
+  },
+  {
+    "index": 8,
+    "variant": "student_club",
+    "level": "simple",
+    "problem": "Database Schema:\nCREATE TABLE `event` (\n  `event_id` TEXT,\n  `event_name` TEXT,\n  `event_date` TEXT,\n  `type` TEXT,\n  `notes` TEXT,\n  `location` TEXT,\n  `status` TEXT,\n  PRIMARY KEY (`event_id`)\n);\n\nCREATE TABLE `major` (\n  `major_id` TEXT,\n  `major_name` TEXT,\n  `department` TEXT,\n  `college` TEXT,\n  PRIMARY KEY (`major_id`)\n);\n\nCREATE TABLE `zip_code` (\n  `zip_code` INTEGER,\n  `type` TEXT,\n  `city` TEXT,\n  `county` TEXT,\n  `state` TEXT,\n  `short_state` TEXT,\n  PRIMARY KEY (`zip_code`)\n);\n\nCREATE TABLE `attendance` (\n  `link_to_event` TEXT REFERENCES `event`(`event_id`),\n  `link_to_member` TEXT REFERENCES `member`(`member_id`),\n  PRIMARY KEY (`link_to_event`, `link_to_member`)\n);\n\nCREATE TABLE `budget` (\n  `budget_id` TEXT,\n  `category` TEXT,\n  `spent` REAL,\n  `remaining` REAL,\n  `amount` INTEGER,\n  `event_status` TEXT,\n  `link_to_event` TEXT REFERENCES `event`(`event_id`),\n  PRIMARY KEY (`budget_id`)\n);\n\nCREATE TABLE `expense` (\n  `expense_id` TEXT,\n  `expense_description` TEXT,\n  `expense_date` TEXT,\n  `cost` REAL,\n  `approved` TEXT,\n  `link_to_member` TEXT REFERENCES `member`(`member_id`),\n  `link_to_budget` TEXT REFERENCES `budget`(`budget_id`),\n  PRIMARY KEY (`expense_id`)\n);\n\nCREATE TABLE `income` (\n  `income_id` TEXT,\n  `date_received` TEXT,\n  `amount` INTEGER,\n  `source` TEXT,\n  `notes` TEXT,\n  `link_to_member` TEXT REFERENCES `member`(`member_id`),\n  PRIMARY KEY (`income_id`)\n);\n\nCREATE TABLE `member` (\n  `member_id` TEXT,\n  `first_name` TEXT,\n  `last_name` TEXT,\n  `email` TEXT,\n  `position` TEXT,\n  `t_shirt_size` TEXT,\n  `phone` TEXT,\n  `zip` INTEGER REFERENCES `zip_code`(`zip_code`),\n  `link_to_major` TEXT REFERENCES `major`(`major_id`),\n  PRIMARY KEY (`member_id`)\n);\n\nQuestion:\nWhich student was able to generate income more than $40?\n\nEvidence:\nname of students means the full name; full name refers to first_name, last_name; generate income more than $50 refers to income.amount > 40",
+    "answer": "SELECT T1.first_name, T1.last_name FROM member AS T1 INNER JOIN income AS T2 ON T1.member_id = T2.link_to_member WHERE T2.amount > 40",
+    "prefix_hints": {
+      "hint_1": "Use the `member` table for student names and the `income` table for generated income amounts.",
+      "hint_2": "Connect each income record to its student with `INNER JOIN income AS T2 ON T1.member_id = T2.link_to_member`.",
+      "hint_3": "Apply the evidence-defined threshold using `WHERE T2.amount > 40`.",
+      "hint_4": "No aggregation is required because the condition applies to each individual income record rather than a student's total income.",
+      "hint_5": "Project the student's full name as two columns: `first_name` and `last_name` from the member alias."
+    },
+    "metadata": {
+      "source": "bird",
+      "split": "dev",
+      "db_id": "student_club",
+      "question": "Which student was able to generate income more than $40?",
+      "evidence": "name of students means the full name; full name refers to first_name, last_name; generate income more than $50 refers to income.amount > 40",
+      "difficulty": "simple",
+      "question_id": 1385
+    },
+    "original_source_file": "primitives_bird_dev.json",
+    "hint_stats": {
+      "tokens": [
+        20,
+        27,
+        15,
+        21,
+        24
+      ],
+      "total_tokens": 107,
+      "avg_tokens": 21.4,
+      "max_tokens": 27,
+      "distribution": [
+        18.7,
+        25.2,
+        14.0,
+        19.6,
+        22.4
+      ]
+    }
+  },
+  {
+    "index": 9,
+    "variant": "debit_card_specializing",
+    "level": "moderate",
+    "problem": "Database Schema:\nCREATE TABLE `customers` (\n  `CustomerID` INTEGER,\n  `Segment` TEXT,\n  `Currency` TEXT,\n  PRIMARY KEY (`CustomerID`)\n);\n\nCREATE TABLE `gasstations` (\n  `GasStationID` INTEGER,\n  `ChainID` INTEGER,\n  `Country` TEXT,\n  `Segment` TEXT,\n  PRIMARY KEY (`GasStationID`)\n);\n\nCREATE TABLE `products` (\n  `ProductID` INTEGER,\n  `Description` TEXT,\n  PRIMARY KEY (`ProductID`)\n);\n\nCREATE TABLE `transactions_1k` (\n  `TransactionID` INTEGER,\n  `Date` DATE,\n  `Time` TEXT,\n  `CustomerID` INTEGER,\n  `CardID` INTEGER,\n  `GasStationID` INTEGER,\n  `ProductID` INTEGER,\n  `Amount` INTEGER,\n  `Price` REAL,\n  PRIMARY KEY (`TransactionID`)\n);\n\nCREATE TABLE `yearmonth` (\n  `CustomerID` INTEGER REFERENCES `customers`(`CustomerID`),\n  `Date` TEXT,\n  `Consumption` REAL,\n  PRIMARY KEY (`CustomerID`, `Date`)\n);\n\nQuestion:\nHow many transactions were paid in CZK in the morning of 2012/8/26?\n\nEvidence:\n'2012/8/26' can be represented by '2012-08-26'; The morning refers to the time before '13:00:00'",
+    "answer": "SELECT COUNT(T1.TransactionID) FROM transactions_1k AS T1 INNER JOIN customers AS T2 ON T1.CustomerID = T2.CustomerID WHERE T1.Date = '2012-08-26' AND T1.Time < '13:00:00' AND T2.Currency = 'CZK'",
+    "prefix_hints": {
+      "hint_1": "Use `transactions_1k` for transaction dates and times, and `customers` for the payment currency associated with each customer.",
+      "hint_2": "Connect each transaction to its customer with `INNER JOIN customers AS T2 ON T1.CustomerID = T2.CustomerID`.",
+      "hint_3": "Restrict the records to the requested date and morning period using `T1.Date = '2012-08-26'` and `T1.Time < '13:00:00'`.",
+      "hint_4": "Add `T2.Currency = 'CZK'` to retain only transactions associated with customers using Czech koruna.",
+      "hint_5": "Return a single aggregate value by counting the matching transaction IDs with `COUNT(T1.TransactionID)`."
+    },
+    "metadata": {
+      "source": "bird",
+      "split": "dev",
+      "db_id": "debit_card_specializing",
+      "question": "How many transactions were paid in CZK in the morning of 2012/8/26?",
+      "evidence": "'2012/8/26' can be represented by '2012-08-26'; The morning refers to the time before '13:00:00'",
+      "difficulty": "moderate",
+      "question_id": 1516
+    },
+    "original_source_file": "primitives_bird_dev.json",
+    "hint_stats": {
+      "tokens": [
+        26,
+        25,
+        40,
+        24,
+        20
+      ],
+      "total_tokens": 135,
+      "avg_tokens": 27.0,
+      "max_tokens": 40,
+      "distribution": [
+        19.3,
+        18.5,
+        29.6,
+        17.8,
+        14.8
+      ]
+    }
+  },
+  {
+    "index": 10,
+    "variant": "european_football_2",
+    "level": "simple",
+    "problem": "Database Schema:\nCREATE TABLE `Player_Attributes` (\n  `id` INTEGER,\n  `player_fifa_api_id` INTEGER REFERENCES `Player`(`player_fifa_api_id`),\n  `player_api_id` INTEGER REFERENCES `Player`(`player_api_id`),\n  `date` TEXT,\n  `overall_rating` INTEGER,\n  `potential` INTEGER,\n  `preferred_foot` TEXT,\n  `attacking_work_rate` TEXT,\n  `defensive_work_rate` TEXT,\n  `crossing` INTEGER,\n  `finishing` INTEGER,\n  `heading_accuracy` INTEGER,\n  `short_passing` INTEGER,\n  `volleys` INTEGER,\n  `dribbling` INTEGER,\n  `curve` INTEGER,\n  `free_kick_accuracy` INTEGER,\n  `long_passing` INTEGER,\n  `ball_control` INTEGER,\n  `acceleration` INTEGER,\n  `sprint_speed` INTEGER,\n  `agility` INTEGER,\n  `reactions` INTEGER,\n  `balance` INTEGER,\n  `shot_power` INTEGER,\n  `jumping` INTEGER,\n  `stamina` INTEGER,\n  `strength` INTEGER,\n  `long_shots` INTEGER,\n  `aggression` INTEGER,\n  `interceptions` INTEGER,\n  `positioning` INTEGER,\n  `vision` INTEGER,\n  `penalties` INTEGER,\n  `marking` INTEGER,\n  `standing_tackle` INTEGER,\n  `sliding_tackle` INTEGER,\n  `gk_diving` INTEGER,\n  `gk_handling` INTEGER,\n  `gk_kicking` INTEGER,\n  `gk_positioning` INTEGER,\n  `gk_reflexes` INTEGER,\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `Player` (\n  `id` INTEGER,\n  `player_api_id` INTEGER,\n  `player_name` TEXT,\n  `player_fifa_api_id` INTEGER,\n  `birthday` TEXT,\n  `height` INTEGER,\n  `weight` INTEGER,\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `League` (\n  `id` INTEGER,\n  `country_id` INTEGER REFERENCES `Country`(`id`),\n  `name` TEXT,\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `Country` (\n  `id` INTEGER,\n  `name` TEXT,\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `Team` (\n  `id` INTEGER,\n  `team_api_id` INTEGER,\n  `team_fifa_api_id` INTEGER,\n  `team_long_name` TEXT,\n  `team_short_name` TEXT,\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `Team_Attributes` (\n  `id` INTEGER,\n  `team_fifa_api_id` INTEGER REFERENCES `Team`(`team_fifa_api_id`),\n  `team_api_id` INTEGER REFERENCES `Team`(`team_api_id`),\n  `date` TEXT,\n  `buildUpPlaySpeed` INTEGER,\n  `buildUpPlaySpeedClass` TEXT,\n  `buildUpPlayDribbling` INTEGER,\n  `buildUpPlayDribblingClass` TEXT,\n  `buildUpPlayPassing` INTEGER,\n  `buildUpPlayPassingClass` TEXT,\n  `buildUpPlayPositioningClass` TEXT,\n  `chanceCreationPassing` INTEGER,\n  `chanceCreationPassingClass` TEXT,\n  `chanceCreationCrossing` INTEGER,\n  `chanceCreationCrossingClass` TEXT,\n  `chanceCreationShooting` INTEGER,\n  `chanceCreationShootingClass` TEXT,\n  `chanceCreationPositioningClass` TEXT,\n  `defencePressure` INTEGER,\n  `defencePressureClass` TEXT,\n  `defenceAggression` INTEGER,\n  `defenceAggressionClass` TEXT,\n  `defenceTeamWidth` INTEGER,\n  `defenceTeamWidthClass` TEXT,\n  `defenceDefenderLineClass` TEXT,\n  PRIMARY KEY (`id`)\n);\n\nCREATE TABLE `Match` (\n  `id` INTEGER,\n  `country_id` INTEGER,\n  `league_id` INTEGER,\n  `season` TEXT,\n  `stage` INTEGER,\n  `date` TEXT,\n  `match_api_id` INTEGER,\n  `home_team_api_id` INTEGER REFERENCES `Team`(`team_api_id`),\n  `away_team_api_id` INTEGER REFERENCES `Team`(`team_api_id`),\n  `home_team_goal` INTEGER,\n  `away_team_goal` INTEGER,\n  `home_player_X1` INTEGER,\n  `home_player_X2` INTEGER,\n  `home_player_X3` INTEGER,\n  `home_player_X4` INTEGER,\n  `home_player_X5` INTEGER,\n  `home_player_X6` INTEGER,\n  `home_player_X7` INTEGER,\n  `home_player_X8` INTEGER,\n  `home_player_X9` INTEGER,\n  `home_player_X10` INTEGER,\n  `home_player_X11` INTEGER,\n  `away_player_X1` INTEGER,\n  `away_player_X2` INTEGER,\n  `away_player_X3` INTEGER,\n  `away_player_X4` INTEGER,\n  `away_player_X5` INTEGER,\n  `away_player_X6` INTEGER,\n  `away_player_X7` INTEGER,\n  `away_player_X8` INTEGER,\n  `away_player_X9` INTEGER,\n  `away_player_X10` INTEGER,\n  `away_player_X11` INTEGER,\n  `home_player_Y1` INTEGER,\n  `home_player_Y2` INTEGER,\n  `home_player_Y3` INTEGER,\n  `home_player_Y4` INTEGER,\n  `home_player_Y5` INTEGER,\n  `home_player_Y6` INTEGER,\n  `home_player_Y7` INTEGER,\n  `home_player_Y8` INTEGER,\n  `home_player_Y9` INTEGER,\n  `home_player_Y10` INTEGER,\n  `home_player_Y11` INTEGER,\n  `away_player_Y1` INTEGER,\n  `away_player_Y2` INTEGER,\n  `away_player_Y3` INTEGER,\n  `away_player_Y4` INTEGER,\n  `away_player_Y5` INTEGER,\n  `away_player_Y6` INTEGER,\n  `away_player_Y7` INTEGER,\n  `away_player_Y8` INTEGER,\n  `away_player_Y9` INTEGER,\n  `away_player_Y10` INTEGER,\n  `away_player_Y11` INTEGER,\n  `home_player_1` INTEGER REFERENCES `Player`(`player_api_id`),\n  `home_player_2` INTEGER REFERENCES `Player`(`player_api_id`),\n  `home_player_3` INTEGER REFERENCES `Player`(`player_api_id`),\n  `home_player_4` INTEGER REFERENCES `Player`(`player_api_id`),\n  `home_player_5` INTEGER REFERENCES `Player`(`player_api_id`),\n  `home_player_6` INTEGER REFERENCES `Player`(`player_api_id`),\n  `home_player_7` INTEGER REFERENCES `Player`(`player_api_id`),\n  `home_player_8` INTEGER REFERENCES `Player`(`player_api_id`),\n  `home_player_9` INTEGER REFERENCES `Player`(`player_api_id`),\n  `home_player_10` INTEGER REFERENCES `Player`(`player_api_id`),\n  `home_player_11` INTEGER REFERENCES `Player`(`player_api_id`),\n  `away_player_1` INTEGER REFERENCES `Player`(`player_api_id`),\n  `away_player_2` INTEGER REFERENCES `Player`(`player_api_id`),\n  `away_player_3` INTEGER REFERENCES `Player`(`player_api_id`),\n  `away_player_4` INTEGER REFERENCES `Player`(`player_api_id`),\n  `away_player_5` INTEGER REFERENCES `Player`(`player_api_id`),\n  `away_player_6` INTEGER REFERENCES `Player`(`player_api_id`),\n  `away_player_7` INTEGER REFERENCES `Player`(`player_api_id`),\n  `away_player_8` INTEGER REFERENCES `Player`(`player_api_id`),\n  `away_player_9` INTEGER REFERENCES `Player`(`player_api_id`),\n  `away_player_10` INTEGER REFERENCES `Player`(`player_api_id`),\n  `away_player_11` INTEGER REFERENCES `Player`(`player_api_id`),\n  `goal` TEXT,\n  `shoton` TEXT,\n  `shotoff` TEXT,\n  `foulcommit` TEXT,\n  `card` TEXT,\n  `cross` TEXT,\n  `corner` TEXT,\n  `possession` TEXT,\n  `B365H` REAL,\n  `B365D` REAL,\n  `B365A` REAL,\n  `BWH` REAL,\n  `BWD` REAL,\n  `BWA` REAL,\n  `IWH` REAL,\n  `IWD` REAL,\n  `IWA` REAL,\n  `LBH` REAL,\n  `LBD` REAL,\n  `LBA` REAL,\n  `PSH` REAL,\n  `PSD` REAL,\n  `PSA` REAL,\n  `WHH` REAL,\n  `WHD` REAL,\n  `WHA` REAL,\n  `SJH` REAL,\n  `SJD` REAL,\n  `SJA` REAL,\n  `VCH` REAL,\n  `VCD` REAL,\n  `VCA` REAL,\n  `GBH` REAL,\n  `GBD` REAL,\n  `GBA` REAL,\n  `BSH` REAL,\n  `BSD` REAL,\n  `BSA` REAL,\n  PRIMARY KEY (`id`)\n);\n\nQuestion:\nList down most tallest players' name.\n\nEvidence:\ntallest refers to rank based on the height in descending order; Most tallest players refers to rank = 1",
+    "answer": "SELECT player_name FROM (SELECT player_name, height, DENSE_RANK() OVER (ORDER BY height DESC) as rank FROM Player) WHERE rank = 1",
+    "prefix_hints": {
+      "hint_1": "Use the `Player` table because it contains both each player's name and height.",
+      "hint_2": "No joins are required; rank all rows directly within this single table.",
+      "hint_3": "Order heights from greatest to least inside a window function so the tallest height receives rank 1.",
+      "hint_4": "In a subquery, compute `DENSE_RANK() OVER (ORDER BY height DESC)` and assign it an alias such as `rank`; then filter the outer query with `WHERE rank = 1` to retain ties.",
+      "hint_5": "Project only `player_name` from the filtered ranked result."
+    },
+    "metadata": {
+      "source": "bird",
+      "split": "dev",
+      "db_id": "european_football_2",
+      "question": "List down most tallest players' name.",
+      "evidence": "tallest refers to rank based on the height in descending order; Most tallest players refers to rank = 1",
+      "difficulty": "simple",
+      "question_id": 1116
+    },
+    "original_source_file": "primitives_bird_dev.json",
+    "hint_stats": {
+      "tokens": [
+        17,
+        14,
+        19,
+        45,
+        12
+      ],
+      "total_tokens": 107,
+      "avg_tokens": 21.4,
+      "max_tokens": 45,
+      "distribution": [
+        15.9,
+        13.1,
+        17.8,
+        42.1,
+        11.2
+      ]
+    }
+  },
+  {
+    "index": 11,
+    "variant": "synthea",
+    "level": null,
+    "problem": "Database Schema:\nCREATE TABLE `all_prevalences` (\n  `ITEM` TEXT,\n  `POPULATION TYPE` TEXT,\n  `OCCURRENCES` INTEGER,\n  `POPULATION COUNT` INTEGER,\n  `PREVALENCE RATE` REAL,\n  `PREVALENCE PERCENTAGE` REAL,\n  PRIMARY KEY (`ITEM`)\n);\n\nCREATE TABLE `patients` (\n  `patient` TEXT,\n  `birthdate` DATE,\n  `deathdate` DATE,\n  `ssn` TEXT,\n  `drivers` TEXT,\n  `passport` TEXT,\n  `prefix` TEXT,\n  `first` TEXT,\n  `last` TEXT,\n  `suffix` TEXT,\n  `maiden` TEXT,\n  `marital` TEXT,\n  `race` TEXT,\n  `ethnicity` TEXT,\n  `gender` TEXT,\n  `birthplace` TEXT,\n  `address` TEXT,\n  PRIMARY KEY (`patient`)\n);\n\nCREATE TABLE `encounters` (\n  `ID` TEXT,\n  `DATE` DATE,\n  `PATIENT` TEXT REFERENCES `patients`(`patient`),\n  `CODE` INTEGER,\n  `DESCRIPTION` TEXT,\n  `REASONCODE` INTEGER,\n  `REASONDESCRIPTION` TEXT,\n  PRIMARY KEY (`ID`)\n);\n\nCREATE TABLE `allergies` (\n  `START` TEXT,\n  `STOP` TEXT,\n  `PATIENT` TEXT REFERENCES `patients`(`patient`),\n  `ENCOUNTER` TEXT REFERENCES `encounters`(`ID`),\n  `CODE` INTEGER,\n  `DESCRIPTION` TEXT,\n  PRIMARY KEY (`PATIENT`, `ENCOUNTER`, `CODE`)\n);\n\nCREATE TABLE `careplans` (\n  `ID` TEXT,\n  `START` DATE,\n  `STOP` DATE,\n  `PATIENT` TEXT REFERENCES `patients`(`patient`),\n  `ENCOUNTER` TEXT REFERENCES `encounters`(`ID`),\n  `CODE` REAL,\n  `DESCRIPTION` TEXT,\n  `REASONCODE` INTEGER,\n  `REASONDESCRIPTION` TEXT\n);\n\nCREATE TABLE `conditions` (\n  `START` DATE,\n  `STOP` DATE,\n  `PATIENT` TEXT REFERENCES `patients`(`patient`),\n  `ENCOUNTER` TEXT REFERENCES `encounters`(`ID`),\n  `CODE` INTEGER,\n  `DESCRIPTION` TEXT REFERENCES `all_prevalences`(`ITEM`)\n);\n\nCREATE TABLE `immunizations` (\n  `DATE` DATE,\n  `PATIENT` TEXT REFERENCES `patients`(`patient`),\n  `ENCOUNTER` TEXT REFERENCES `encounters`(`ID`),\n  `CODE` INTEGER,\n  `DESCRIPTION` TEXT,\n  PRIMARY KEY (`DATE`, `PATIENT`, `ENCOUNTER`, `CODE`)\n);\n\nCREATE TABLE `medications` (\n  `START` DATE,\n  `STOP` DATE,\n  `PATIENT` TEXT REFERENCES `patients`(`patient`),\n  `ENCOUNTER` TEXT REFERENCES `encounters`(`ID`),\n  `CODE` INTEGER,\n  `DESCRIPTION` TEXT,\n  `REASONCODE` INTEGER,\n  `REASONDESCRIPTION` TEXT,\n  PRIMARY KEY (`START`, `PATIENT`, `ENCOUNTER`, `CODE`)\n);\n\nCREATE TABLE `observations` (\n  `DATE` DATE,\n  `PATIENT` TEXT REFERENCES `patients`(`patient`),\n  `ENCOUNTER` TEXT REFERENCES `encounters`(`ID`),\n  `CODE` TEXT,\n  `DESCRIPTION` TEXT,\n  `VALUE` REAL,\n  `UNITS` TEXT\n);\n\nCREATE TABLE `procedures` (\n  `DATE` DATE,\n  `PATIENT` TEXT REFERENCES `patients`(`patient`),\n  `ENCOUNTER` TEXT REFERENCES `encounters`(`ID`),\n  `CODE` INTEGER,\n  `DESCRIPTION` TEXT,\n  `REASONCODE` INTEGER,\n  `REASONDESCRIPTION` TEXT\n);\n\nCREATE TABLE `claims` (\n  `ID` TEXT,\n  `PATIENT` TEXT,\n  `BILLABLEPERIOD` DATE,\n  `ORGANIZATION` TEXT,\n  `ENCOUNTER` TEXT,\n  `DIAGNOSIS` TEXT,\n  `TOTAL` INTEGER,\n  PRIMARY KEY (`ID`)\n);\n\nQuestion:\nHow many times did Keven Kuhn receive DTaP immunization?\n\nEvidence:\nDTaP immunization refers to immunizations where DESCRIPTION = 'DTaP';",
+    "answer": "SELECT COUNT(T2.CODE) FROM patients AS T1 INNER JOIN immunizations AS T2 ON T1.patient = T2.PATIENT WHERE T1.first = 'Keven' AND T1.last = 'Kuhn' AND T2.DESCRIPTION = 'DTaP'",
+    "prefix_hints": {
+      "hint_1": "Use `patients` to identify Keven Kuhn and `immunizations` to examine vaccination records.",
+      "hint_2": "Connect each person to their immunizations with `INNER JOIN immunizations AS T2 ON T1.patient = T2.PATIENT`.",
+      "hint_3": "Restrict the patient rows with `T1.first = 'Keven' AND T1.last = 'Kuhn'`, and keep only records where `T2.DESCRIPTION = 'DTaP'`.",
+      "hint_4": "Count the matching immunization entries using `COUNT(T2.CODE)`; no grouping is needed because the question asks for one total.",
+      "hint_5": "Project only the aggregate count in the result, without adding ordering or additional columns."
+    },
+    "metadata": {
+      "source": "bird",
+      "split": "train",
+      "db_id": "synthea",
+      "question": "How many times did Keven Kuhn receive DTaP immunization?",
+      "evidence": "DTaP immunization refers to immunizations where DESCRIPTION = 'DTaP';",
+      "difficulty": null,
+      "question_id": 1424
+    },
+    "original_source_file": "primitives_bird_train.json",
+    "hint_stats": {
+      "tokens": [
+        21,
+        27,
+        42,
+        26,
+        16
+      ],
+      "total_tokens": 132,
+      "avg_tokens": 26.4,
+      "max_tokens": 42,
+      "distribution": [
+        15.9,
+        20.5,
+        31.8,
+        19.7,
+        12.1
+      ]
+    }
+  },
+  {
+    "index": 12,
+    "variant": "retails",
+    "level": null,
+    "problem": "Database Schema:\nCREATE TABLE `customer` (\n  `c_custkey` INTEGER,\n  `c_mktsegment` TEXT,\n  `c_nationkey` INTEGER REFERENCES `nation`(`n_nationkey`),\n  `c_name` TEXT,\n  `c_address` TEXT,\n  `c_phone` TEXT,\n  `c_acctbal` REAL,\n  `c_comment` TEXT,\n  PRIMARY KEY (`c_custkey`)\n);\n\nCREATE TABLE `lineitem` (\n  `l_shipdate` DATE,\n  `l_orderkey` INTEGER REFERENCES `orders`(`o_orderkey`),\n  `l_discount` REAL,\n  `l_extendedprice` REAL,\n  `l_suppkey` INTEGER REFERENCES `partsupp`(`ps_suppkey`),\n  `l_quantity` INTEGER,\n  `l_returnflag` TEXT,\n  `l_partkey` INTEGER REFERENCES `partsupp`(`ps_partkey`),\n  `l_linestatus` TEXT,\n  `l_tax` REAL,\n  `l_commitdate` DATE,\n  `l_receiptdate` DATE,\n  `l_shipmode` TEXT,\n  `l_linenumber` INTEGER,\n  `l_shipinstruct` TEXT,\n  `l_comment` TEXT,\n  PRIMARY KEY (`l_orderkey`, `l_linenumber`)\n);\n\nCREATE TABLE `nation` (\n  `n_nationkey` INTEGER,\n  `n_name` TEXT,\n  `n_regionkey` INTEGER REFERENCES `region`(`r_regionkey`),\n  `n_comment` TEXT,\n  PRIMARY KEY (`n_nationkey`)\n);\n\nCREATE TABLE `orders` (\n  `o_orderdate` DATE,\n  `o_orderkey` INTEGER,\n  `o_custkey` INTEGER REFERENCES `customer`(`c_custkey`),\n  `o_orderpriority` TEXT,\n  `o_shippriority` INTEGER,\n  `o_clerk` TEXT,\n  `o_orderstatus` TEXT,\n  `o_totalprice` REAL,\n  `o_comment` TEXT,\n  PRIMARY KEY (`o_orderkey`)\n);\n\nCREATE TABLE `part` (\n  `p_partkey` INTEGER,\n  `p_type` TEXT,\n  `p_size` INTEGER,\n  `p_brand` TEXT,\n  `p_name` TEXT,\n  `p_container` TEXT,\n  `p_mfgr` TEXT,\n  `p_retailprice` REAL,\n  `p_comment` TEXT,\n  PRIMARY KEY (`p_partkey`)\n);\n\nCREATE TABLE `partsupp` (\n  `ps_partkey` INTEGER REFERENCES `part`(`p_partkey`),\n  `ps_suppkey` INTEGER REFERENCES `supplier`(`s_suppkey`),\n  `ps_supplycost` REAL,\n  `ps_availqty` INTEGER,\n  `ps_comment` TEXT,\n  PRIMARY KEY (`ps_partkey`, `ps_suppkey`)\n);\n\nCREATE TABLE `region` (\n  `r_regionkey` INTEGER,\n  `r_name` TEXT,\n  `r_comment` TEXT,\n  PRIMARY KEY (`r_regionkey`)\n);\n\nCREATE TABLE `supplier` (\n  `s_suppkey` INTEGER,\n  `s_nationkey` INTEGER REFERENCES `nation`(`n_nationkey`),\n  `s_comment` TEXT,\n  `s_name` TEXT,\n  `s_address` TEXT,\n  `s_phone` TEXT,\n  `s_acctbal` REAL,\n  PRIMARY KEY (`s_suppkey`)\n);\n\nQuestion:\nWhat is the total amount of tax charged for the order placed by customer 88931 on 7/13/994?\n\nEvidence:\ntotal amount of tax refers to sum(multiply(multiply(l_extendedprice, subtract(1, l_discount)), add(1, l_tax))); customer 88931 refers to o_custkey = 88931; on 7/13/1994 refers to o_orderdate = '1994-07-13'",
+    "answer": "SELECT SUM(T2.l_extendedprice * (1 - T2.l_discount) * (1 + T2.l_tax)) FROM orders AS T1 INNER JOIN lineitem AS T2 ON T1.o_orderkey = T2.l_orderkey WHERE T1.o_custkey = 88931 AND T1.o_orderdate = '1994-07-13'",
+    "prefix_hints": {
+      "hint_1": "Use `orders` to identify the customer's order on the specified date and `lineitem` to access its price, discount, and tax values.",
+      "hint_2": "Connect each qualifying order to its line items with `INNER JOIN lineitem AS T2 ON T1.o_orderkey = T2.l_orderkey`.",
+      "hint_3": "Restrict the orders using `T1.o_custkey = 88931` and the normalized date condition `T1.o_orderdate = '1994-07-13'`.",
+      "hint_4": "For each line item, calculate the tax-inclusive discounted amount as `l_extendedprice * (1 - l_discount) * (1 + l_tax)`, then apply `SUM(...)` across all matching items.",
+      "hint_5": "Project only the resulting aggregate value; no grouping or ordering is needed because the requested output is one total."
+    },
+    "metadata": {
+      "source": "bird",
+      "split": "train",
+      "db_id": "retails",
+      "question": "What is the total amount of tax charged for the order placed by customer 88931 on 7/13/994?",
+      "evidence": "total amount of tax refers to sum(multiply(multiply(l_extendedprice, subtract(1, l_discount)), add(1, l_tax))); customer 88931 refers to o_custkey = 88931; on 7/13/1994 refers to o_orderdate = '1994-07-13'",
+      "difficulty": null,
+      "question_id": 6912
+    },
+    "original_source_file": "primitives_bird_train.json",
+    "hint_stats": {
+      "tokens": [
+        30,
+        30,
+        37,
+        43,
+        21
+      ],
+      "total_tokens": 161,
+      "avg_tokens": 32.2,
+      "max_tokens": 43,
+      "distribution": [
+        18.6,
+        18.6,
+        23.0,
+        26.7,
+        13.0
+      ]
+    }
+  },
+  {
+    "index": 13,
+    "variant": "movies_4",
+    "level": null,
+    "problem": "Database Schema:\nCREATE TABLE `country` (\n  `country_id` INTEGER,\n  `country_iso_code` TEXT,\n  `country_name` TEXT,\n  PRIMARY KEY (`country_id`)\n);\n\nCREATE TABLE `department` (\n  `department_id` INTEGER,\n  `department_name` TEXT,\n  PRIMARY KEY (`department_id`)\n);\n\nCREATE TABLE `gender` (\n  `gender_id` INTEGER,\n  `gender` TEXT,\n  PRIMARY KEY (`gender_id`)\n);\n\nCREATE TABLE `genre` (\n  `genre_id` INTEGER,\n  `genre_name` TEXT,\n  PRIMARY KEY (`genre_id`)\n);\n\nCREATE TABLE `keyword` (\n  `keyword_id` INTEGER,\n  `keyword_name` TEXT,\n  PRIMARY KEY (`keyword_id`)\n);\n\nCREATE TABLE `language` (\n  `language_id` INTEGER,\n  `language_code` TEXT,\n  `language_name` TEXT,\n  PRIMARY KEY (`language_id`)\n);\n\nCREATE TABLE `language_role` (\n  `role_id` INTEGER,\n  `language_role` TEXT,\n  PRIMARY KEY (`role_id`)\n);\n\nCREATE TABLE `movie` (\n  `movie_id` INTEGER,\n  `title` TEXT,\n  `budget` INTEGER,\n  `homepage` TEXT,\n  `overview` TEXT,\n  `popularity` REAL,\n  `release_date` DATE,\n  `revenue` INTEGER,\n  `runtime` INTEGER,\n  `movie_status` TEXT,\n  `tagline` TEXT,\n  `vote_average` REAL,\n  `vote_count` INTEGER,\n  PRIMARY KEY (`movie_id`)\n);\n\nCREATE TABLE `movie_genres` (\n  `movie_id` INTEGER REFERENCES `movie`(`movie_id`),\n  `genre_id` INTEGER REFERENCES `genre`(`genre_id`)\n);\n\nCREATE TABLE `movie_languages` (\n  `movie_id` INTEGER REFERENCES `movie`(`movie_id`),\n  `language_id` INTEGER REFERENCES `language`(`language_id`),\n  `language_role_id` INTEGER REFERENCES `language_role`(`role_id`)\n);\n\nCREATE TABLE `person` (\n  `person_id` INTEGER,\n  `person_name` TEXT,\n  PRIMARY KEY (`person_id`)\n);\n\nCREATE TABLE `movie_crew` (\n  `movie_id` INTEGER REFERENCES `movie`(`movie_id`),\n  `person_id` INTEGER REFERENCES `person`(`person_id`),\n  `department_id` INTEGER REFERENCES `department`(`department_id`),\n  `job` TEXT\n);\n\nCREATE TABLE `production_company` (\n  `company_id` INTEGER,\n  `company_name` TEXT,\n  PRIMARY KEY (`company_id`)\n);\n\nCREATE TABLE `production_country` (\n  `movie_id` INTEGER REFERENCES `movie`(`movie_id`),\n  `country_id` INTEGER REFERENCES `country`(`country_id`)\n);\n\nCREATE TABLE `movie_cast` (\n  `movie_id` INTEGER REFERENCES `movie`(`movie_id`),\n  `person_id` INTEGER REFERENCES `person`(`person_id`),\n  `character_name` TEXT,\n  `gender_id` INTEGER REFERENCES `gender`(`gender_id`),\n  `cast_order` INTEGER\n);\n\nCREATE TABLE `movie_keywords` (\n  `movie_id` INTEGER,\n  `keyword_id` INTEGER\n);\n\nCREATE TABLE `movie_company` (\n  `movie_id` INTEGER,\n  `company_id` INTEGER\n);\n\nQuestion:\nWhat is the longest runtime of all movies?\n\nEvidence:\nlongest runtime refers to max(runtime)",
+    "answer": "SELECT MAX(runtime) FROM movie",
+    "prefix_hints": {
+      "hint_1": "The required runtime values are stored in the `movie` table.",
+      "hint_2": "No joins are necessary because the question asks about all movies and `runtime` is directly available in that table.",
+      "hint_3": "Do not add a `WHERE` clause, since no subset of movies is specified.",
+      "hint_4": "Apply the aggregate function `MAX(runtime)` to find the greatest runtime value.",
+      "hint_5": "Project only the maximum-runtime aggregate in the result."
+    },
+    "metadata": {
+      "source": "bird",
+      "split": "train",
+      "db_id": "movies_4",
+      "question": "What is the longest runtime of all movies?",
+      "evidence": "longest runtime refers to max(runtime)",
+      "difficulty": null,
+      "question_id": 520
+    },
+    "original_source_file": "primitives_bird_train.json",
+    "hint_stats": {
+      "tokens": [
+        13,
+        22,
+        17,
+        15,
+        10
+      ],
+      "total_tokens": 77,
+      "avg_tokens": 15.4,
+      "max_tokens": 22,
+      "distribution": [
+        16.9,
+        28.6,
+        22.1,
+        19.5,
+        13.0
+      ]
+    }
+  },
+  {
+    "index": 14,
+    "variant": "flight_2",
+    "level": "medium",
+    "problem": "Database Schema:\nCREATE TABLE `airlines` (\n  `uid` NUMBER,\n  `Airline` TEXT,\n  `Abbreviation` TEXT,\n  `Country` TEXT,\n  PRIMARY KEY (`uid`)\n);\n\nCREATE TABLE `airports` (\n  `City` TEXT,\n  `AirportCode` TEXT,\n  `AirportName` TEXT,\n  `Country` TEXT,\n  `CountryAbbrev` TEXT,\n  PRIMARY KEY (`AirportCode`)\n);\n\nCREATE TABLE `flights` (\n  `Airline` NUMBER,\n  `FlightNo` NUMBER,\n  `SourceAirport` TEXT REFERENCES `airports`(`AirportCode`),\n  `DestAirport` TEXT REFERENCES `airports`(`AirportCode`),\n  PRIMARY KEY (`Airline`)\n);\n\nQuestion:\nReturn the number of flights arriving in Aberdeen.",
+    "answer": "SELECT count(*) FROM FLIGHTS AS T1 JOIN AIRPORTS AS T2 ON T1.DestAirport  =  T2.AirportCode WHERE T2.City  =  \"Aberdeen\"",
+    "prefix_hints": {
+      "hint_1": "Use `flights` for flight records and `airports` to identify which destination is located in Aberdeen.",
+      "hint_2": "Match each flight’s destination to its airport using `JOIN airports AS T2 ON T1.DestAirport = T2.AirportCode`.",
+      "hint_3": "Restrict the joined rows to destination airports in the requested city with `WHERE T2.City = 'Aberdeen'`.",
+      "hint_4": "Apply `COUNT(*)` to the filtered rows to calculate how many arriving flights there are.",
+      "hint_5": "Project only the aggregate count; no grouping or ordering is needed because the desired output is a single total."
+    },
+    "metadata": {
+      "source": "sparc",
+      "split": "dev",
+      "db_id": "flight_2",
+      "question": "Return the number of flights arriving in Aberdeen.",
+      "evidence": null,
+      "difficulty": "medium",
+      "interaction_length": 2,
+      "intermediate_turns": [
+        {
+          "turn_idx": 0,
+          "question": "What are all the flights arriving in Aberdeen.",
+          "sql": "SELECT * FROM FLIGHTS AS T1 JOIN AIRPORTS AS T2 ON T1.DestAirport  =  T2.AirportCode WHERE T2.City  =  \"Aberdeen\""
+        },
+        {
+          "turn_idx": 1,
+          "question": "How many are there?",
+          "sql": "SELECT count(*) FROM FLIGHTS AS T1 JOIN AIRPORTS AS T2 ON T1.DestAirport  =  T2.AirportCode WHERE T2.City  =  \"Aberdeen\""
+        }
+      ]
+    },
+    "original_source_file": "primitives_sparc_dev.json",
+    "hint_stats": {
+      "tokens": [
+        22,
+        29,
+        25,
+        18,
+        21
+      ],
+      "total_tokens": 115,
+      "avg_tokens": 23.0,
+      "max_tokens": 29,
+      "distribution": [
+        19.1,
+        25.2,
+        21.7,
+        15.7,
+        18.3
+      ]
+    }
+  },
+  {
+    "index": 15,
+    "variant": "pets_1",
+    "level": "extra",
+    "problem": "Database Schema:\nCREATE TABLE `Student` (\n  `StuID` NUMBER,\n  `LName` TEXT,\n  `Fname` TEXT,\n  `Age` NUMBER,\n  `Sex` TEXT,\n  `Major` NUMBER,\n  `Advisor` NUMBER,\n  `city_code` TEXT,\n  PRIMARY KEY (`StuID`)\n);\n\nCREATE TABLE `Has_Pet` (\n  `StuID` NUMBER REFERENCES `Student`(`StuID`),\n  `PetID` NUMBER REFERENCES `Pets`(`PetID`)\n);\n\nCREATE TABLE `Pets` (\n  `PetID` NUMBER,\n  `PetType` TEXT,\n  `pet_age` NUMBER,\n  `weight` NUMBER,\n  PRIMARY KEY (`PetID`)\n);\n\nQuestion:\nWhat are the students' first names who have both cats and dogs as pets?",
+    "answer": "SELECT T1.Fname FROM student AS T1 JOIN has_pet AS T2 ON T1.stuid  =  T2.stuid JOIN pets AS T3 ON T3.petid  =  T2.petid WHERE T3.pettype  =  'cat' INTERSECT SELECT T1.Fname FROM student AS T1 JOIN has_pet AS T2 ON T1.stuid  =  T2.stuid JOIN pets AS T3 ON T3.petid  =  T2.petid WHERE T3.pettype  =  'dog'",
+    "prefix_hints": {
+      "hint_1": "Use `Student` for first names, `Has_Pet` to associate students with their pets, and `Pets` to identify each pet’s type.",
+      "hint_2": "For each pet-type lookup, join `Student` to `Has_Pet` on `StuID`, then join `Pets` on `PetID`.",
+      "hint_3": "Build one result set with `WHERE PetType = 'cat'` and a second equivalent result set with `WHERE PetType = 'dog'`.",
+      "hint_4": "Combine the two result sets with `INTERSECT` so only students represented in both are retained.",
+      "hint_5": "Project the student’s `Fname` in both branches of the intersection, ensuring their select lists have matching columns."
+    },
+    "metadata": {
+      "source": "sparc",
+      "split": "dev",
+      "db_id": "pets_1",
+      "question": "What are the students' first names who have both cats and dogs as pets?",
+      "evidence": null,
+      "difficulty": "extra",
+      "interaction_length": 3,
+      "intermediate_turns": [
+        {
+          "turn_idx": 0,
+          "question": "Which students have a dog as their type of pet?",
+          "sql": "SELECT * FROM student AS T1 JOIN has_pet AS T2 ON T1.stuid  =  T2.stuid JOIN pets AS T3 ON T3.petid  =  T2.petid WHERE T3.pettype  =  'dog'"
+        },
+        {
+          "turn_idx": 1,
+          "question": "Who also has a cat?",
+          "sql": "SELECT * FROM student AS T1 JOIN has_pet AS T2 ON T1.stuid  =  T2.stuid JOIN pets AS T3 ON T3.petid  =  T2.petid WHERE T3.pettype  =  'cat' INTERSECT SELECT * FROM student AS T1 JOIN has_pet AS T2 ON T1.stuid  =  T2.stuid JOIN pets AS T3 ON T3.petid  =  T2.petid WHERE T3.pettype  =  'dog'"
+        },
+        {
+          "turn_idx": 2,
+          "question": "What are their first names?",
+          "sql": "SELECT T1.Fname FROM student AS T1 JOIN has_pet AS T2 ON T1.stuid  =  T2.stuid JOIN pets AS T3 ON T3.petid  =  T2.petid WHERE T3.pettype  =  'cat' INTERSECT SELECT T1.Fname FROM student AS T1 JOIN has_pet AS T2 ON T1.stuid  =  T2.stuid JOIN pets AS T3 ON T3.petid  =  T2.petid WHERE T3.pettype  =  'dog'"
+        }
+      ]
+    },
+    "original_source_file": "primitives_sparc_dev.json",
+    "hint_stats": {
+      "tokens": [
+        31,
+        32,
+        30,
+        20,
+        23
+      ],
+      "total_tokens": 136,
+      "avg_tokens": 27.2,
+      "max_tokens": 32,
+      "distribution": [
+        22.8,
+        23.5,
+        22.1,
+        14.7,
+        16.9
+      ]
+    }
+  },
+  {
+    "index": 16,
+    "variant": "customers_and_invoices",
+    "level": "hard",
+    "problem": "Database Schema:\nCREATE TABLE `Customers` (\n  `customer_id` NUMBER,\n  `customer_first_name` TEXT,\n  `customer_middle_initial` TEXT,\n  `customer_last_name` TEXT,\n  `gender` TEXT,\n  `email_address` TEXT,\n  `login_name` TEXT,\n  `login_password` TEXT,\n  `phone_number` TEXT,\n  `town_city` TEXT,\n  `state_county_province` TEXT,\n  `country` TEXT,\n  PRIMARY KEY (`customer_id`)\n);\n\nCREATE TABLE `Orders` (\n  `order_id` NUMBER,\n  `customer_id` NUMBER REFERENCES `Customers`(`customer_id`),\n  `date_order_placed` TIME,\n  `order_details` TEXT,\n  PRIMARY KEY (`order_id`)\n);\n\nCREATE TABLE `Invoices` (\n  `invoice_number` NUMBER,\n  `order_id` NUMBER REFERENCES `Orders`(`order_id`),\n  `invoice_date` TIME,\n  PRIMARY KEY (`invoice_number`)\n);\n\nCREATE TABLE `Accounts` (\n  `account_id` NUMBER,\n  `customer_id` NUMBER REFERENCES `Customers`(`customer_id`),\n  `date_account_opened` TIME,\n  `account_name` TEXT,\n  `other_account_details` TEXT,\n  PRIMARY KEY (`account_id`)\n);\n\nCREATE TABLE `Product_Categories` (\n  `production_type_code` TEXT,\n  `product_type_description` TEXT,\n  `vat_rating` NUMBER,\n  PRIMARY KEY (`production_type_code`)\n);\n\nCREATE TABLE `Products` (\n  `product_id` NUMBER,\n  `parent_product_id` NUMBER,\n  `production_type_code` TEXT REFERENCES `Product_Categories`(`production_type_code`),\n  `unit_price` NUMBER,\n  `product_name` TEXT,\n  `product_color` TEXT,\n  `product_size` TEXT,\n  PRIMARY KEY (`product_id`)\n);\n\nCREATE TABLE `Financial_Transactions` (\n  `transaction_id` NUMBER,\n  `account_id` NUMBER REFERENCES `Accounts`(`account_id`),\n  `invoice_number` NUMBER REFERENCES `Invoices`(`invoice_number`),\n  `transaction_type` TEXT,\n  `transaction_date` TIME,\n  `transaction_amount` NUMBER,\n  `transaction_comment` TEXT,\n  `other_transaction_details` TEXT\n);\n\nCREATE TABLE `Order_Items` (\n  `order_item_id` NUMBER,\n  `order_id` NUMBER REFERENCES `Orders`(`order_id`),\n  `product_id` NUMBER REFERENCES `Products`(`product_id`),\n  `product_quantity` TEXT,\n  `other_order_item_details` TEXT,\n  PRIMARY KEY (`order_item_id`)\n);\n\nCREATE TABLE `Invoice_Line_Items` (\n  `order_item_id` NUMBER REFERENCES `Order_Items`(`order_item_id`),\n  `invoice_number` NUMBER REFERENCES `Invoices`(`invoice_number`),\n  `product_id` NUMBER REFERENCES `Products`(`product_id`),\n  `product_title` TEXT,\n  `product_quantity` TEXT,\n  `product_price` NUMBER,\n  `derived_product_cost` NUMBER,\n  `derived_vat_payable` NUMBER,\n  `derived_total_cost` NUMBER\n);\n\nQuestion:\nShow all product names without an order.",
+    "answer": "SELECT product_name FROM Products EXCEPT SELECT T1.product_name FROM Products AS T1 JOIN Order_items AS T2 ON T1.product_id  =  T2.product_id",
+    "prefix_hints": {
+      "hint_1": "Use `Products` to obtain the complete set of product names, and use `Order_Items` to determine which products have appeared in an order.",
+      "hint_2": "Connect ordered items to their product records with `Products.product_id = Order_Items.product_id`.",
+      "hint_3": "No additional `WHERE` condition is necessary because the absence of an order will be determined through set subtraction.",
+      "hint_4": "Build one result containing every `product_name`, then use `EXCEPT` to remove the result containing names reached through the join to `Order_Items`.",
+      "hint_5": "Project only `product_name` from both sides of the set operation; no ordering or limit is required."
+    },
+    "metadata": {
+      "source": "sparc",
+      "split": "train",
+      "db_id": "customers_and_invoices",
+      "question": "Show all product names without an order.",
+      "evidence": null,
+      "difficulty": "hard",
+      "interaction_length": 3,
+      "intermediate_turns": [
+        {
+          "turn_idx": 0,
+          "question": "Show all product names",
+          "sql": "SELECT product_name FROM Products"
+        },
+        {
+          "turn_idx": 1,
+          "question": "Which of them has an order?",
+          "sql": "SELECT T1.product_name FROM Products AS T1 JOIN Order_items AS T2 ON T1.product_id  =  T2.product_id"
+        },
+        {
+          "turn_idx": 2,
+          "question": "Which of them don't?",
+          "sql": "SELECT product_name FROM Products EXCEPT SELECT T1.product_name FROM Products AS T1 JOIN Order_items AS T2 ON T1.product_id  =  T2.product_id"
+        }
+      ]
+    },
+    "original_source_file": "primitives_sparc_train.json",
+    "hint_stats": {
+      "tokens": [
+        29,
+        18,
+        21,
+        30,
+        21
+      ],
+      "total_tokens": 119,
+      "avg_tokens": 23.8,
+      "max_tokens": 30,
+      "distribution": [
+        24.4,
+        15.1,
+        17.6,
+        25.2,
+        17.6
+      ]
+    }
+  },
+  {
+    "index": 17,
+    "variant": "perpetrator",
+    "level": "easy",
+    "problem": "Database Schema:\nCREATE TABLE `perpetrator` (\n  `Perpetrator_ID` NUMBER,\n  `People_ID` NUMBER REFERENCES `people`(`People_ID`),\n  `Date` TEXT,\n  `Year` NUMBER,\n  `Location` TEXT,\n  `Country` TEXT,\n  `Killed` NUMBER,\n  `Injured` NUMBER,\n  PRIMARY KEY (`Perpetrator_ID`)\n);\n\nCREATE TABLE `people` (\n  `People_ID` NUMBER,\n  `Name` TEXT,\n  `Height` NUMBER,\n  `Weight` NUMBER,\n  `Home Town` TEXT,\n  PRIMARY KEY (`People_ID`)\n);\n\nQuestion:\nWhat is the average number of people injured by all perpetrators?",
+    "answer": "SELECT avg(Injured) FROM perpetrator;",
+    "prefix_hints": {
+      "hint_1": "The required injury counts are stored in the `Injured` column of the `perpetrator` table.",
+      "hint_2": "No join to `people` is necessary because the question does not ask for any personal details.",
+      "hint_3": "Use all perpetrator records, so no `WHERE` condition is needed.",
+      "hint_4": "Apply the `AVG` aggregate function to `Injured`; this directly computes the mean rather than separately dividing the total by the perpetrator count.",
+      "hint_5": "Return only the resulting average value in the `SELECT` output."
+    },
+    "metadata": {
+      "source": "sparc",
+      "split": "train",
+      "db_id": "perpetrator",
+      "question": "What is the average number of people injured by all perpetrators?",
+      "evidence": null,
+      "difficulty": "easy",
+      "interaction_length": 3,
+      "intermediate_turns": [
+        {
+          "turn_idx": 0,
+          "question": "How many people are injured in total by all perpetrators?",
+          "sql": "SELECT sum(Injured) FROM perpetrator;"
+        },
+        {
+          "turn_idx": 1,
+          "question": "How many perpetrators are there?",
+          "sql": "SELECT count(*) FROM perpetrator;"
+        },
+        {
+          "turn_idx": 2,
+          "question": "What is the average number of people injured by all perpetrators?",
+          "sql": "SELECT avg(Injured) FROM perpetrator;"
+        }
+      ]
+    },
+    "original_source_file": "primitives_sparc_train.json",
+    "hint_stats": {
+      "tokens": [
+        23,
+        19,
+        14,
+        29,
+        13
+      ],
+      "total_tokens": 98,
+      "avg_tokens": 19.6,
+      "max_tokens": 29,
+      "distribution": [
+        23.5,
+        19.4,
+        14.3,
+        29.6,
+        13.3
+      ]
+    }
+  },
+  {
+    "index": 18,
+    "variant": "student_transcripts_tracking",
+    "level": "easy",
+    "problem": "Database Schema:\nCREATE TABLE `Addresses` (\n  `address_id` NUMBER,\n  `line_1` TEXT,\n  `line_2` TEXT,\n  `line_3` TEXT,\n  `city` TEXT,\n  `zip_postcode` TEXT,\n  `state_province_county` TEXT,\n  `country` TEXT,\n  `other_address_details` TEXT,\n  PRIMARY KEY (`address_id`)\n);\n\nCREATE TABLE `Courses` (\n  `course_id` NUMBER,\n  `course_name` TEXT,\n  `course_description` TEXT,\n  `other_details` TEXT,\n  PRIMARY KEY (`course_id`)\n);\n\nCREATE TABLE `Departments` (\n  `department_id` NUMBER,\n  `department_name` TEXT,\n  `department_description` TEXT,\n  `other_details` TEXT,\n  PRIMARY KEY (`department_id`)\n);\n\nCREATE TABLE `Degree_Programs` (\n  `degree_program_id` NUMBER,\n  `department_id` NUMBER REFERENCES `Departments`(`department_id`),\n  `degree_summary_name` TEXT,\n  `degree_summary_description` TEXT,\n  `other_details` TEXT,\n  PRIMARY KEY (`degree_program_id`)\n);\n\nCREATE TABLE `Sections` (\n  `section_id` NUMBER,\n  `course_id` NUMBER REFERENCES `Courses`(`course_id`),\n  `section_name` TEXT,\n  `section_description` TEXT,\n  `other_details` TEXT,\n  PRIMARY KEY (`section_id`)\n);\n\nCREATE TABLE `Semesters` (\n  `semester_id` NUMBER,\n  `semester_name` TEXT,\n  `semester_description` TEXT,\n  `other_details` TEXT,\n  PRIMARY KEY (`semester_id`)\n);\n\nCREATE TABLE `Students` (\n  `student_id` NUMBER,\n  `current_address_id` NUMBER REFERENCES `Addresses`(`address_id`),\n  `permanent_address_id` NUMBER REFERENCES `Addresses`(`address_id`),\n  `first_name` TEXT,\n  `middle_name` TEXT,\n  `last_name` TEXT,\n  `cell_mobile_number` TEXT,\n  `email_address` TEXT,\n  `ssn` TEXT,\n  `date_first_registered` TIME,\n  `date_left` TIME,\n  `other_student_details` TEXT,\n  PRIMARY KEY (`student_id`)\n);\n\nCREATE TABLE `Student_Enrolment` (\n  `student_enrolment_id` NUMBER,\n  `degree_program_id` NUMBER REFERENCES `Degree_Programs`(`degree_program_id`),\n  `semester_id` NUMBER REFERENCES `Semesters`(`semester_id`),\n  `student_id` NUMBER REFERENCES `Students`(`student_id`),\n  `other_details` TEXT,\n  PRIMARY KEY (`student_enrolment_id`)\n);\n\nCREATE TABLE `Student_Enrolment_Courses` (\n  `student_course_id` NUMBER,\n  `course_id` NUMBER REFERENCES `Courses`(`course_id`),\n  `student_enrolment_id` NUMBER REFERENCES `Student_Enrolment`(`student_enrolment_id`),\n  PRIMARY KEY (`student_course_id`)\n);\n\nCREATE TABLE `Transcripts` (\n  `transcript_id` NUMBER,\n  `transcript_date` TIME,\n  `other_details` TEXT,\n  PRIMARY KEY (`transcript_id`)\n);\n\nCREATE TABLE `Transcript_Contents` (\n  `student_course_id` NUMBER REFERENCES `Student_Enrolment_Courses`(`student_course_id`),\n  `transcript_id` NUMBER REFERENCES `Transcripts`(`transcript_id`)\n);\n\nQuestion:\nFind the kind of program which most number of students are enrolled in?",
+    "answer": "SELECT T1.degree_summary_name FROM Degree_Programs AS T1 JOIN Student_Enrolment AS T2 ON T1.degree_program_id  =  T2.degree_program_id GROUP BY T1.degree_summary_name ORDER BY count(*) DESC LIMIT 1",
+    "prefix_hints": {
+      "hint_1": "Use `Degree_Programs` for the program name and `Student_Enrolment` to determine how many student enrolment records belong to each program.",
+      "hint_2": "Connect the tables with `Degree_Programs.degree_program_id = Student_Enrolment.degree_program_id`.",
+      "hint_3": "No row-level filter is needed because the comparison should include enrolments from every degree program represented in `Student_Enrolment`.",
+      "hint_4": "Group by `degree_summary_name`, count the enrolment rows in each group, and rank the groups with `ORDER BY COUNT(*) DESC`.",
+      "hint_5": "Return only the program's `degree_summary_name` and apply `LIMIT 1` to keep the program with the highest count."
+    },
+    "metadata": {
+      "source": "cosql",
+      "split": "dev",
+      "db_id": "student_transcripts_tracking",
+      "question": "Find the kind of program which most number of students are enrolled in?",
+      "evidence": null,
+      "difficulty": "easy",
+      "interaction_length": 2,
+      "intermediate_turns": [
+        {
+          "turn_idx": 0,
+          "question": "Which program had the least number of students enrolled?",
+          "sql": "SELECT T1.degree_summary_name FROM Degree_Programs AS T1 JOIN Student_Enrolment AS T2 ON T1.degree_program_id   =   T2.degree_program_id GROUP BY T1.degree_summary_name ORDER BY count ( * )  DESC LIMIT 1"
+        },
+        {
+          "turn_idx": 1,
+          "question": "What is the degree ID for architecto?",
+          "sql": "SELECT degree_program_id from Degree_Programs where degree_summary_description  =  'architecto'"
+        }
+      ]
+    },
+    "original_source_file": "primitives_cosql_dev.json",
+    "hint_stats": {
+      "tokens": [
+        31,
+        21,
+        26,
+        28,
+        26
+      ],
+      "total_tokens": 132,
+      "avg_tokens": 26.4,
+      "max_tokens": 31,
+      "distribution": [
+        23.5,
+        15.9,
+        19.7,
+        21.2,
+        19.7
+      ]
+    }
+  },
+  {
+    "index": 19,
+    "variant": "csu_1",
+    "level": "easy",
+    "problem": "Database Schema:\nCREATE TABLE `Campuses` (\n  `Id` NUMBER,\n  `Campus` TEXT,\n  `Location` TEXT,\n  `County` TEXT,\n  `Year` NUMBER,\n  PRIMARY KEY (`Id`)\n);\n\nCREATE TABLE `csu_fees` (\n  `Campus` NUMBER REFERENCES `Campuses`(`Id`),\n  `Year` NUMBER,\n  `CampusFee` NUMBER,\n  PRIMARY KEY (`Campus`)\n);\n\nCREATE TABLE `degrees` (\n  `Year` NUMBER,\n  `Campus` NUMBER REFERENCES `Campuses`(`Id`),\n  `Degrees` NUMBER,\n  PRIMARY KEY (`Year`)\n);\n\nCREATE TABLE `discipline_enrollments` (\n  `Campus` NUMBER REFERENCES `Campuses`(`Id`),\n  `Discipline` NUMBER,\n  `Year` NUMBER,\n  `Undergraduate` NUMBER,\n  `Graduate` NUMBER,\n  PRIMARY KEY (`Campus`)\n);\n\nCREATE TABLE `enrollments` (\n  `Campus` NUMBER REFERENCES `Campuses`(`Id`),\n  `Year` NUMBER,\n  `TotalEnrollment_AY` NUMBER,\n  `FTE_AY` NUMBER,\n  PRIMARY KEY (`Campus`)\n);\n\nCREATE TABLE `faculty` (\n  `Campus` NUMBER REFERENCES `Campuses`(`Id`),\n  `Year` NUMBER,\n  `Faculty` NUMBER\n);\n\nQuestion:\nWhich campus was opened between 1935 and 1939?",
+    "answer": "SELECT campus FROM campuses WHERE YEAR  >=  1935 AND YEAR  <=  1939",
+    "prefix_hints": {
+      "hint_1": "Use the `Campuses` table because it stores both campus names and opening years.",
+      "hint_2": "No joins are necessary; all required information is available in a single table.",
+      "hint_3": "Apply an inclusive lower-bound condition with `Year >= 1935`.",
+      "hint_4": "Add the inclusive upper-bound condition `Year <= 1939` using `AND`.",
+      "hint_5": "Project only the `Campus` column; no grouping or ordering is required."
+    },
+    "metadata": {
+      "source": "cosql",
+      "split": "train",
+      "db_id": "csu_1",
+      "question": "Which campus was opened between 1935 and 1939?",
+      "evidence": null,
+      "difficulty": "easy",
+      "interaction_length": 3,
+      "intermediate_turns": [
+        {
+          "turn_idx": 0,
+          "question": "What campuses were opened between 1935 and 1939?",
+          "sql": "SELECT campus FROM campuses WHERE YEAR   > =    1935 AND YEAR  < =   1939"
+        },
+        {
+          "turn_idx": 1,
+          "question": "What campuses were opened after that? | Do you mean opened after 1939? | Yes, please",
+          "sql": "SELECT campus FROM campuses WHERE YEAR  >  1939"
+        },
+        {
+          "turn_idx": 2,
+          "question": "How many total campuses were opened?",
+          "sql": "SELECT count ( * )  FROM campuses"
+        }
+      ]
+    },
+    "original_source_file": "primitives_cosql_train.json",
+    "hint_stats": {
+      "tokens": [
+        17,
+        15,
+        14,
+        17,
+        16
+      ],
+      "total_tokens": 79,
+      "avg_tokens": 15.8,
+      "max_tokens": 17,
+      "distribution": [
+        21.5,
+        19.0,
+        17.7,
+        21.5,
+        20.3
+      ]
+    }
+  }
+]

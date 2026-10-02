@@ -1,0 +1,45 @@
+# Files Created and Modified for Text-to-SQL Pipeline
+
+This file lists all files created or modified across task definition, reward function, interaction handlers, templates, configs, hint generation, primitives, and tests.
+
+## 1. Task Definition & Registry
+- `pipeline/tasks/__init__.py`: Registered `SqlTask` in `TASKS["sql"]`.
+- `pipeline/tasks/sql/task.py`: Full `SqlTask(BaseTask)` implementation (chat prompt formatting, SFT filtering, split handling, metrics aggregation, delegating verification to `reward_function.py`).
+
+## 2. Verl Reward Function & RL Interaction
+- `verl/recipe/sql/reward_function.py`: Single source of truth for SQLite query execution, connection pooling cache, gold query caching, opcode timeouts, row normalization, `<answer>` and `\boxed{...}` extraction, and reward scoring (`compute_score`, `compute_score_hint`).
+- `verl/verl/interactions/sql_hint_interaction.py`: Multi-turn RL hint interaction handler serving sequential hints on `<request></request>`.
+- `verl/examples/sglang_multiturn/config/interaction_config/sql_hint_interaction_config.yaml`: SGLang multi-turn interaction configuration for `sql_hint`.
+
+## 3. Pipeline Method Configs
+- `pipeline/configs/methods/sql/baseline.yaml`: Baseline method configuration for single-turn SQL generation without hints.
+- `pipeline/configs/methods/sql/hint.yaml`: Multi-turn hint method configuration with reward penalty and response masking.
+
+## 4. Prompt Templates
+- `pipeline/tasks/sql/templates/baseline/sft.txt`: Baseline prompt template for SFT training (`\boxed{...}` format).
+- `pipeline/tasks/sql/templates/baseline/rl.txt`: Baseline prompt template for RL training.
+- `pipeline/tasks/sql/templates/baseline/eval.txt`: Baseline prompt template for model evaluation.
+- `pipeline/tasks/sql/templates/hint/sft.txt`: Hint-enabled prompt template for SFT.
+- `pipeline/tasks/sql/templates/hint/rl.txt`: Multi-turn hint-enabled prompt template for RL.
+- `pipeline/tasks/sql/templates/hint/eval.txt`: Multi-turn hint-enabled prompt template for evaluation.
+
+## 5. Primitives & Hint Generation Scripts
+- `pipeline/tasks/sql/create_primitives.py`: Standardizes raw data from Spider, BIRD, SParC, and CoSQL into schema+question primitives with uniform Spider hardness calculation (`compute_uniform_spider_hardness`, `eval_sql_hardness_from_text`) and complexity tags (`multi_step`, `is_complex`).
+- `pipeline/tasks/sql/generate_hints.py`: Progressive 5-step hint generator using Azure OpenAI TRAPI supporting both `--hint-style conceptual` and `--hint-style partial_sql`.
+- `pipeline/tasks/sql/run_generate_hints.sh`: Bash orchestration runner for generating hints across splits overnight.
+- `pipeline/tasks/sql/combine_hints.py`: Combiner script merging generated hint files across splits and datasets.
+
+## 6. Generated Primitives Data
+- `data/sql/primitives_spider_train.json`
+- `data/sql/primitives_spider_dev.json`
+- `data/sql/primitives_bird_train.json`
+- `data/sql/primitives_bird_dev.json`
+- `data/sql/primitives_sparc_train.json`
+- `data/sql/primitives_sparc_dev.json`
+- `data/sql/primitives_cosql_train.json`
+- `data/sql/primitives_cosql_dev.json`
+- `data/sql/primitives_spider_test.json`
+
+## 7. Test Verification Files
+- `tests/test_sql_task.py`: Unit tests for `SqlTask` (answer extraction, prompt formatting, SQLite execution verification, and metrics).
+- `tests/test_sql_reward.py`: Unit tests for `verl/recipe/sql/reward_function.py` (scoring, tag validation, hint penalty, and database verification).
