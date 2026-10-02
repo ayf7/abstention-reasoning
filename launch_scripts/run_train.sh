@@ -12,12 +12,12 @@ MODEL="$2"
 HF_MODEL="$3"
 RUN_ID="${MODEL}"
 
-# python -m pipeline train_sft \
-#   --task "${TASK}" \
-#   --method baseline \
-#   --run-id "${RUN_ID}" \
-#   --base-model "${HF_MODEL}" \
-#   --data-name math_o1
+python -m pipeline train_sft \
+  --task "${TASK}" \
+  --method baseline \
+  --run-id "${RUN_ID}" \
+  --base-model "${HF_MODEL}" \
+  --data-name math_o1
 
 python -m pipeline train_rl \
   --task "${TASK}" \
