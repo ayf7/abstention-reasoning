@@ -48,15 +48,19 @@ def physical_cores(cpus=None) -> list[int]:
     allowed = set(cpus if cpus is not None else os.sched_getaffinity(0))
     chosen, seen = [], set()
     for cpu in sorted(allowed):
-        path = f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list"
-        with open(path) as f:
-            siblings = frozenset(_parse_cpu_list(f.read()))
+        siblings = hyperthread_siblings(cpu)
         if siblings in seen:
             continue
         seen.add(siblings)
         if siblings <= allowed:
             chosen.append(min(siblings))
     return chosen
+
+
+def hyperthread_siblings(cpu: int) -> frozenset[int]:
+    """All logical CPUs on the same physical core as `cpu`, itself included."""
+    with open(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list") as f:
+        return frozenset(_parse_cpu_list(f.read()))
 
 
 def _parse_cpu_list(text: str) -> list[int]:
@@ -196,6 +200,12 @@ class VerifierPool:
             with self._gold_lock:
                 self._gold[h] = entry
 
+    def measure_gold(self, problems: dict) -> dict:
+        """{key: {"t": median gold CPU s or None, "error": None or "VERDICT:detail"}}."""
+        decoded = {h: [json.loads(e) for e in s["expected"]] for h, s in problems.items()}
+        self._ensure_gold(problems, decoded)
+        return {h: self._gold[h] for h in problems}
+
     def _limit(self, t_gold) -> float | None:
         return None if t_gold is None else max(self.k * t_gold, self.floor_s)
 
@@ -299,6 +309,29 @@ class VerifierClient:
 
     def stats(self) -> dict:
         return self._call("stats")
+
+
+_default_client: VerifierClient | None = None
+
+
+def default_client() -> VerifierClient:
+    """Client for $VERIFIER_SOCKET; without it, start a private service.
+
+    The private service runs on this process's physical cores and is stopped
+    at exit. `train_rl` always sets the variable; this fallback is for
+    `evaluate` and ad-hoc checks.
+    """
+    global _default_client
+    if _default_client is None:
+        if SOCKET_ENV not in os.environ:
+            import atexit
+            import tempfile
+            address = os.path.join(tempfile.mkdtemp(prefix="verifier-"), "v.sock")
+            proc = launch(physical_cores(), address)
+            atexit.register(lambda: (proc.terminate(), proc.wait()))
+            os.environ[SOCKET_ENV] = address
+        _default_client = VerifierClient()
+    return _default_client
 
 
 def launch(cpus: list[int], address: str, startup_timeout_s: float = 120, **pool_kwargs) -> subprocess.Popen:

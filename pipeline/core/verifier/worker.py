@@ -13,7 +13,7 @@ import os
 _PRELOAD = [
     "bisect", "collections", "copy", "datetime", "decimal", "fractions", "functools",
     "heapq", "itertools", "math", "operator", "random", "re", "statistics", "string",
-    "typing", "array", "json",
+    "typing", "array", "json", "sortedcontainers",
 ]
 _THREAD_ENV = ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"]
 

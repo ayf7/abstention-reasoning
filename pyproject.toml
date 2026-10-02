@@ -25,6 +25,8 @@ dependencies = [
   "pyyaml",
   "pandas",
   "openai",
+  # LeetCode's judge provides it; 90 LeetCodeDataset problems import it.
+  "sortedcontainers",
 ]
 
 [build-system]
