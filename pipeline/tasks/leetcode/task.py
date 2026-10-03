@@ -219,19 +219,27 @@ class LeetCodeTask(BaseTask):
 
     @staticmethod
     def _drop_failing_gold(rows: list[dict], dropped: Counter) -> list[dict]:
-        """One sandboxed gold run per problem on a local pool (own physical cores)."""
+        """One sandboxed gold run per problem on a local pool (own physical cores).
+
+        Also drops golds slower than timeout_s / k: their k-times limit would be
+        cut short by the wall deadline, so the gate could not be applied as specified.
+        """
         keys = [service.spec_key(spec_of(r)) for r in rows]
         pool = service.VerifierPool(service.physical_cores(), gold_runs=1)
+        max_gold_s = pool.timeout_s / pool.k
         try:
             gold = pool.measure_gold({k: spec_of(r) for k, r in zip(keys, rows)})
         finally:
             pool.close()
         kept = []
         for row, key in zip(rows, keys):
-            if gold[key]["error"] is None:
-                kept.append(row)
+            g = gold[key]
+            if g["error"] is not None:
+                dropped[f"gold:{g['error'].split(':')[0]}"] += 1
+            elif g["t"] > max_gold_s:
+                dropped["gold:slow"] += 1
             else:
-                dropped[f"gold:{gold[key]['error'].split(':')[0]}"] += 1
+                kept.append(row)
         return kept
 
     def get_split_indices(self, total: int, split: str, seed: int = 42,
