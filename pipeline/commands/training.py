@@ -825,8 +825,8 @@ def train_rl(
                 f"--method {method.name if method else '<method>'} --split {split}"
             )
         raise FileNotFoundError(f"{flag} not found: {prompts_path}\n  {detail}")
-    if not actor_model.startswith("/") and "/" in actor_model:
-        # Relative path (not a HuggingFace model ID like "Qwen/Qwen2.5-1.5B")
+    if not actor_model.startswith("/") and Path(actor_model).exists():
+        # Relative local path; anything else is a HuggingFace ID like "Qwen/Qwen2.5-1.5B"
         actor_model = str(Path(actor_model).resolve())
 
     # Get reward function name and other config from method
