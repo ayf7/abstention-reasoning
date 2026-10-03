@@ -89,16 +89,19 @@ evaluate   ──┘  │            ──► worker 1 (pinned) ──fork─�
 
 ## Results
 
-### Data build (full LeetCodeDataset, 32-CPU job, 71 s wall)
+### Data build (full LeetCodeDataset, 32-CPU job)
 
 | | Count |
 |---|---|
-| Kept | 2,727 (train 2,507, test 220) |
+| Kept | 2,701 (train 2,481, test 220) |
 | Dropped: "in any order" | 115 |
-| Dropped: gold exceeds 10 s CPU | 26 |
+| Dropped: gold exceeds 10 s CPU | 25 |
+| Dropped: gold slower than `timeout_s / k` ≈ 3.3 s | 27 |
 | Dropped: gold runtime error | 1 |
 
-Splits: sft_train 676, sft_val 76, rl_train 1,629, rl_val 126, eval 220. (Before the `timeout_s / k` rule; see below.)
+Splits: sft_train 669, sft_val 75, rl_train 1,612, rl_val 125, eval 220.
+
+The one runtime error is `stickers-to-spell-word`: its gold runs a BFS over 2^15 states and hits `MemoryError` under the 2 GB cap. It fails the same way every run, so the problem is dropped and the cap is kept.
 
 ### Gold vs gold (`data/.slurm/gate_check.py`)
 
@@ -112,3 +115,30 @@ Each gold submitted 3× as the "submission" against a fresh pool, so gold timing
 - Zero false `TOO_SLOW` at k = 3 for every floor tried (0, 0.02, 0.05, 0.1 s), even before the re-check. Floor kept at 0.05 s.
 - Gold CPU time: p50 8 ms, p90 25 ms, p99 3.0 s, max 9.6 s. The tail motivated dropping golds above 3.3 s.
 - Throughput is linear in workers (~9 sub/s per core). An RL step of 64 prompts × 8 samples = 512 responses takes ~7 s at W = 8, ~3.6 s at W = 16. `MALFORMED` responses never run, so real steps are faster.
+
+### End-to-end smoke (Qwen3-4B-Base, no SFT, one B300)
+
+**Base-model evaluation on `eval` (220 test problems, 1 sample).**
+
+| Decoding | Max tokens | PASS | WRONG_ANSWER | RUNTIME_ERROR | TIMEOUT | MALFORMED |
+|---|---|---|---|---|---|---|
+| T = 1.0 | 2048 | 2 (0.9%) | 9 | 3 | 0 | 206 |
+| greedy | 1024 | 27 (12.3%) | 59 | 9 | 4 | 121 |
+
+- Greedy by difficulty: Easy 17/46 (37%), Medium 6/98 (6%), Hard 4/76 (5%). 73 of 220 responses were cut off while still thinking.
+- `MALFORMED` (no fenced code block inside `<answer>`) is the main failure at both temperatures. At T = 1.0, 95 of the 206 have code but no `<answer>`, and many responses drift into multilingual noise. The grader is left strict; SFT is meant to teach the format.
+- No `TOO_SLOW` verdicts and no infra errors in either run.
+
+**RL smoke** (`train_rl --total-steps 3 --train-batch-size 16 --n-samples 4 --max-response-length 1024`, `VERIFIER_WORKERS=4`, started from the base model):
+
+- 3 steps completed and the final model was saved. Train reward 0.016.
+- Reward time 0.2 s per step, against 18–33 s of generation, so the verifier is not the bottleneck.
+- About half of the responses hit the 1,024-token limit.
+- Greedy validation on `rl_val` (125 train-split problems): reward 0.325, malformed 0.49, `TOO_SLOW` 0, infra errors 0.
+
+**rl_val 32.5% vs eval 12.3% (both greedy, 1,024 tokens).** Part of the gap is the difficulty mix: rl_val is 29% Easy / 19% Hard, while eval is 21% Easy / 35% Hard. If eval's per-difficulty rates are applied to rl_val's mix, the expected score is about 15%. The remaining ~17 points are consistent with the train problems being older and more likely seen in pretraining. Report results on `eval` only.
+
+### Environment notes
+
+- **B300 (sm_103a).** Triton's bundled `ptxas` does not support this architecture. Jobs on B300 set `TRITON_PTXAS_PATH=/share/goyal/ayf7/tools/cuda-13.0/bin/ptxas`, a copy of the CUDA 13.0 `ptxas`.
+- **verl install.** The shared env's editable verl install points to the main checkout's `verl/`, not this worktree's. The reward function is still loaded from this worktree by path (`custom_reward_function.path`), so the LeetCode code under test is this branch's.
