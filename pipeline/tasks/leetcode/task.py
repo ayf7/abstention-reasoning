@@ -89,6 +89,26 @@ def extract_code(generation: str) -> str | None:
     return blocks[-1] if blocks else answer
 
 
+def canonicalize(generation: str) -> str | None:
+    """Rewrite the text after </think> as "<answer>\n{code}\n</answer>", or None.
+
+    Teachers often skip the tags and write a fenced block after thinking, or
+    fence the code inside the tags. The code is the <answer> contents when the
+    tags are present, else the last fenced block after </think>. None when the
+    response never closed its thinking or has no code after it.
+    """
+    head, sep, tail = generation.partition("</think>")
+    if not sep:
+        return None
+    code = extract_code(tail)
+    if code is None:
+        blocks = _CODE_BLOCK.findall(tail)
+        code = blocks[-1] if blocks else None
+    if not code or not code.strip():
+        return None
+    return f"{head}</think>\n\n<answer>\n{code.strip(chr(10)).rstrip()}\n</answer>"
+
+
 def spec_of(gt: dict) -> dict:
     """Verifier problem spec from a primitive / ground_truth dict.
 
