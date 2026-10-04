@@ -77,12 +77,16 @@ def parse_check(test_src: str) -> list[tuple[str, str]]:
 
 
 def extract_code(generation: str) -> str | None:
-    """Last fenced code block inside <answer>...</answer>, or None."""
+    """Code inside <answer>...</answer>, or None.
+
+    The answer is plain code; a fenced block inside it is also accepted (the
+    last one wins), since the tags already delimit the code.
+    """
     answer = extract_answer(generation)
-    if answer is None:
+    if not answer:
         return None
     blocks = _CODE_BLOCK.findall(answer)
-    return blocks[-1] if blocks else None
+    return blocks[-1] if blocks else answer
 
 
 def spec_of(gt: dict) -> dict:

@@ -35,7 +35,7 @@ evaluate   ──┘  │            ──► worker 1 (pinned) ──fork─�
 
 ## One submission
 
-1. **Extract code**: last ```` ```python ```` block in `<answer>`. None → `MALFORMED`, nothing runs.
+1. **Extract code**: the contents of `<answer>`, as plain code; if it holds a fenced block, the last block. Missing or empty → `MALFORMED`, nothing runs.
 2. **Fork** (≈1 ms vs 12–23 ms for a fresh interpreter; full confinement ≈1.7 ms, warm per-submission overhead 4–10 ms). The child immediately:
    - closes every inherited fd listed in `/proc/self/fd` except its result pipe (a blanket `closerange` cost 7 ms); stdin/stdout/stderr → `/dev/null`;
    - `setsid` (so the worker can kill the whole group);
@@ -53,7 +53,7 @@ evaluate   ──┘  │            ──► worker 1 (pinned) ──fork─�
 | `RUNTIME_ERROR` | exception, crash, or early exit before all outputs |
 | `TIMEOUT` | killed at the wall deadline |
 | `TOO_SLOW` | correct, but failed the timing gate after re-check |
-| `MALFORMED` | no code block |
+| `MALFORMED` | no `<answer>`, or an empty one |
 | `INFRA_ERROR` | worker or harness failure; logged separately, never silently scored as a model failure |
 
 ## Timing gate
@@ -126,7 +126,7 @@ Each gold submitted 3× as the "submission" against a fresh pool, so gold timing
 | greedy | 1024 | 27 (12.3%) | 59 | 9 | 4 | 121 |
 
 - Greedy by difficulty: Easy 17/46 (37%), Medium 6/98 (6%), Hard 4/76 (5%). 73 of 220 responses were cut off while still thinking.
-- `MALFORMED` (no fenced code block inside `<answer>`) is the main failure at both temperatures. At T = 1.0, 95 of the 206 have code but no `<answer>`, and many responses drift into multilingual noise. The grader is left strict; SFT is meant to teach the format.
+- `MALFORMED` (no fenced code block inside `<answer>`, under the original fenced-block rule) is the main failure at both temperatures. At T = 1.0, 95 of the 206 have code but no `<answer>`, and many responses drift into multilingual noise. The grader is left strict; SFT is meant to teach the format.
 - No `TOO_SLOW` verdicts and no infra errors in either run.
 
 **RL smoke** (`train_rl --total-steps 3 --train-batch-size 16 --n-samples 4 --max-response-length 1024`, `VERIFIER_WORKERS=4`, started from the base model):
