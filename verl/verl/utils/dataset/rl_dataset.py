@@ -171,7 +171,8 @@ class RLHFDataset(Dataset):
             else:
 
                 def doc2len(doc) -> int:
-                    return len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=False, continue_final_message=True,))
+                    raw_prompt = self._render_prompt(self._build_messages(dict(doc)))
+                    return len(tokenizer(raw_prompt, add_special_tokens=False)["input_ids"])
 
             self.dataframe = self.dataframe.filter(
                 lambda doc: doc2len(doc) <= self.max_prompt_length,
@@ -249,6 +250,18 @@ class RLHFDataset(Dataset):
 
         return messages
 
+    def _render_prompt(self, messages: list) -> str:
+        """Render chat messages the way SFT and eval do (pipeline generator):
+        chat template with a generation prompt, then the assistant prefix as
+        raw text. Sending the prefix as an assistant turn with
+        continue_final_message instead lets Qwen3's template insert an empty
+        <think></think> block before it."""
+        if messages and messages[-1]["role"] == "assistant":
+            conversation, prefix = messages[:-1], messages[-1]["content"]
+        else:
+            conversation, prefix = messages, ""
+        return self.tokenizer.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False) + prefix
+
     def __getitem__(self, item, _skip_attempts=0):
         """
         Note that we also return the raw_input_ids so that it can be combined with other chat template
@@ -289,7 +302,7 @@ class RLHFDataset(Dataset):
             row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
 
         else:
-            raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=False, continue_final_message=True, tokenize=False)
+            raw_prompt = self._render_prompt(messages)
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
