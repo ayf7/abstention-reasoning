@@ -275,31 +275,61 @@ def train_sft(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
+    # Forced-answer records (generate --answer-budget) carry a scaffold the
+    # model never wrote. Masking it needs a per-token loss mask, so these runs
+    # pre-tokenize and always hand TRL completion_only_loss=True; the prompt's
+    # mask bits then carry the --completion-only-loss choice instead.
+    mask_forced_scaffold = any(ex.get("forced_answer") for ex in filtered_examples)
+    if mask_forced_scaffold and mask_response_tokens:
+        raise ValueError("forced_answer records with mask_response_tokens are not supported")
+
+    def prompt_and_completion(ex: dict) -> tuple[str, str]:
+        """Chat-templated prompt text, and the completion: the trailing
+        assistant prefix in the prompt (if any) followed by the generation."""
+        messages = ex["prompt"]
+        if messages and messages[-1]["role"] == "assistant":
+            conversation = messages[:-1]
+            assistant_prefix = messages[-1]["content"]
+        else:
+            conversation = messages
+            assistant_prefix = ""
+        prompt = tokenizer.apply_chat_template(
+            conversation,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        return prompt, assistant_prefix + ex["generation"]
+
     # Format data for SFT
     def format_examples(examples: list[dict]) -> list[dict]:
         formatted = []
-        if mask_response_tokens:
+        if mask_forced_scaffold:
+            from pipeline.core.utils import tokenize_with_forced_scaffold_mask
+
+            prompt_bit = 0 if completion_only_loss else 1
+            for ex in examples:
+                prompt, completion = prompt_and_completion(ex)
+                prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
+                if ex.get("forced_answer"):
+                    completion_tokens, mask = tokenize_with_forced_scaffold_mask(
+                        completion, tokenizer
+                    )
+                else:
+                    completion_tokens = tokenizer.encode(completion, add_special_tokens=False)
+                    mask = [1] * len(completion_tokens)
+
+                # TRL appends EOS only to untokenized completions; match that.
+                formatted.append({
+                    "input_ids": prompt_tokens + completion_tokens + [tokenizer.eos_token_id],
+                    "completion_mask": [prompt_bit] * len(prompt_tokens) + mask + [1],
+                })
+        elif mask_response_tokens:
             # Pre-tokenize with response masking for clean boundaries
             from pipeline.core.utils import tokenize_with_response_mask
 
             for ex in examples:
                 # Apply chat template to prompt messages (excluding assistant prefix)
-                messages = ex["prompt"]
-                if messages and messages[-1]["role"] == "assistant":
-                    conversation = messages[:-1]
-                    assistant_prefix = messages[-1]["content"]
-                else:
-                    conversation = messages
-                    assistant_prefix = ""
-
-                prompt = tokenizer.apply_chat_template(
-                    conversation,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-
-                # Completion is assistant prefix + generation
-                completion = assistant_prefix + ex["generation"]
+                prompt, completion = prompt_and_completion(ex)
 
                 # Tokenize prompt (all masked, completion_mask=0)
                 prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
@@ -320,21 +350,7 @@ def train_sft(
         else:
             # Standard prompt/completion format (SFTTrainer handles tokenization)
             for ex in examples:
-                messages = ex["prompt"]
-                if messages and messages[-1]["role"] == "assistant":
-                    conversation = messages[:-1]
-                    assistant_prefix = messages[-1]["content"]
-                else:
-                    conversation = messages
-                    assistant_prefix = ""
-
-                prompt = tokenizer.apply_chat_template(
-                    conversation,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-
-                completion = assistant_prefix + ex["generation"]
+                prompt, completion = prompt_and_completion(ex)
 
                 formatted.append({
                     "prompt": prompt,
@@ -343,6 +359,9 @@ def train_sft(
         return formatted
 
     print("Formatting for SFT...")
+    if mask_forced_scaffold:
+        n_forced = sum(1 for ex in filtered_examples if ex.get("forced_answer"))
+        print(f"  Masking the forced-answer scaffold in {n_forced} examples")
     if mask_response_tokens:
         print("  Using segmented tokenization for response masking")
         print("  Masking \\n<response>...</response>\\n spans")
@@ -401,7 +420,7 @@ def train_sft(
         # never applied. Passed explicitly so the choice is visible. Full
         # sequence is the default because every RL parent was trained that
         # way, and the masked ablation (qwen3-4b-up4x-tok) scored lower.
-        completion_only_loss=completion_only_loss,
+        completion_only_loss=True if mask_forced_scaffold else completion_only_loss,
         logging_steps=10,
         save_strategy="epoch" if has_eval else "no",
         eval_strategy="epoch" if has_eval else "no",

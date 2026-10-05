@@ -61,6 +61,34 @@ def tokenize_with_response_mask(
     return all_tokens, response_mask
 
 
+# What the generator inserts when it forces an answer out of a truncated
+# generation (_answer_scaffold's mid-think case plus the newline that opens the
+# answer body), as it reads after canonicalization.
+FORCED_ANSWER_SCAFFOLD = "\n</think>\n\n<answer>\n"
+
+
+def tokenize_with_forced_scaffold_mask(
+    text: str,
+    tokenizer,
+) -> tuple[list[int], list[int]]:
+    """Tokenize a forced-answer completion with the inserted scaffold masked.
+
+    The model never wrote the scaffold, so it gets mask 0 and is excluded from
+    the loss. It is tokenized as its own segment, matching how RL splices it
+    in at rollout time. The last occurrence is the inserted one: the scaffold
+    closes the think block, so nothing after it is reasoning.
+    """
+    head, scaffold, tail = text.rpartition(FORCED_ANSWER_SCAFFOLD)
+    if not scaffold:
+        raise ValueError("forced_answer record has no forced-answer scaffold")
+    tokens, mask = [], []
+    for segment, value in ((head, 1), (scaffold, 0), (tail, 1)):
+        ids = tokenizer.encode(segment, add_special_tokens=False)
+        tokens.extend(ids)
+        mask.extend([value] * len(ids))
+    return tokens, mask
+
+
 def extract_answer(text: str) -> str | None:
     """Extract content between <answer> and </answer> tags."""
     match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL | re.IGNORECASE)
