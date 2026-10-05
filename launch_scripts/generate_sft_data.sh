@@ -20,9 +20,9 @@ for TASK in countdown math sql; do
   if [ "$TASK" = "sql" ]; then
     GEN_MODEL="Qwen/Qwen3-32B"
   fi
-  CUDA_VISIBLE_DEVICES=1,2 python -m pipeline generate --task "${TASK}" --data-name "${DATA_NAME}" --method method_ac --model "${GEN_MODEL}" \
-  --tensor-parallel-size 2 --split sft_train --num-samples 8 --sample-strategy random_correct --async 
+  python -m pipeline generate --task "${TASK}" --data-name "${DATA_NAME}" --method method_ac --model "${GEN_MODEL}" \
+  --split sft_train --num-samples 8 --sample-strategy random_correct --async 
 
-  CUDA_VISIBLE_DEVICES=1,2 python -m pipeline generate --task "${TASK}" --data-name "${DATA_NAME}" --method method_ac --model "${GEN_MODEL}" \
-  --tensor-parallel-size 2 --split sft_val --num-samples 8 --sample-strategy random_correct --async 
+  python -m pipeline generate --task "${TASK}" --data-name "${DATA_NAME}" --method method_ac --model "${GEN_MODEL}" \
+  --split sft_val --num-samples 8 --sample-strategy random_correct --async 
 done
