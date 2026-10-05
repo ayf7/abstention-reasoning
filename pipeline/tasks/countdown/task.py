@@ -46,7 +46,7 @@ class CountdownTask(BaseTask):
         return generate_puzzles(
             num_puzzles=num_puzzles,
             seed=seed,
-            operand_distribution={4: 0.33, 5: 0.33, 6: 0.34},
+            operand_distribution={4: 0.25, 5: 0.25, 6: 0.25, 7:0.25},
         )
 
     def format_prompt(
