@@ -171,7 +171,8 @@ class RLHFDataset(Dataset):
             else:
 
                 def doc2len(doc) -> int:
-                    return len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=False, continue_final_message=True,))
+                    raw_prompt = self._render_prompt(self._build_messages(dict(doc)))
+                    return len(tokenizer(raw_prompt, add_special_tokens=False)["input_ids"])
 
             self.dataframe = self.dataframe.filter(
                 lambda doc: doc2len(doc) <= self.max_prompt_length,
@@ -249,6 +250,45 @@ class RLHFDataset(Dataset):
 
         return messages
 
+    def _render_prompt(self, messages: list) -> str:
+        """Render chat messages into the prompt string, matching SFT and eval.
+
+        ``messages`` is [system?, user, assistant], where the assistant message
+        holds the prefix we write for the model, e.g.
+        "<think>\\nLet me work through this problem step by step."
+
+        The problem with the usual call,
+        ``apply_chat_template(messages, continue_final_message=True)``: the
+        chat template formats the assistant message as a finished turn. Qwen3's
+        template always writes the last assistant turn as
+        "<think>\\n{reasoning}\\n</think>\\n\\n{answer}", splitting the message at
+        "</think>". Our prefix has no "</think>", so reasoning is empty and the
+        prompt ends in
+
+            <|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n<think>\\nLet me work ...
+
+        ``continue_final_message`` only drops the closing <|im_end|>; the empty
+        block stays. SFT and eval never produce it, so RL trained on prompts
+        the model never sees elsewhere. Qwen2.5's template has no such rule
+        and was unaffected.
+
+        This patch keeps the assistant message away from the template: it
+        formats only [system?, user] with ``add_generation_prompt=True``
+        (ending in "<|im_start|>assistant\\n") and appends the prefix as plain
+        text, giving
+
+            <|im_start|>assistant\\n<think>\\nLet me work ...
+
+        This is the same rendering as pipeline/core/generator.py (SFT and
+        eval). It is a stopgap: the two code paths still build prompts
+        separately and must be kept in sync by hand.
+        """
+        if messages and messages[-1]["role"] == "assistant":
+            conversation, prefix = messages[:-1], messages[-1]["content"]
+        else:
+            conversation, prefix = messages, ""
+        return self.tokenizer.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False) + prefix
+
     def __getitem__(self, item, _skip_attempts=0):
         """
         Note that we also return the raw_input_ids so that it can be combined with other chat template
@@ -289,7 +329,7 @@ class RLHFDataset(Dataset):
             row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
 
         else:
-            raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=False, continue_final_message=True, tokenize=False)
+            raw_prompt = self._render_prompt(messages)
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")

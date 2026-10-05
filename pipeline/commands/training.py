@@ -988,15 +988,18 @@ def train_rl(
 
     # Add runtime template config if method is specified
     if template_content is not None:
-        # Escape the template for shell/hydra (replace newlines, quotes)
+        # Pass the text verbatim. cmd is an argv list (no shell) and Hydra keeps
+        # real newlines inside quoted values, so only double quotes need
+        # escaping. Never encode newlines as "\\n": Hydra does not decode them,
+        # and the model would see a literal backslash-n.
         # Use + prefix to add new config keys (they don't exist in base config)
-        escaped_template = template_content.replace("\n", "\\n").replace('"', '\\"')
+        escaped_template = template_content.replace('"', '\\"')
         cmd.append(f'+data.runtime_template="{escaped_template}"')
         if system_message:
-            escaped_system = system_message.replace("\n", "\\n").replace('"', '\\"')
+            escaped_system = system_message.replace('"', '\\"')
             cmd.append(f'+data.runtime_system_message="{escaped_system}"')
         if assistant_prefix:
-            escaped_prefix = assistant_prefix.replace("\n", "\\n").replace('"', '\\"')
+            escaped_prefix = assistant_prefix.replace('"', '\\"')
             cmd.append(f'+data.runtime_assistant_prefix="{escaped_prefix}"')
 
     # vLLM rollout (verl's default backend and default sync mode; the SGLang
