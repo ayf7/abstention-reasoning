@@ -251,11 +251,38 @@ class RLHFDataset(Dataset):
         return messages
 
     def _render_prompt(self, messages: list) -> str:
-        """Render chat messages the way SFT and eval do (pipeline generator):
-        chat template with a generation prompt, then the assistant prefix as
-        raw text. Sending the prefix as an assistant turn with
-        continue_final_message instead lets Qwen3's template insert an empty
-        <think></think> block before it."""
+        """Render chat messages into the prompt string, matching SFT and eval.
+
+        ``messages`` is [system?, user, assistant], where the assistant message
+        holds the prefix we write for the model, e.g.
+        "<think>\\nLet me work through this problem step by step."
+
+        The problem with the usual call,
+        ``apply_chat_template(messages, continue_final_message=True)``: the
+        chat template formats the assistant message as a finished turn. Qwen3's
+        template always writes the last assistant turn as
+        "<think>\\n{reasoning}\\n</think>\\n\\n{answer}", splitting the message at
+        "</think>". Our prefix has no "</think>", so reasoning is empty and the
+        prompt ends in
+
+            <|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n<think>\\nLet me work ...
+
+        ``continue_final_message`` only drops the closing <|im_end|>; the empty
+        block stays. SFT and eval never produce it, so RL trained on prompts
+        the model never sees elsewhere. Qwen2.5's template has no such rule
+        and was unaffected.
+
+        This patch keeps the assistant message away from the template: it
+        formats only [system?, user] with ``add_generation_prompt=True``
+        (ending in "<|im_start|>assistant\\n") and appends the prefix as plain
+        text, giving
+
+            <|im_start|>assistant\\n<think>\\nLet me work ...
+
+        This is the same rendering as pipeline/core/generator.py (SFT and
+        eval). It is a stopgap: the two code paths still build prompts
+        separately and must be kept in sync by hand.
+        """
         if messages and messages[-1]["role"] == "assistant":
             conversation, prefix = messages[:-1], messages[-1]["content"]
         else:
