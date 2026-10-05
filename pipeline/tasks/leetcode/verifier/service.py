@@ -7,7 +7,7 @@ loading a bank. It caches only gold-solution timings, keyed by spec hash.
     spec = {"setup": str, "entry": str, "tests": [args_src], "expected": [json_str], "gold": str}
     verify(problems={key: spec}, jobs=[(key, code or None)]) -> [result]
 
-A result is `outputs.judge`'s dict plus `limit_s`, `gold_s` and `rechecked`.
+A result is `verifier.judge`'s dict plus `limit_s`, `gold_s` and `rechecked`.
 `code=None` means the caller found no code block (MALFORMED, nothing runs).
 
 Timing gate: a correct submission passes if its CPU time <= max(k * t_gold,
@@ -16,7 +16,7 @@ submission over the limit is re-run back to back with gold on one worker, and
 that pair decides, which cancels clock drift between workers and over time.
 
 Run as a process (never forked from Ray/vLLM):
-    python -m pipeline.core.verifier.service --socket /path/v.sock --cpus 0,2,4
+    python -m pipeline.tasks.leetcode.verifier --socket /path/v.sock --cpus 0,2,4
 """
 
 import argparse
@@ -33,8 +33,8 @@ import time
 from concurrent.futures import Future
 from multiprocessing.connection import Client, Listener
 
-from pipeline.core.verifier import outputs, worker
-from pipeline.core.verifier.outputs import INFRA_ERROR, MALFORMED, PASS, TOO_SLOW
+from pipeline.tasks.leetcode.verifier import verifier, worker
+from pipeline.tasks.leetcode.verifier.verifier import INFRA_ERROR, MALFORMED, PASS, TOO_SLOW
 
 SOCKET_ENV = "VERIFIER_SOCKET"
 
@@ -182,7 +182,7 @@ class VerifierPool:
         if run is None:
             return {"verdict": INFRA_ERROR, "error": "worker_died", "cpu_s": None, "wall_s": None,
                     "num_tests": len(expected), "tests_passed": 0, "first_fail": None}
-        return outputs.judge(run, expected)
+        return verifier.judge(run, expected)
 
     # --- gold timing ---
 
@@ -336,7 +336,7 @@ def default_client() -> VerifierClient:
 
 def launch(cpus: list[int], address: str, startup_timeout_s: float = 120, **pool_kwargs) -> subprocess.Popen:
     """Start the service as a fresh interpreter and wait until it answers."""
-    cmd = [sys.executable, "-m", "pipeline.core.verifier.service", "--socket", address,
+    cmd = [sys.executable, "-m", "pipeline.tasks.leetcode.verifier", "--socket", address,
            "--cpus", ",".join(map(str, cpus))]
     for key, val in pool_kwargs.items():
         cmd += [f"--{key.replace('_', '-')}", str(val)]
@@ -377,6 +377,3 @@ def main() -> None:
     print(f"verifier: {len(cpus)} workers on cpus {cpus}, socket {args.socket}", flush=True)
     serve(pool, args.socket)
 
-
-if __name__ == "__main__":
-    main()

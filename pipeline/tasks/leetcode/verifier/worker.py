@@ -25,7 +25,7 @@ def main(conn, cpu: int, memory_mb: int) -> None:
     import importlib
     for name in _PRELOAD:
         importlib.import_module(name)
-    from pipeline.core.verifier.sandbox import Sandbox
+    from pipeline.tasks.leetcode.verifier.sandbox import Sandbox
 
     sandbox = Sandbox(memory_mb=memory_mb)
     conn.send({"ready": cpu})

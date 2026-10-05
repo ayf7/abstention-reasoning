@@ -74,7 +74,7 @@ evaluate   ──┘  │            ──► worker 1 (pinned) ──fork─�
 
 ## Deployment
 
-**RL.** `verl/recipe/leetcode/reward_function.py` provides a batch scorer for verl's `batch` reward manager, which sends a whole step's responses in one call to the service. `train_rl` starts the service on cores carved from the job's own allocation and pins verl to the rest (Mode A). The verifier takes the last `$VERIFIER_WORKERS` (default 8) physical cores; their hyperthread siblings are left idle. Mode B (service on a separate CPU job, `python -m pipeline.core.verifier.service --socket PATH`, reached via `VERIFIER_SOCKET`) uses the same code.
+**RL.** `verl/recipe/leetcode/reward_function.py` provides a batch scorer for verl's `batch` reward manager, which sends a whole step's responses in one call to the service. `train_rl` starts the service on cores carved from the job's own allocation and pins verl to the rest (Mode A). The verifier takes the last `$VERIFIER_WORKERS` (default 8) physical cores; their hyperthread siblings are left idle. Mode B (service on a separate CPU job, `python -m pipeline.tasks.leetcode.verifier --socket PATH`, reached via `VERIFIER_SOCKET`) uses the same code.
 
 **Evaluation.** `BaseTask.check_correctness_batch` (default: loop over `check_correctness`, so other tasks are unchanged). The LeetCode task overrides it to send the batch to the service. Results record verdict and CPU time per sample.
 

@@ -25,9 +25,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from pipeline.core.utils import extract_answer
-from pipeline.core.verifier import service
-from pipeline.core.verifier.outputs import PASS
-from pipeline.core.verifier.sandbox import encode
+from pipeline.tasks.leetcode.verifier import service
+from pipeline.tasks.leetcode.verifier.verifier import PASS
+from pipeline.tasks.leetcode.verifier.sandbox import encode
 from pipeline.tasks.base import BaseTask
 
 _REPO = "newfacade/LeetCodeDataset"

@@ -6,7 +6,7 @@ responses go to the service in one call. The service address comes from
 $VERIFIER_SOCKET, which `train_rl` sets after starting the service.
 """
 
-from pipeline.core.verifier.outputs import INFRA_ERROR, MALFORMED, PASS, TOO_SLOW
+from pipeline.tasks.leetcode.verifier.verifier import INFRA_ERROR, MALFORMED, PASS, TOO_SLOW
 from pipeline.tasks.leetcode.task import extract_code, verify_batch
 
 
