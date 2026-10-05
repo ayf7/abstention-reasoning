@@ -279,7 +279,7 @@ def _sample_hint_levels(
 def _hint_sequence_for_level(hints_list: list[str], hint_level: int, task_name: str) -> str:
     if hint_level == 0:
         return "No partial solution"
-    if task_name == "math":
+    if task_name in ("math", "sql"):
         return "\n".join(hints_list[:hint_level])
     return hints_list[hint_level - 1]
 
