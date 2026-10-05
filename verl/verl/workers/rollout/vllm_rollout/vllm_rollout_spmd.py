@@ -345,7 +345,10 @@ class vLLMRollout(BaseRollout):
         print("⏸ Waiting for debugger attach...")
         debugpy.wait_for_client()
         import debugpy; debugpy.breakpoint()"""
-        if self.allow_hint:
+        # Answer forcing lives in HintLoop, so a single-turn rollout that forces
+        # answers runs the loop with hints off: no </request> stop string and
+        # max_hints 0, which leaves exactly one generation plus the forced answer.
+        if self.allow_hint or int(self.config.get("answer_budget", 0) or 0) > 0:
             return self.agentic_generate_sequences(prompts, **kwargs)
         else:
             return self.regular_generate_sequences(prompts, **kwargs)
@@ -370,7 +373,7 @@ class vLLMRollout(BaseRollout):
         # that stopped early. response_length remains the width of the response
         # tensor and must additionally cover injected hint text.
         think_budget = self.config.get("think_budget", None)
-        max_hints = self.config.get("max_hints", 6)
+        max_hints = self.config.get("max_hints", 6) if self.allow_hint else 0
         config = HintLoopConfig(
             max_hints=max_hints,
             max_turns=self.config.get("max_turns", max_hints + 1),
@@ -444,7 +447,10 @@ class vLLMRollout(BaseRollout):
         # left-padded attention_mask
         attention_mask = prompts.batch['attention_mask']
         position_ids = prompts.batch['position_ids']
-        hint_list = prompts.non_tensor_batch["hint_exprs"]
+        # Single-turn tasks reach here only to force answers and carry no hints.
+        hint_list = prompts.non_tensor_batch.get("hint_exprs")
+        if hint_list is None:
+            hint_list = [[] for _ in range(idx.size(0))]
 
         # used to construct attention_mask
         eos_token_id = prompts.meta_info['eos_token_id']

@@ -645,6 +645,11 @@ def _guard_existing_run(
     )
 
 
+# Response-tensor room for the tokens a forced answer adds besides the answer
+# itself: the "\n</think>\n\n<answer>" scaffold and the closing </answer>.
+FORCED_ANSWER_MARGIN = 32
+
+
 def train_rl(
     task_name: str,
     method_name: str | None = None,
@@ -856,6 +861,7 @@ def train_rl(
     interaction_name = None
     max_turns = 6
     max_hints = None
+    answer_budget = 0
     if method is not None:
         reward_function_name = method.reward_function
         reward_kwargs = {**method.reward_kwargs}
@@ -869,6 +875,7 @@ def train_rl(
         interaction_name = f"{task_name}_{method.name}" if method.multi_turn else None
         max_turns = method.max_turns
         max_hints = method.max_hints
+        answer_budget = method.answer_budget
         template_content = method.load_template(task_name, "rl")
 
     # Apply CLI overrides to reward kwargs
@@ -947,6 +954,15 @@ def train_rl(
     print(f"=================================")
 
     # Build verl command
+    # Answer forcing, as in generate/evaluate: max_response_length caps the
+    # reasoning, and a rollout cut off mid-think gets answer_budget more tokens
+    # behind a scaffold. The response tensor must hold all of it.
+    response_tensor_length = max_response_length
+    if answer_budget > 0:
+        response_tensor_length += answer_budget + FORCED_ANSWER_MARGIN
+        print(f"Answer forcing: {max_response_length}-token reasoning budget + "
+              f"{answer_budget}-token answer budget")
+
     cmd = [
         "python3", "-m", "verl.trainer.main_ppo",
         f"hydra.run.dir={checkpoints_dir}",
@@ -956,7 +972,7 @@ def train_rl(
         f"data.train_batch_size={train_batch_size}",
         f"data.val_batch_size={val_batch_size}",
         f"data.max_prompt_length={max_prompt_length}",
-        f"data.max_response_length={max_response_length}",
+        f"data.max_response_length={response_tensor_length}",
         f"custom_reward_function.path={reward_function_path}",
         f"custom_reward_function.name={reward_function_name}",
         f"actor_rollout_ref.model.path={actor_model}",
@@ -1035,6 +1051,9 @@ def train_rl(
     # hint exchanges instead of closing and reopening it around each one.
     if method is not None and method.nested_request:
         cmd.append("+actor_rollout_ref.rollout.nested_request=True")
+    if answer_budget > 0:
+        cmd.append(f"actor_rollout_ref.rollout.think_budget={max_response_length}")
+        cmd.append(f"actor_rollout_ref.rollout.answer_budget={answer_budget}")
 
     # Add reward kwargs if specified in method config
     # Use + prefix to add new config keys

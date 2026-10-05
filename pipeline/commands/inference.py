@@ -65,6 +65,34 @@ def classify_truncation(record: dict) -> str | None:
     return "answer" if "</think>" in record.get("generation", "") else "think"
 
 
+def resolve_answer_forcing(
+    method: "Method | None",
+    answer_budget: int | None,
+    answer_after_think: bool,
+    use_async: bool,
+    multi_turn: bool,
+) -> tuple[int, bool, bool]:
+    """(answer_budget, answer_after_think, use_async) after method defaults.
+
+    answer_budget None means "use the method config"; answer_after_think is
+    opt-in per call. Forcing lives in the async single-turn path only, so it
+    turns async on rather than being silently ignored.
+    """
+    if answer_budget is None:
+        answer_budget = method.answer_budget if method else 0
+    if answer_after_think and answer_budget <= 0:
+        raise ValueError("answer_after_think needs answer_budget > 0")
+    if answer_budget > 0:
+        if multi_turn:
+            raise ValueError("answer forcing is single-turn only; it cannot combine with multi_turn")
+        if not use_async:
+            print("Answer forcing needs the async generator; enabling --async.")
+            use_async = True
+        print(f"Answer forcing: {answer_budget}-token answer budget"
+              + (", <answer> opened after every </think>" if answer_after_think else ""))
+    return answer_budget, answer_after_think, use_async
+
+
 def count_truncation(records: list[dict]) -> dict[str, int]:
     kinds = [classify_truncation(r) for r in records]
     return {"think": kinds.count("think"), "answer": kinds.count("answer")}
@@ -507,7 +535,8 @@ def generate(
     retry_incorrect: bool = False,
     retry_truncated: bool = False,
     max_retries: int = 10,
-    answer_budget: int = 0,
+    answer_budget: int | None = None,
+    answer_after_think: bool = False,
     seed: int | None = 42,
     multi_turn: bool | None = None,
     use_async: bool = False,
@@ -545,6 +574,9 @@ def generate(
             out of room mid-thought gets </think> closed for it and this many tokens
             to answer in, matching what RL does at rollout time. 0 disables forcing.
             Async single-turn generation only.
+        answer_after_think: Stop every sample at </think> and open <answer> for
+            it, so the answer layout is fixed rather than left to the model.
+            Opt-in; requires answer_budget > 0.
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
         use_async: Use async generation for optimal throughput.
         force_hints_distribution: Distribution of forced hint counts. Maps number of hints
@@ -606,6 +638,9 @@ def generate(
                   "graded pass rate (method config requested multi-turn).")
         multi_turn = False
 
+    answer_budget, answer_after_think, use_async = resolve_answer_forcing(
+        method, answer_budget, answer_after_think, use_async, multi_turn)
+
     # Resolve model shortcuts (sft, rl)
     actual_model_name = model_name
     if method is not None:
@@ -653,6 +688,7 @@ def generate(
         hint_transition=method.hint_transition if method else True,
         nested_request=method.nested_request if method else False,
         answer_budget=answer_budget,
+        answer_after_think=answer_after_think,
     )
     generator = Generator(config)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1281,6 +1317,8 @@ def evaluate(
     use_async: bool = False,
     seed: int | None = 42,
     no_hints: bool = False,
+    answer_budget: int | None = None,
+    answer_after_think: bool = False,
     data_name: str | None = None,
     models_name: str | None = None,
 ) -> Path:
@@ -1299,6 +1337,7 @@ def evaluate(
         no_hints: Counterfactual eval -- ban the hint request so the model must
             answer on its own. Everything else about the eval is unchanged, so
             the drop against a normal run measures what the hints were worth.
+        answer_budget, answer_after_think: Answer forcing, as in generate.
         data_name: Data directory name (default: task_name)
         models_name: Models directory name (default: data_name)
         ... generation config ...
@@ -1319,6 +1358,9 @@ def evaluate(
     # Resolve multi_turn from method config (CLI overrides if explicitly set)
     if multi_turn is None:
         multi_turn = method.multi_turn if method else False
+
+    answer_budget, answer_after_think, use_async = resolve_answer_forcing(
+        method, answer_budget, answer_after_think, use_async, multi_turn)
 
     # Resolve model shortcuts (sft, rl)
     actual_model_name = model_name
@@ -1379,6 +1421,8 @@ def evaluate(
         seed=seed,
         nested_request=method.nested_request if method else False,
         ban_hint_requests=no_hints,
+        answer_budget=answer_budget,
+        answer_after_think=answer_after_think,
     )
     generator = Generator(config)
 
@@ -1568,6 +1612,8 @@ def evaluate(
                     "predicted_answer": meta.get("predicted_answer") if isinstance(meta, dict) else None,
                     "finish_reason": s.get("finish_reason", "unknown"),
                     "token_count": s.get("token_count", 0),
+                    "forced_answer": s.get("forced_answer", False),
+                    "answer_truncated": s.get("answer_truncated", False),
                 })
 
             n_correct = sum(1 for s in samples if s["correct"])

@@ -283,6 +283,23 @@ def test_forced_answer_closes_a_truncated_think_block():
     assert st.masks[-3][0] == 0 and st.masks[-2][0] == 1 and st.masks[-1][0] == 0
 
 
+def test_single_turn_forcing_without_hints():
+    """A single-turn task runs the loop only to force answers: no hints, max_hints 0."""
+    engine = ScriptedEngine({
+        0: ["done</think>\n\n<answer>7</answer>"],
+        1: ["reasoning that never ends" + "z" * 300],
+    }, answers={1: "8"})
+    loop = make_loop(engine, max_hints=0, max_turns=1, max_response_len=120, answer_budget=32)
+    states = loop.make_states([prompt_for(0), prompt_for(1)], [[], []])
+    loop.run_rounds(states)
+    loop.force_answers(states)
+    finished, cut = states
+    assert finished.completed and finished.forced == 0.0 and finished.turns == 1
+    assert cut.forced == 1.0 and cut.turns == 1 and cut.num_hints == 0
+    tape = TOKENIZER.decode([t for seg in cut.partials[1:] for t in seg])
+    assert tape.endswith("\n</think>\n\n<answer>8</answer>")
+
+
 def test_forced_answer_does_not_double_the_closing_tag():
     script = {0: ["reasoning" + "z" * 300]}
     states, _, _ = run(

@@ -1,3 +1,6 @@
 template_variant: baseline
 reward_function: compute_score
 reward_kwargs: {}
+# Reasoning is capped by max_new_tokens; a sample cut off mid-think gets
+# "\n</think>\n\n<answer>" and answer_budget tokens to write its code.
+answer_budget: 512

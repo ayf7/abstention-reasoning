@@ -207,7 +207,8 @@ def cmd_generate(args):
         retry_incorrect=args.retry_incorrect,
         retry_truncated=getattr(args, "retry_truncated", False),
         max_retries=getattr(args, "max_retries", 10),
-        answer_budget=getattr(args, "answer_budget", 0),
+        answer_budget=args.answer_budget,
+        answer_after_think=args.answer_after_think,
         seed=getattr(args, "seed", 42),
         multi_turn=args.multi_turn,  # None = use method config
         use_async=getattr(args, "use_async", False),
@@ -264,6 +265,8 @@ def cmd_evaluate(args):
         use_async=getattr(args, "use_async", False),
         seed=args.seed,
         no_hints=args.no_hints,
+        answer_budget=args.answer_budget,
+        answer_after_think=args.answer_after_think,
         data_name=args.data_name,
         models_name=args.models_name,
     )
@@ -395,6 +398,16 @@ def cmd_convert_checkpoint(args):
         output_path=output_path,
         backend=args.backend,
     )
+
+
+def add_answer_forcing_args(p):
+    """Answer-forcing flags shared by generate and evaluate."""
+    p.add_argument("--answer-budget", type=int, default=None,
+                   help="Tokens for a forced answer when reasoning hits --max-new-tokens "
+                        "(0 = off; default: method config). Implies --async.")
+    p.add_argument("--answer-after-think", action="store_true",
+                   help="Opt-in: stop each sample at </think> and open <answer> for it, "
+                        "spending --answer-budget on the answer")
 
 
 def main():
@@ -532,10 +545,10 @@ def main():
     p.add_argument("--retry-incorrect", action="store_true", help="Re-run incorrect examples from existing output")
     p.add_argument("--retry-truncated", action="store_true", help="Re-run truncated examples (finish_reason=length) with different seeds until all complete")
     p.add_argument("--max-retries", type=int, default=10, help="Max retry iterations for --retry-truncated (default: 10)")
-    p.add_argument("--answer-budget", type=int, default=0, help="Tokens held back to force an answer when a generation runs out of room mid-thought (0 = off, --async only)")
     p.add_argument("--seed", type=int, default=42, help="Starting seed for generation (default: 42)")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput, processes all prompts concurrently)")
+    add_answer_forcing_args(p)
     p.add_argument("--force-hints-distribution", type=str, default=None,
         help="Distribution of forced hint counts, e.g. '1:0.5,2:0.3,3:0.2'. "
              "Maps number of hints to probability. Probabilities must sum to 1.")
@@ -607,6 +620,7 @@ def main():
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
     p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput)")
+    add_answer_forcing_args(p)
     p.add_argument("--seed", type=int, default=42, help="Random seed for generation (default: 42)")
     p.add_argument("--no-hints", action="store_true", help="Counterfactual eval: block hint requests during decoding so the model must answer alone")
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")

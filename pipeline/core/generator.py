@@ -177,6 +177,9 @@ class GenerationConfig:
                                      # impossible, so the model has to answer alone
     answer_budget: int = 0  # Tokens held back for a forced answer when a generation
                             # runs out of room mid-thought. 0 disables forcing.
+    answer_after_think: bool = False  # Stop every sample at </think> and open <answer>
+                                      # ourselves, so the answer's layout never depends
+                                      # on the model. Uses answer_budget for the answer.
 
 
 class _SamplingParams:
@@ -1071,7 +1074,7 @@ class AsyncGenerator(_SamplingParams):
         # why sharing one fixed seed across many different prompt requests
         # badly skews per-prompt binary decisions (e.g. a verifier's
         # accept/reject rate) once num_samples/n is small (n=1 especially).
-        stop = DEFAULT_STOP_STRINGS
+        stop = DEFAULT_STOP_STRINGS + (["</think>"] if self.config.answer_after_think else [])
         base_seed = self.config.seed
 
         def make_sampling_params(idx: int):
@@ -1149,18 +1152,26 @@ class AsyncGenerator(_SamplingParams):
         RL already does this at rollout time (HintLoop.force_answers). Doing it
         here as well means the SFT model has seen the shape RL will impose on it,
         rather than meeting a forced </think> for the first time under GRPO.
+
+        With answer_after_think, samples that stopped at </think> are finished
+        the same way, with the answer opened for them. They are not truncations,
+        so they are not marked forced_answer.
         """
         import uuid
 
         targets = []
         for pi, samples in enumerate(results):
             for si, sample in enumerate(samples):
-                if sample.get("finish_reason") != "length":
+                reason = sample.get("finish_reason")
+                if reason == "length":
+                    scaffold = _answer_scaffold(sample["text"])
+                elif self.config.answer_after_think and reason == "stop" and sample["text"].endswith("</think>"):
+                    scaffold = "\n\n<answer>\n"
+                else:
                     continue
-                scaffold = _answer_scaffold(sample["text"])
                 if scaffold is None:
                     continue
-                targets.append((pi, si, scaffold))
+                targets.append((pi, si, scaffold, reason == "length"))
 
         if not targets:
             return 0
@@ -1175,25 +1186,26 @@ class AsyncGenerator(_SamplingParams):
             include_stop_str_in_output=True,
         )
 
-        async def finish(pi: int, si: int, scaffold: str):
+        async def finish(pi: int, si: int, scaffold: str, truncated: bool):
             sample = results[pi][si]
             prefix = self._format_prompt(prompts[pi], tokenizer) + sample["text"] + scaffold
             request_id = f"force_{pi}_{si}_{uuid.uuid4().hex[:8]}"
-            tail, tail_tokens = "", 0
+            tail, tail_tokens, tail_reason = "", 0, None
             async for output in engine.generate(prefix, params, request_id):
                 for completion in output.outputs:
                     if completion.finish_reason is not None:
                         tail = completion.text
                         tail_tokens = len(completion.token_ids)
+                        tail_reason = completion.finish_reason
 
             text = sample["text"] + scaffold + tail
             # include_stop_str_in_output keeps </answer> when the model emitted it
             # itself; appending unconditionally yields "</answer></answer>", which
             # the structure check rejects -- the exact failure forcing prevents.
-            # If the tag had to be appended, the answer budget ran out too:
-            # the answer is cut, not merely forced (see classify_truncation).
-            sample["answer_truncated"] = not text.rstrip().endswith("</answer>")
-            if sample["answer_truncated"]:
+            # The answer is cut (see classify_truncation) only if the budget ran
+            # out; a model that ends on EOS without the tag just gets the tag.
+            sample["answer_truncated"] = tail_reason == "length"
+            if not text.rstrip().endswith("</answer>"):
                 text += "</answer>"
             sample["text"] = text
             sample["token_count"] += tail_tokens
@@ -1201,11 +1213,12 @@ class AsyncGenerator(_SamplingParams):
             # --retry-truncated above all -- must stop treating it as unfinished.
             # forced_answer is what keeps the fact recoverable.
             sample["finish_reason"] = "stop"
-            sample["forced_answer"] = True
+            sample["forced_answer"] = truncated
 
         await asyncio.gather(*[finish(*t) for t in targets])
-        print(f"Forced an answer for {len(targets)} truncated generation(s)")
-        return len(targets)
+        forced = sum(t[3] for t in targets)
+        print(f"Forced an answer for {forced} truncated generation(s); opened <answer> after </think> for {len(targets) - forced}")
+        return forced
 
     async def generate_with_hints_async(
         self,
