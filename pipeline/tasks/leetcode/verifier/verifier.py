@@ -1,9 +1,15 @@
 """Compare canonical outputs (see sandbox.encode) and turn raw runs into verdicts.
 
 Runs in the dispatcher, which is the only process that holds expected outputs.
-Equality follows Python `==` on the original values, with two relaxations:
-floats compare within 1e-5 (the tolerance LeetCode problems state), and lists
-and tuples are interchangeable.
+A problem's `checker` picks the comparison:
+  - "value" (function-call problems): Python `==` on the original values, with
+    two relaxations: floats compare within 1e-5 (the tolerance LeetCode
+    problems state), and lists and tuples are interchangeable.
+  - "tokens" (stdin/stdout programs): printed text split on whitespace, token
+    by token. A token compares as a float within 1e-5 only if the expected
+    token has a decimal point; otherwise it must match exactly.
+  - "tokens_anycase": as "tokens", ignoring letter case, for statements that
+    accept answers in any case ("YES" / "yes").
 """
 
 import json
@@ -46,11 +52,39 @@ def match(got, exp) -> bool:
     return type(got) is type(exp) and got == exp
 
 
-def judge(run: dict, expected: list) -> dict:
+def _token_match(got: str, exp: str) -> bool:
+    if got == exp:
+        return True
+    if "." not in exp:
+        return False
+    try:
+        return math.isclose(float(got), float(exp), rel_tol=FLOAT_TOL, abs_tol=FLOAT_TOL)
+    except ValueError:
+        return False
+
+
+def match_tokens(got, exp: str, anycase: bool = False) -> bool:
+    if not isinstance(got, str):
+        return False
+    if anycase:
+        got, exp = got.lower(), exp.lower()
+    g, e = got.split(), exp.split()
+    return len(g) == len(e) and all(map(_token_match, g, e))
+
+
+CHECKERS = {
+    "value": match,
+    "tokens": match_tokens,
+    "tokens_anycase": lambda got, exp: match_tokens(got, exp, anycase=True),
+}
+
+
+def judge(run: dict, expected: list, checker: str = "value") -> dict:
     """Correctness verdict for one sandbox run (timing gate applied by caller).
 
     expected: decoded canonical outputs, one per test.
     """
+    same = CHECKERS[checker]
     out = run["stdout"]
     base = {"cpu_s": run["cpu_s"], "wall_s": run["wall_s"], "num_tests": len(expected),
             "tests_passed": 0, "first_fail": None, "error": None}
@@ -73,7 +107,7 @@ def judge(run: dict, expected: list) -> dict:
         if "error" in rec:
             return {**base, "verdict": RUNTIME_ERROR, "tests_passed": passed, "first_fail": i,
                     "error": str(rec["error"])[:64]}
-        if not match(rec.get("out"), exp):
+        if not same(rec.get("out"), exp):
             return {**base, "verdict": WRONG_ANSWER, "tests_passed": passed, "first_fail": i}
         passed += 1
 

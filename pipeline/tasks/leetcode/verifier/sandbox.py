@@ -3,9 +3,16 @@
 This module is imported by verifier workers. A worker builds a `Sandbox` once
 (Landlock ruleset, seccomp filter) and then calls `Sandbox.run(job)` per
 submission. Each run forks a child that confines itself, executes the code on
-the job's test calls, and streams one JSON line per test back over a pipe. The
+the job's tests, and streams one JSON line per test back over a pipe. The
 child never receives expected outputs: comparison happens in the dispatcher,
 so nothing the submission can inspect reveals the answers.
+
+Two job modes:
+  - "call" (default): exec `setup` + the code, then eval `entry(args)` per test
+    and return the canonical value (see `encode`).
+  - "stdio": run the code as `__main__` once per test with that test's input
+    on stdin, and return what it printed. Each input sits in its own memfd,
+    written before confinement; RLIMIT_FSIZE=0 then makes them read-only.
 
 Confinement (no root, no namespaces on this cluster):
   - every inherited fd closed; stdio -> /dev/null; new session
@@ -18,6 +25,7 @@ CPU time comes from wait4's rusage, which the child cannot forge.
 """
 
 import ctypes
+import io
 import json
 import os
 import resource
@@ -178,12 +186,12 @@ class Sandbox:
 
     # --- child side ---
 
-    def _confine(self, wfd: int, cpu_seconds: int) -> None:
+    def _confine(self, wfd: int, cpu_seconds: int, extra_fds=()) -> None:
         for fd in (0, 1, 2):
             os.dup2(self._devnull, fd)
         # Close only the fds that are open: closerange over the whole fd table
         # costs ~7 ms of child CPU, which would land in the measured time.
-        keep = {0, 1, 2, wfd, self._ruleset_fd}
+        keep = {0, 1, 2, wfd, self._ruleset_fd, *extra_fds}
         for name in os.listdir("/proc/self/fd"):
             fd = int(name)
             if fd not in keep:
@@ -217,15 +225,31 @@ class Sandbox:
             n = os.write(fd, view)
             view = view[n:]
 
+    def _memfd(self, data: str) -> int:
+        # os.memfd_create is missing from some Python builds; use libc.
+        fd = self._libc.memfd_create(b"stdin", 0)
+        if fd < 0:
+            raise OSError(ctypes.get_errno(), "memfd_create failed")
+        self._write_all(fd, data.encode())
+        os.lseek(fd, 0, os.SEEK_SET)
+        return fd
+
     def _child(self, job: dict, wfd: int) -> None:
+        stdio = job.get("mode", "call") == "stdio"
         try:
-            self._confine(wfd, job["cpu_seconds"])
+            stdin_fds = [self._memfd(t) for t in job["tests"]] if stdio else []
+            self._confine(wfd, job["cpu_seconds"], stdin_fds)
             self._write_all(wfd, READY)
         except BaseException:
             os._exit(CONFINE_FAILED_EXIT)
 
         # Untrusted code runs below. Anything it does only changes the data it
         # writes back; the verdict is decided elsewhere.
+        if stdio:
+            self._run_program(job, wfd, stdin_fds)
+        self._run_calls(job, wfd)
+
+    def _run_calls(self, job: dict, wfd: int) -> None:
         write, dumps, _exit = self._write_all, json.dumps, os._exit
         try:
             sys.setrecursionlimit(100_000)
@@ -246,12 +270,41 @@ class Sandbox:
             write(wfd, line.encode() + b"\n")
         _exit(0)
 
+    def _run_program(self, job: dict, wfd: int, stdin_fds: list[int]) -> None:
+        write, dumps, _exit = self._write_all, json.dumps, os._exit
+        try:
+            sys.setrecursionlimit(100_000)
+            program = compile(job["code"], "<solution>", "exec")
+        except BaseException as e:
+            write(wfd, dumps({"error": type(e).__name__, "stage": "load"}).encode() + b"\n")
+            _exit(0)
+
+        for fd in stdin_fds:
+            try:
+                # fd 0 too, so open(0) and os.read(0, ...) see the input.
+                os.dup2(fd, 0)
+                sys.stdin = io.TextIOWrapper(io.BufferedReader(io.FileIO(0, "r", closefd=False)), encoding="utf-8")
+                buf = io.BytesIO()
+                sys.stdout = io.TextIOWrapper(buf, encoding="utf-8")
+                try:
+                    exec(program, {"__name__": "__main__", "__builtins__": __builtins__})
+                except SystemExit as e:
+                    if e.code not in (None, 0):
+                        raise
+                sys.stdout.flush()
+                line = dumps({"out": buf.getvalue().decode("utf-8", "replace")})
+            except BaseException as e:
+                write(wfd, dumps({"error": type(e).__name__}).encode() + b"\n")
+                _exit(0)
+            write(wfd, line.encode() + b"\n")
+        _exit(0)
+
     # --- worker side ---
 
     def run(self, job: dict) -> dict:
         """Fork, confine, run, and collect. Never raises for submission behaviour.
 
-        job: {"setup", "code", "entry", "tests": [args_src], "timeout_s"}
+        job: {"mode", "setup", "code", "entry", "tests": [args_src or stdin text], "timeout_s"}
         """
         timeout_s = float(job["timeout_s"])
         job = {**job, "cpu_seconds": int(timeout_s) + 1}

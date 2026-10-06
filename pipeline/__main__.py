@@ -86,6 +86,8 @@ def cmd_create_primitives(args):
     task_options = {}
     if args.tracer is not None:
         task_options["tracer"] = args.tracer
+    if args.sources is not None:
+        task_options["sources"] = args.sources
     commands.create_primitives(
         task_name=args.task,
         output_path=output_path,
@@ -435,6 +437,9 @@ def main():
     p.add_argument("--tracer", choices=["original", "uniform"], default=None,
                    help="code_output only. Tracer for hint generation: 'uniform' (execution-uniform, "
                         "used for the shipped primitives) or 'original' (top-level). Default: uniform.")
+    p.add_argument("--sources", default=None,
+                   help="leetcode only. Comma-separated problem sites: leetcode, codeforces, atcoder, aizu. "
+                        "Default: leetcode.")
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.set_defaults(func=cmd_create_primitives)
 

@@ -2,9 +2,6 @@ Solve this programming problem in Python.
 
 {problem}
 
-Your solution must complete this starter code:
-```python
-{starter_code}
-```
+{interface}
 
-Think through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and IMMEDIATELY provide your final answer in <answer> </answer> tags with no text in between. The answer must be the complete Solution class as plain Python code, with no markdown fences.
+Think through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and IMMEDIATELY provide your final answer in <answer> </answer> tags with no text in between. The answer must be {answer_kind} as plain Python code, with no markdown fences.

@@ -1,6 +1,6 @@
 # LeetCode task: verifier design
 
-Status: infrastructure phase, LeetCodeDataset only (2,641 train problems). Goal is a ready pipeline for RL and evaluation, so that a larger dataset can be added later as a data loader only.
+Status: LeetCodeDataset (function-call problems) plus, optionally, Codeforces / AtCoder / Aizu problems from TACO-verified (stdin/stdout programs; see [stdin/stdout problems](#stdinstdout-problems)).
 
 ## Summary
 
@@ -71,6 +71,20 @@ evaluate   ──┘  │            ──► worker 1 (pinned) ──fork─�
 - Every gold solution is run once through the real sandbox at build time. Problems whose gold fails, or whose asserts use an unsupported form, are dropped and counted. This includes golds whose full test suite exceeds the 10 s CPU cap (e.g. bitmask DPs run on ~100 tests), and golds slower than `timeout_s / k` ≈ 3.3 s, whose 3× limit the 10 s wall deadline would cut short.
 - Splits: `sft_train`/`sft_val`/`rl_train`/`rl_val` partition the dataset's train rows (0–27 / 27–30 / 30–95 / 95–100%); `eval` is the dataset's own test split, so evaluation never sees train problems.
 - Problems whose description says "in any order" are dropped for now: the dataset's tests compare exactly against one ordering, so correct answers in another order would be marked wrong.
+
+## stdin/stdout problems
+
+`create_primitives --sources leetcode,codeforces,atcoder,aizu` adds problems from TACO-verified (`likaixin/TACO-verified`, pinned revision), where the answer is a whole program that reads stdin and prints the answer. Build into its own data dir (`--data-name leetcode_taco`) so the LeetCode-only tree stays as it was.
+
+- **Sandbox** (`mode: "stdio"`): each test input is written to its own memfd before confinement (`RLIMIT_FSIZE=0` then makes it read-only). Per test, the memfd becomes fd 0, `sys.stdin`/`sys.stdout` are replaced, and the program runs as `__main__`; the captured text is the output. `input()`, `sys.stdin.read()`, `sys.stdin.buffer` and `open(0)` all work. `sys.exit()`/`exit(0)` count as normal exit. Programs that use threads fail, since threads are blocked; writing straight to fd 1 is not captured.
+- **Comparison** (`checker`): `tokens` splits printed text on whitespace and compares token by token; a token is compared as a float within 1e-5 only when the expected token has a decimal point. `tokens_anycase` also ignores letter case, used when the statement says answers are accepted in any case.
+- **Filters**: stdin problems only, ≥ 10 tests, ≤ 1 MB of test text, no pictures or `<image>` references, no interactive problems, and no statements that accept several answers ("print any", "multiple answers", …), which a fixed expected output cannot judge.
+- **Gold**: up to 5 of the dataset's accepted solutions are tried in order; the first that passes in our sandbox within `timeout_s / k` is the gold.
+- **Splits**: each dataset is shuffled and sliced on its own, so the LeetCode rows' splits match a LeetCode-only build. TACO rows are all train rows (SFT / RL only); `eval` stays the 220 LeetCode test problems.
+- **Prompt**: the template takes `{interface}` (starter code block, or "a complete program that reads … standard input and prints … standard output") and `{answer_kind}` ("the complete Solution class" / "the complete program"). LeetCode prompts are byte-identical to before.
+- **Full build** (`data/leetcode_taco/`, 32 CPUs): 5,432 TACO problems kept (Codeforces 3,173, AtCoder 875, Aizu 684). Drops: 608 pictures, 602 < 10 tests, 437 multiple answers, 125 large tests, 3 interactive, and 195 with no candidate gold passing (87 timeout, 65 slow, 41 runtime error, 2 wrong answer). The first candidate passed for 7,176 of 7,629 problems, retries recovered 258.
+- **LeetCode rows are copied from `data/leetcode/`**, not rebuilt: three LeetCode golds sit at the ~3.3 s cap and flip between builds, and one extra row reshuffles every LeetCode split. The composed file holds the pilot's 2,701 LeetCode rows (indices 0–2700, with `dataset`/`mode`/`checker` added) followed by the TACO rows. LeetCode split membership matches the pilot exactly. Splits: sft_train 1,946 (669 LeetCode), sft_val 217, rl_train 4,688 (1,612 LeetCode), rl_val 362, eval 220 (LeetCode only).
+- **Smoke build** (200 sampled problems, 1 core, 10 min): 192 kept; the first candidate solution passed for 175, retries recovered 17, 7 timed out with every candidate, 1 was too slow.
 
 ## Deployment
 

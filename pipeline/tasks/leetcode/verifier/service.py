@@ -4,7 +4,8 @@ The service is stateless with respect to problems: each request carries the
 problem specs it needs, so RL and evaluation callers share one process without
 loading a bank. It caches only gold-solution timings, keyed by spec hash.
 
-    spec = {"setup": str, "entry": str, "tests": [args_src], "expected": [json_str], "gold": str}
+    spec = {"mode": "call" | "stdio", "checker": str, "setup": str, "entry": str,
+            "tests": [args_src or stdin text], "expected": [json_str], "gold": str}
     verify(problems={key: spec}, jobs=[(key, code or None)]) -> [result]
 
 A result is `verifier.judge`'s dict plus `limit_s`, `gold_s` and `rechecked`.
@@ -73,7 +74,8 @@ def _parse_cpu_list(text: str) -> list[int]:
 
 def spec_key(spec: dict) -> str:
     """Stable hash of everything that affects a problem's verdicts."""
-    blob = json.dumps([spec["setup"], spec["entry"], spec["tests"], spec["expected"], spec["gold"]])
+    blob = json.dumps([spec["mode"], spec["checker"], spec["setup"], spec["entry"], spec["tests"],
+                       spec["expected"], spec["gold"]])
     return hashlib.sha1(blob.encode()).hexdigest()
 
 
@@ -174,15 +176,15 @@ class VerifierPool:
     @staticmethod
     def _job(spec: dict, code: str, timeout_s: float) -> dict:
         # Expected outputs deliberately absent: workers never see them.
-        return {"setup": spec["setup"], "code": code, "entry": spec["entry"],
+        return {"mode": spec["mode"], "setup": spec["setup"], "code": code, "entry": spec["entry"],
                 "tests": spec["tests"], "timeout_s": timeout_s}
 
     @staticmethod
-    def _judge(run, expected: list) -> dict:
+    def _judge(run, expected: list, checker: str) -> dict:
         if run is None:
             return {"verdict": INFRA_ERROR, "error": "worker_died", "cpu_s": None, "wall_s": None,
                     "num_tests": len(expected), "tests_passed": 0, "first_fail": None}
-        return verifier.judge(run, expected)
+        return verifier.judge(run, expected, checker)
 
     # --- gold timing ---
 
@@ -193,7 +195,7 @@ class VerifierPool:
         futs = {h: [self._submit([self._job(s, s["gold"], self.timeout_s)]) for _ in range(self.gold_runs)]
                 for h, s in todo.items()}
         for h, fs in futs.items():
-            results = [self._judge(f.result()[0], decoded[h]) for f in fs]
+            results = [self._judge(f.result()[0], decoded[h], todo[h]["checker"]) for f in fs]
             bad = [r for r in results if r["verdict"] != PASS]
             entry = ({"t": None, "error": f"{bad[0]['verdict']}:{bad[0]['error']}"} if bad
                      else {"t": statistics.median(r["cpu_s"] for r in results), "error": None})
@@ -232,7 +234,7 @@ class VerifierPool:
                 results.append({"verdict": MALFORMED, "error": None, "cpu_s": None, "wall_s": None,
                                 "num_tests": len(decoded[h]), "tests_passed": 0, "first_fail": None, **meta})
                 continue
-            r = self._judge(fut.result()[0], decoded[h])
+            r = self._judge(fut.result()[0], decoded[h], problems[h]["checker"])
             if r["verdict"] == PASS and meta["limit_s"] is not None and r["cpu_s"] > meta["limit_s"]:
                 r, meta = self._recheck(problems[h], code, decoded[h], timeout_for(h), meta)
             results.append({**r, **meta})
@@ -242,7 +244,7 @@ class VerifierPool:
         """Gold then submission on one worker; that pair alone sets the verdict."""
         g_run, s_run = self._submit([self._job(spec, spec["gold"], self.timeout_s),
                                      self._job(spec, code, timeout_s)]).result()
-        g, r = self._judge(g_run, expected), self._judge(s_run, expected)
+        g, r = self._judge(g_run, expected, spec["checker"]), self._judge(s_run, expected, spec["checker"])
         limit = self._limit(g["cpu_s"]) if g["verdict"] == PASS else meta["limit_s"]
         meta = {**meta, "limit_s": limit, "rechecked": True}
         if r["verdict"] == PASS and r["cpu_s"] > limit:
