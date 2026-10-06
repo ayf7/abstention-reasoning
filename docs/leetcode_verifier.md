@@ -69,7 +69,7 @@ evaluate   ──┘  │            ──► worker 1 (pinned) ──fork─�
 - Tests come from the dataset's `check(candidate)` function, parsed with `ast`: each `assert` gives the call arguments (source) and the expected value. `input_output` is not used because it is lossy (it drops `list_node(...)`/`tree_node(...)` wrappers).
 - Expected values are evaluated once at data-build time in the trusted process and stored canonically.
 - Every gold solution is run once through the real sandbox at build time. Problems whose gold fails, or whose asserts use an unsupported form, are dropped and counted. This includes golds whose full test suite exceeds the 10 s CPU cap (e.g. bitmask DPs run on ~100 tests), and golds slower than `timeout_s / k` ≈ 3.3 s, whose 3× limit the 10 s wall deadline would cut short.
-- Splits: `sft_train`/`sft_val`/`rl_train`/`rl_val` partition the dataset's train rows (0–27 / 27–30 / 30–95 / 95–100%); `eval` is the dataset's own test split, so evaluation never sees train problems.
+- Splits are fixed counts: all train rows (any dataset) are shuffled once and sliced into `sft_train` 1,000, `sft_val` 250, `rl_train` 4,688, `rl_val` 250; `eval` gets the leftover train rows plus the 220 LeetCode test rows. The counts are sized for `data/leetcode_taco`. The LeetCode-only pilot (`data/leetcode`) was partitioned earlier with fractional ranges (0–27 / 27–30 / 30–95 / 95–100% of train, `eval` = test split); its partition files are pinned on disk, but the current code no longer reproduces them.
 - Problems whose description says "in any order" are dropped for now: the dataset's tests compare exactly against one ordering, so correct answers in another order would be marked wrong.
 
 ## stdin/stdout problems
@@ -80,10 +80,10 @@ evaluate   ──┘  │            ──► worker 1 (pinned) ──fork─�
 - **Comparison** (`checker`): `tokens` splits printed text on whitespace and compares token by token; a token is compared as a float within 1e-5 only when the expected token has a decimal point. `tokens_anycase` also ignores letter case, used when the statement says answers are accepted in any case.
 - **Filters**: stdin problems only, ≥ 10 tests, ≤ 1 MB of test text, no pictures or `<image>` references, no interactive problems, and no statements that accept several answers ("print any", "multiple answers", …), which a fixed expected output cannot judge.
 - **Gold**: up to 5 of the dataset's accepted solutions are tried in order; the first that passes in our sandbox within `timeout_s / k` is the gold.
-- **Splits**: each dataset is shuffled and sliced on its own, so the LeetCode rows' splits match a LeetCode-only build. TACO rows are all train rows (SFT / RL only); `eval` stays the 220 LeetCode test problems.
+- **Splits** (see Data): one shuffle over LeetCode and TACO train rows together. TACO rows are all train rows, so `eval` mixes LeetCode test, leftover LeetCode train and leftover TACO problems.
 - **Prompt**: the template takes `{interface}` (starter code block, or "a complete program that reads … standard input and prints … standard output") and `{answer_kind}` ("the complete Solution class" / "the complete program"). LeetCode prompts are byte-identical to before.
 - **Full build** (`data/leetcode_taco/`, 32 CPUs): 5,432 TACO problems kept (Codeforces 3,173, AtCoder 875, Aizu 684). Drops: 608 pictures, 602 < 10 tests, 437 multiple answers, 125 large tests, 3 interactive, and 195 with no candidate gold passing (87 timeout, 65 slow, 41 runtime error, 2 wrong answer). The first candidate passed for 7,176 of 7,629 problems, retries recovered 258.
-- **LeetCode rows are copied from `data/leetcode/`**, not rebuilt: three LeetCode golds sit at the ~3.3 s cap and flip between builds, and one extra row reshuffles every LeetCode split. The composed file holds the pilot's 2,701 LeetCode rows (indices 0–2700, with `dataset`/`mode`/`checker` added) followed by the TACO rows. LeetCode split membership matches the pilot exactly. Splits: sft_train 1,946 (669 LeetCode), sft_val 217, rl_train 4,688 (1,612 LeetCode), rl_val 362, eval 220 (LeetCode only).
+- **LeetCode rows are copied from `data/leetcode/`**, not rebuilt: three LeetCode golds sit at the ~3.3 s cap and flip between builds, and one extra row reshuffles every LeetCode split. The composed file holds the pilot's 2,701 LeetCode rows (indices 0–2700, with `dataset`/`mode`/`checker` added) followed by the TACO rows. Splits (LeetCode / TACO): sft_train 1,000 (344 / 656), sft_val 250 (101 / 149), rl_train 4,688 (1,577 / 3,111), rl_val 250 (95 / 155), eval 1,245 (220 LeetCode test + 364 LeetCode train / 661 TACO).
 - **Smoke build** (200 sampled problems, 1 core, 10 min): 192 kept; the first candidate solution passed for 175, retries recovered 17, 7 timed out with every candidate, 1 was too slow.
 
 ## Deployment
@@ -113,7 +113,7 @@ evaluate   ──┘  │            ──► worker 1 (pinned) ──fork─�
 | Dropped: gold slower than `timeout_s / k` ≈ 3.3 s | 27 |
 | Dropped: gold runtime error | 1 |
 
-Splits: sft_train 669, sft_val 75, rl_train 1,612, rl_val 125, eval 220.
+Splits (pilot, old fractional ranges): sft_train 669, sft_val 75, rl_train 1,612, rl_val 125, eval 220.
 
 The one runtime error is `stickers-to-spell-word`: its gold runs a BFS over 2^15 states and hits `MemoryError` under the 2 GB cap. It fails the same way every run, so the problem is dropped and the cap is kept.
 

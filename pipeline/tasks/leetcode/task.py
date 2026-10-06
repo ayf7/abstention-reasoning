@@ -164,14 +164,17 @@ class LeetCodeTask(BaseTask):
     )
     assistant_prefix = "<think>\nLet me work through this problem step by step."
 
-    # Ranges over the dataset's train rows; `eval` is the dataset's own test
-    # split (see get_split_indices), so evaluation never touches train problems.
-    SPLITS = {
-        "sft_train": (0.0, 0.27),
-        "sft_val": (0.27, 0.3),
-        "rl_train": (0.3, 0.95),
-        "rl_val": (0.95, 1.0),
-        "eval": (0.0, 1.0),
+    # Problem counts, not ranges (see get_split_indices). The train rows are
+    # shuffled once and sliced in this order; `eval` takes the rest of them
+    # plus every LeetCode test row. Sized for data/leetcode_taco; the
+    # LeetCode-only pilot (data/leetcode) was partitioned with the old
+    # fractional ranges and keeps its pinned partition files.
+    SPLITS: dict[str, int | None] = {  # type: ignore[assignment]
+        "sft_train": 1000,
+        "sft_val": 250,
+        "rl_train": 4688,
+        "rl_val": 250,
+        "eval": None,
     }
 
     rl_reward_manager = "batch"  # one verifier call per step, not per response
@@ -405,20 +408,19 @@ class LeetCodeTask(BaseTask):
             raise ValueError(f"Task '{self.name}' does not define split '{split}'. Available: {list(self.SPLITS)}")
         if primitives is None:
             raise ValueError("leetcode splits follow the dataset's train/test field; pass primitives")
-        # Each dataset is shuffled and sliced on its own, so adding a dataset
-        # leaves the LeetCode rows' splits as they were in a LeetCode-only build.
-        source = "test" if split == "eval" else "train"
-        lo, hi = self.SPLITS[split]
-        pools: dict[str, list[int]] = {}
-        for p in primitives:
-            if p["source_split"] == source:
-                pools.setdefault(p.get("dataset", "leetcode"), []).append(p["index"])
-        out = []
-        for name in sorted(pools):
-            pool = pools[name]
-            random.Random(seed).shuffle(pool)
-            out += pool[int(len(pool) * lo):int(len(pool) * hi)]
-        return out
+        pool = [p["index"] for p in primitives if p["source_split"] == "train"]
+        sized = sum(n for n in self.SPLITS.values() if n is not None)
+        if len(pool) < sized:
+            raise ValueError(f"{len(pool)} train problems cannot fill split sizes totalling {sized}")
+        random.Random(seed).shuffle(pool)
+        start = 0
+        for name, n in self.SPLITS.items():
+            if name == split:
+                break
+            start += n or 0
+        if split == "eval":
+            return pool[sized:] + [p["index"] for p in primitives if p["source_split"] == "test"]
+        return pool[start:start + self.SPLITS[split]]
 
     def get_ground_truth(self, primitive: dict) -> dict:
         gt = {k: primitive[k] for k in ("task_id", "variant", "setup", "entry", "tests", "expected", "gold")}
