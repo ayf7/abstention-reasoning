@@ -435,8 +435,10 @@ class vLLMRollout(BaseRollout):
             document_mask.append(curr_masks[:width])
             decoded_responses.append(self.tokenizer.decode(curr_tokens[:width]))
 
-        response = pad_2d_list_to_length(response, self.pad_token_id).to(device)
-        document_mask = pad_2d_list_to_length(document_mask, 0).to(device)
+        # Pad to the fixed width, not the batch max: each rollout replica pads
+        # its own shard, and the trainer concatenates the shards.
+        response = pad_2d_list_to_length(response, self.pad_token_id, max_length=width).to(device)
+        document_mask = pad_2d_list_to_length(document_mask, 0, max_length=width).to(device)
         prompts.non_tensor_batch["completions"] = np.array(decoded_responses, dtype='object')
 
         return response, document_mask
