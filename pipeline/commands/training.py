@@ -51,6 +51,7 @@ def train_sft(
     max_correct: int | None = None,
     completion_only_loss: bool = False,
     strip_think_tokens: bool = False,
+    fsdp: str | None = None,
     data_name: str | None = None,
     models_name: str | None = None,
 ) -> Path:
@@ -91,6 +92,10 @@ def train_sft(
         project_name: Wandb project name (default: {task}-sft)
         experiment_name: Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})
         include_wrong_valid_format: Include wrong answers with valid format (task-specific, default: False)
+        fsdp: HF Trainer FSDP spec (e.g. "shard_grad_op auto_wrap"); launch with torchrun.
+            The best epoch is still tracked and kept on disk, but not reloaded into memory
+            at the end: the trainer's FSDP reload expects a native FSDP checkpoint, while
+            FULL_STATE_DICT saves write HF safetensors.
 
     Returns:
         Path to trained model
@@ -425,16 +430,21 @@ def train_sft(
         save_strategy="epoch" if has_eval else "no",
         eval_strategy="epoch" if has_eval else "no",
         save_total_limit=2 if has_eval else None,
-        load_best_model_at_end=has_eval,
+        load_best_model_at_end=has_eval and not fsdp,
         metric_for_best_model="eval_loss" if has_eval else None,
         greater_is_better=False if has_eval else None,
         bf16=bf16,
+        fsdp=fsdp or "",
+        # The full FSDP optimizer state is 8 bytes/param gathered to rank 0
+        # every epoch; SFT runs are never resumed, so keep weights only.
+        save_only_model=bool(fsdp),
         report_to=report_to,
         run_name=experiment_name,
     )
 
-    # Initialize wandb if enabled
-    if report_to == "wandb":
+    # Initialize wandb if enabled. Under torchrun (multi-GPU) only rank 0
+    # logs; the trainer's own wandb callback follows the same rule.
+    if report_to == "wandb" and int(os.environ.get("RANK", "0")) == 0:
         import wandb
         wandb.init(project=project_name, name=experiment_name, reinit=True)
 
@@ -450,6 +460,11 @@ def train_sft(
 
     trainer.train()
 
+    # Checkpoint writes are finished on every rank once train() returns. The
+    # file moves below are rank 0's; the one trainer.save_model other ranks can
+    # reach (no validation set) is collective under FSDP, so they call it too.
+    is_main = trainer.is_world_process_zero()
+
     def _clear(path: Path) -> None:
         if path.is_symlink():
             path.unlink()
@@ -460,8 +475,11 @@ def train_sft(
         # No validation signal -- nothing to pick a "best" epoch by, so
         # just save the final weights as before.
         trainer.save_model(str(output_path))
-        tokenizer.save_pretrained(str(output_path))
-        print(f"Saved model to {output_path}")
+        if is_main:
+            tokenizer.save_pretrained(str(output_path))
+            print(f"Saved model to {output_path}")
+        return output_path
+    if not is_main:
         return output_path
 
     # Every epoch's weights already live on disk under run_root/checkpoint-N
@@ -483,6 +501,11 @@ def train_sft(
         (d for d in checkpoint_dirs if best_ckpt_path is not None and d.resolve() == best_ckpt_path),
         None,
     )
+
+    if best_ckpt_dir is None and fsdp:
+        # The in-memory weights are the last epoch (no reload under FSDP), so
+        # re-saving them as best/ would mislabel them.
+        raise RuntimeError(f"best checkpoint {best_ckpt_path} is not on disk under {run_root}")
 
     best_dest = run_root / "best"
     last_dest = run_root / "last"

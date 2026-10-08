@@ -320,6 +320,7 @@ def cmd_train_sft(args):
         include_wrong_valid_format=args.include_wrong_valid_format,
         upsample_hint=args.upsample_hint,
         strip_think_tokens=getattr(args, "strip_think_tokens", False),
+        fsdp=args.fsdp,
         max_correct=args.max_correct,
         completion_only_loss=args.completion_only_loss,
         data_name=args.data_name,
@@ -679,6 +680,9 @@ def main():
     p.add_argument("--include-wrong-valid-format", action="store_true", help="Include wrong answers with valid format (task-specific, e.g., valid UCI but wrong move for chess)")
     p.add_argument("--upsample-hint", type=int, default=1, help="Upsample hint-containing examples by this factor (e.g., 4 = 4x copies)")
     p.add_argument("--max-correct", type=int, default=None, help="Downsample correct examples to at most this many (random subset, seed=42)")
+    p.add_argument("--fsdp", default=None, metavar="SPEC",
+        help="HF Trainer FSDP spec, e.g. 'shard_grad_op auto_wrap' (ZeRO-2) or 'full_shard auto_wrap' "
+             "(ZeRO-3). Launch with torchrun --nproc_per_node=N. Default: no FSDP (DDP under torchrun).")
     p.add_argument("--strip-think-tokens", action="store_true",
         help="Remove <think>/</think> from the tokenizer's added-token vocabulary "
              "so they encode as ordinary text. Qwen3 ships them as added tokens "
