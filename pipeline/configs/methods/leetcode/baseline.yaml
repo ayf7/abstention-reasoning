@@ -1,6 +1,5 @@
 template_variant: baseline
 reward_function: compute_score
+# A finished but wrong attempt earns format_score (0.1 by default, as in the
+# other tasks); a sample cut off before </think> earns 0.
 reward_kwargs: {}
-# Reasoning is capped by max_new_tokens; a sample cut off mid-think gets
-# "\n</think>\n\n<answer>" and answer_budget tokens to write its code.
-answer_budget: 512
