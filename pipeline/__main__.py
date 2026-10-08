@@ -225,6 +225,7 @@ def cmd_generate(args):
         hint_target_fraction=getattr(args, "hint_target_fraction", None),
         max_hints=getattr(args, "max_hints", 4),
         drop_exhausted=getattr(args, "drop_exhausted", False),
+        drop_forced=getattr(args, "drop_forced", False),
         data_name=args.data_name,
         models_name=args.models_name,
     )
@@ -593,6 +594,10 @@ def main():
         help="Discard generations where the model asked past the last available "
              "hint and was served 'No more hints available.'. That placeholder is "
              "real training text; keeping it teaches the warm start to emit it.")
+    p.add_argument("--drop-forced", action="store_true",
+        help="Never keep an answer-forced sample (reasoning hit the budget). With "
+             "--answer-after-think this keeps only samples that finished thinking on "
+             "their own. Needs --sample-strategy random_correct.")
     p.add_argument("--target-correct-rate", type=float, default=None,
         help="Phase 3: keep resampling incorrect problems until this fraction is "
              "answered correctly (e.g. 0.5 for a majority). Stops early if a round "

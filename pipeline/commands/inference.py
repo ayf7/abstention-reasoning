@@ -393,6 +393,7 @@ def select_best_sample(
     primitive: dict,
     strategy: str = "shortest_cot",
     exclude_exhausted: bool = False,
+    exclude_forced: bool = False,
     rng=None,
 ) -> dict | None:
     """
@@ -449,6 +450,11 @@ def select_best_sample(
         clean = [s for s in evaluated_samples if EXHAUSTED_MARKER not in s.get("text", "")]
         if clean:
             evaluated_samples = clean
+
+    # Answer-forced samples ran out of reasoning budget; with exclude_forced
+    # they never count, so random_correct drops a problem solved only that way.
+    if exclude_forced:
+        evaluated_samples = [s for s in evaluated_samples if not s.get("forced_answer")]
 
     # Separate correct and incorrect
     correct_samples = [s for s in evaluated_samples if s["correct"]]
@@ -550,6 +556,7 @@ def generate(
     hint_target_fraction: float | None = None,
     max_hints: int = 4,
     drop_exhausted: bool = False,
+    drop_forced: bool = False,
     target_correct_rate: float | None = None,
     max_oversample: int = 5,
     data_name: str | None = None,
@@ -602,6 +609,9 @@ def generate(
             available hint and was served the "No more hints available."
             placeholder. That string is real training text, so leaving it in
             teaches the warm start to produce and expect it.
+        drop_forced: Never select an answer-forced sample (one whose reasoning
+            hit the budget). Needs sample_strategy "random_correct", which
+            drops a problem left with no correct sample.
         target_correct_rate: Keep resampling incorrect problems until this fraction
             is answered correctly (phase 3). None disables the loop.
         max_oversample: Cap on phase-3 resampling rounds.
@@ -640,6 +650,8 @@ def generate(
 
     answer_budget, answer_after_think, use_async = resolve_answer_forcing(
         method, answer_budget, answer_after_think, use_async, multi_turn)
+    if drop_forced and sample_strategy != "random_correct":
+        raise ValueError("drop_forced needs sample_strategy 'random_correct'")
 
     # Resolve model shortcuts (sft, rl)
     actual_model_name = model_name
@@ -874,6 +886,7 @@ def generate(
                     best_sample = select_best_sample(gen_samples, task, primitive,
                                                      strategy=sample_strategy,
                                                      exclude_exhausted=drop_exhausted,
+                                                     exclude_forced=drop_forced,
                                                      rng=_rng)
                     if best_sample is None:
                         # strategy="random_correct" and nothing was correct.
@@ -991,7 +1004,8 @@ def generate(
                             best_sample = select_best_sample(
                                 gen_samples, task, primitive,
                                 strategy=sample_strategy,
-                                exclude_exhausted=drop_exhausted, rng=_rng)
+                                exclude_exhausted=drop_exhausted,
+                                exclude_forced=drop_forced, rng=_rng)
                             if best_sample is None:
                                 # random_correct: nothing correct -> drop the problem
                                 n_no_correct += 1
@@ -1097,6 +1111,7 @@ def generate(
                     best_sample = select_best_sample(gen_samples, task, primitive,
                                                      strategy=sample_strategy,
                                                      exclude_exhausted=drop_exhausted,
+                                                     exclude_forced=drop_forced,
                                                      rng=_rng)
                     if best_sample is None:
                         # strategy="random_correct" and nothing was correct.
