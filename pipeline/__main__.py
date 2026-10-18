@@ -336,7 +336,6 @@ def cmd_train_rl(args):
     sft_model_path = Path(args.sft_model) if args.sft_model else None
     output_path = Path(args.output) if args.output else None
     reward_function_path = Path(args.reward_function) if args.reward_function else None
-    resume_path = Path(args.resume) if args.resume else None
 
     # Parse reward kwargs overrides (KEY=VALUE pairs)
     reward_kwargs_overrides = {}
@@ -378,7 +377,6 @@ def cmd_train_rl(args):
         project_name=args.project_name,
         experiment_name=args.experiment_name,
         wandb=not args.no_wandb,
-        resume_path=resume_path,
         cleanup_checkpoints=not args.keep_checkpoints,
         keep_state=args.keep_state,
         reward_kwargs_overrides=reward_kwargs_overrides,
@@ -727,7 +725,6 @@ def main():
     p.add_argument("--project-name", help="Wandb project name (default: {task}-rl)")
     p.add_argument("--experiment-name", help="Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})")
     p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
-    p.add_argument("--resume", help="Path to resume from existing run")
     p.add_argument("--overwrite", action="store_true", help="Discard an existing run at this run-id and train from scratch")
     p.add_argument("--continue-run", action="store_true", help="Resume the existing run at this run-id from its latest checkpoint")
     p.add_argument("--save-best", action=argparse.BooleanOptionalAction, default=True, help="Also emit best/, the checkpoint with the highest validation score (last/ is always written). Use --no-save-best to disable (default: enabled)")

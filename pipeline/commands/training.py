@@ -699,7 +699,6 @@ def train_rl(
     project_name: str | None = None,
     experiment_name: str | None = None,
     wandb: bool = True,
-    resume_path: Path | None = None,
     cleanup_checkpoints: bool = True,
     keep_state: bool = False,
     reward_kwargs_overrides: dict | None = None,
@@ -743,7 +742,6 @@ def train_rl(
         project_name: Wandb project name (default: {task}-rl)
         experiment_name: Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})
         wandb: Enable wandb logging
-        resume_path: Path to resume from existing run (overrides output_path)
         cleanup_checkpoints: Delete checkpoints after training (default: True)
         keep_state: Keep the last optimizer state checkpoint after training (default: False)
         data_name: Data directory name (default: task_name)
@@ -828,11 +826,10 @@ def train_rl(
         rollouts_dir = run_dir / "rollouts"
         output_path = run_dir / "model"
 
-    if resume_path is None:
-        _guard_existing_run(
-            run_dir, checkpoints_dir, output_path, rollouts_dir,
-            overwrite=overwrite, continue_run=continue_run,
-        )
+    _guard_existing_run(
+        run_dir, checkpoints_dir, output_path, rollouts_dir,
+        overwrite=overwrite, continue_run=continue_run,
+    )
 
     # Validate required paths
     if train_prompts_path is None:
@@ -904,17 +901,6 @@ def train_rl(
     # Apply CLI overrides to reward kwargs
     if reward_kwargs_overrides:
         reward_kwargs.update(reward_kwargs_overrides)
-
-    # Handle resume path
-    if resume_path is not None:
-        # Resume uses the checkpoint directory structure
-        checkpoints_dir = resume_path
-        run_dir = resume_path.parent
-        rollouts_dir = run_dir / "rollouts"
-        output_path = run_dir / "model"
-        if experiment_name is None:
-            experiment_name = run_dir.name
-        print(f"Resuming from: {resume_path}")
 
     # Default reward function path
     if reward_function_path is None:
@@ -1019,7 +1005,7 @@ def train_rl(
         "trainer.nnodes=1",
         f"trainer.save_freq={save_freq}",
         f"trainer.test_freq={test_freq}",
-        f"trainer.resume_mode={'auto' if (continue_run or resume_path is not None) else 'disable'}",
+        f"trainer.resume_mode={'auto' if continue_run else 'disable'}",
         f"trainer.max_actor_ckpt_to_keep={max_ckpt_to_keep}",
         f"trainer.project_name={project_name}",
         f"trainer.experiment_name={experiment_name}",
