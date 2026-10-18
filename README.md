@@ -106,8 +106,6 @@ python -m pipeline evaluate --task countdown --method method_b --model rl \
     --data-name countdown
 ```
 
-`--multi-turn` is read from the method config and does not need passing.
-
 ## Tasks
 
 | Task | Problem |

@@ -206,12 +206,10 @@ def cmd_generate(args):
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         verbose=args.verbose,
-        retry_incorrect=args.retry_incorrect,
         retry_truncated=getattr(args, "retry_truncated", False),
         max_retries=getattr(args, "max_retries", 10),
         force_answer=args.force_answer,
         seed=getattr(args, "seed", 42),
-        multi_turn=args.multi_turn,  # None = use method config
         force_hints_distribution=force_hints_distribution,
         force_hints_policy=force_hints_policy,
         sample_strategy=getattr(args, "sample_strategy", None),
@@ -260,7 +258,6 @@ def cmd_evaluate(args):
         data_parallel_size=args.data_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         verbose=args.verbose,
-        multi_turn=args.multi_turn,  # None = use method config
         seed=args.seed,
         no_hints=args.no_hints,
         force_answer=args.force_answer,
@@ -551,11 +548,9 @@ def main():
              "(~4x throughput) rather than --tensor-parallel-size 4.")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
-    p.add_argument("--retry-incorrect", action="store_true", help="Re-run incorrect examples from existing output")
     p.add_argument("--retry-truncated", action="store_true", help="Re-run truncated examples (finish_reason=length) with different seeds until all complete")
     p.add_argument("--max-retries", type=int, default=10, help="Max retry iterations for --retry-truncated (default: 10)")
     p.add_argument("--seed", type=int, default=42, help="Starting seed for generation (default: 42)")
-    p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
     add_force_answer_arg(p, MAX_NEW_TOKENS_EXCLUSIVE)
     p.add_argument("--force-hints-distribution", type=str, default=None,
         help="Distribution of forced hint counts, e.g. '1:0.5,2:0.3,3:0.2'. "
@@ -626,7 +621,6 @@ def main():
              "(~4x throughput) rather than --tensor-parallel-size 4.")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
-    p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
     add_force_answer_arg(p, MAX_NEW_TOKENS_EXCLUSIVE)
     p.add_argument("--seed", type=int, default=42, help="Random seed for generation (default: 42)")
     p.add_argument("--no-hints", action="store_true", help="Counterfactual eval: block hint requests during decoding so the model must answer alone")

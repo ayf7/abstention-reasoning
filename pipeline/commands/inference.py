@@ -536,7 +536,6 @@ def generate(
     max_retries: int = 10,
     force_answer: ForceAnswer | None = None,
     seed: int | None = 42,
-    multi_turn: bool | None = None,
     force_hints_distribution: dict[int, float] | None = None,
     force_hints_policy: dict[str, float] | None = None,
     sample_strategy: str | None = None,
@@ -573,7 +572,6 @@ def generate(
             out of think_tokens mid-thought gets </think> closed for it and
             answer_tokens to answer in, matching what RL does at rollout time.
             Single-turn generation only.
-        multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
         force_hints_distribution: Distribution of forced hint counts. Maps number of hints
             to probability, e.g. {1: 0.5, 2: 0.3, 3: 0.2}. Probabilities must sum to 1.
             If None, no hints are forced.
@@ -617,9 +615,7 @@ def generate(
     if method_name is not None:
         method = Method.load(method_name, task_name)
 
-    # Resolve multi_turn from method config (CLI overrides if explicitly set)
-    if multi_turn is None:
-        multi_turn = method.multi_turn if method else False
+    multi_turn = method.multi_turn if method else False
     if force_hints_distribution or hint_schedule_from is not None:
         multi_turn = True  # any hint injection requires multi_turn
     if no_hints:
@@ -1052,10 +1048,6 @@ def generate_until_target(
     """
     output_path = generate_kwargs.get("output_path")
     seed = generate_kwargs.pop("seed", 42)
-    # The caller passes its own --retry-incorrect; this loop owns that flag
-    # (round 0 generates fresh, later rounds retry only the incorrect), so drop
-    # theirs rather than colliding with it.
-    generate_kwargs.pop("retry_incorrect", None)
 
     prev_correct = -1
     for round_idx in range(max_oversample + 1):
@@ -1181,7 +1173,6 @@ def evaluate(
     data_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.9,
     verbose: bool = False,
-    multi_turn: bool | None = None,
     seed: int | None = 42,
     no_hints: bool = False,
     force_answer: ForceAnswer | None = None,
@@ -1198,7 +1189,6 @@ def evaluate(
         run_id: Run identifier for model resolution (used when model_name="sft" or "rl")
         prompts_path: Path to eval prompts (default: data/{data_name}/problems_with_format/{split}__{method}.json)
         output_path: Where to save results (default: models/{models_name}/{method}_{sft,rl}/{run_id}/evals/{split}.json)
-        multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
         no_hints: Counterfactual eval -- ban the hint request so the model must
             answer on its own. Everything else about the eval is unchanged, so
             the drop against a normal run measures what the hints were worth.
@@ -1220,9 +1210,7 @@ def evaluate(
     if method_name is not None:
         method = Method.load(method_name, task_name)
 
-    # Resolve multi_turn from method config (CLI overrides if explicitly set)
-    if multi_turn is None:
-        multi_turn = method.multi_turn if method else False
+    multi_turn = method.multi_turn if method else False
 
     max_new_tokens, answer_budget = resolve_token_budgets(max_new_tokens, force_answer, multi_turn)
 
