@@ -2,6 +2,7 @@
 Inference commands - generation and evaluation.
 """
 
+import asyncio
 import random
 import re
 from collections import defaultdict
@@ -9,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from pipeline.core.io import load_json, save_json
-from pipeline.core.generator import Generator, GenerationConfig, AsyncGenerator
+from pipeline.core.generator import GenerationConfig, AsyncGenerator
 from pipeline.core.method import Method, resolve_data_name, resolve_models_name
 from pipeline.core.utils import extract_answer, model_short_name
 from pipeline.tasks import get_task
@@ -69,14 +70,12 @@ def resolve_answer_forcing(
     method: "Method | None",
     answer_budget: int | None,
     answer_after_think: bool,
-    use_async: bool,
     multi_turn: bool,
-) -> tuple[int, bool, bool]:
-    """(answer_budget, answer_after_think, use_async) after method defaults.
+) -> tuple[int, bool]:
+    """(answer_budget, answer_after_think) after method defaults.
 
     answer_budget None means "use the method config"; answer_after_think is
-    opt-in per call. Forcing lives in the async single-turn path only, so it
-    turns async on rather than being silently ignored.
+    opt-in per call. Forcing lives in the single-turn path only.
     """
     if answer_budget is None:
         answer_budget = method.answer_budget if method else 0
@@ -85,12 +84,9 @@ def resolve_answer_forcing(
     if answer_budget > 0:
         if multi_turn:
             raise ValueError("answer forcing is single-turn only; it cannot combine with multi_turn")
-        if not use_async:
-            print("Answer forcing needs the async generator; enabling --async.")
-            use_async = True
         print(f"Answer forcing: {answer_budget}-token answer budget"
               + (", <answer> opened after every </think>" if answer_after_think else ""))
-    return answer_budget, answer_after_think, use_async
+    return answer_budget, answer_after_think
 
 
 def count_truncation(records: list[dict]) -> dict[str, int]:
@@ -530,7 +526,6 @@ def generate(
     prompts_path: Path | None = None,
     output_path: Path | None = None,
     split: str = "sft",
-    batch_size: int = 16,
     max_new_tokens: int = 2048,
     temperature: float = 0.7,
     top_p: float = 0.9,
@@ -545,7 +540,6 @@ def generate(
     answer_after_think: bool = False,
     seed: int | None = 42,
     multi_turn: bool | None = None,
-    use_async: bool = False,
     force_hints_distribution: dict[int, float] | None = None,
     force_hints_policy: dict[str, float] | None = None,
     sample_strategy: str | None = None,
@@ -580,12 +574,11 @@ def generate(
         answer_budget: Tokens held back for a forced answer. A generation that runs
             out of room mid-thought gets </think> closed for it and this many tokens
             to answer in, matching what RL does at rollout time. 0 disables forcing.
-            Async single-turn generation only.
+            Single-turn generation only.
         answer_after_think: Stop every sample at </think> and open <answer> for
             it, so the answer layout is fixed rather than left to the model.
             Opt-in; requires answer_budget > 0.
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
-        use_async: Use async generation for optimal throughput.
         force_hints_distribution: Distribution of forced hint counts. Maps number of hints
             to probability, e.g. {1: 0.5, 2: 0.3, 3: 0.2}. Probabilities must sum to 1.
             If None, no hints are forced.
@@ -648,8 +641,8 @@ def generate(
                   "graded pass rate (method config requested multi-turn).")
         multi_turn = False
 
-    answer_budget, answer_after_think, use_async = resolve_answer_forcing(
-        method, answer_budget, answer_after_think, use_async, multi_turn)
+    answer_budget, answer_after_think = resolve_answer_forcing(
+        method, answer_budget, answer_after_think, multi_turn)
     if drop_forced and sample_strategy != "random_correct":
         raise ValueError("drop_forced needs sample_strategy 'random_correct'")
 
@@ -686,11 +679,9 @@ def generate(
     # Initialize generator (once, reused across retry iterations)
     config = GenerationConfig(
         model_name=actual_model_name,
-        batch_size=batch_size,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         top_p=top_p,
-        num_samples=num_samples,
         tensor_parallel_size=tensor_parallel_size,
         data_parallel_size=data_parallel_size,
         gpu_memory_utilization=gpu_memory_utilization,
@@ -702,7 +693,6 @@ def generate(
         answer_budget=answer_budget,
         answer_after_think=answer_after_think,
     )
-    generator = Generator(config)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     total_attempts = (max_retries + 1) if retry_truncated else 1
@@ -741,12 +731,8 @@ def generate(
 
         print(f"Generating {len(remaining_prompts)} remaining prompts...")
 
-        total_batches = (len(remaining_prompts) + batch_size - 1) // batch_size
-
         if attempt == 0:
             print(f"Generating with {actual_model_name}...")
-            if use_async:
-                print("Async mode enabled (optimal throughput)")
             if multi_turn:
                 print("Multi-turn mode enabled")
 
@@ -831,10 +817,8 @@ def generate(
         else:
             force_hints_list = [0] * len(remaining_prompts)
 
-        # For async multi-turn, process all remaining prompts at once
-        if multi_turn and use_async:
-            import asyncio
-
+        # Multi-turn: process all remaining prompts at once
+        if multi_turn:
             all_prompts = [p["prompt"] for p in remaining_prompts]
             all_ground_truths = [p["ground_truth"] for p in remaining_prompts]
 
@@ -958,223 +942,107 @@ def generate(
             print(f"{truncated} truncated records remaining.")
             continue
 
-        # Async regular generation (non-multi-turn)
-        if use_async and not multi_turn:
-            import asyncio
+        # Single-turn
+        # Same defaulting as the multi-turn branch. Without it
+        # sample_strategy stays None here and overrides the function default.
+        sample_strategy = sample_strategy or "shortest_cot"
+        n_no_correct = 0  # dropped by strategy="random_correct"
 
-            # Same defaulting as the sync and multi-turn branches. Without it
-            # sample_strategy stays None here and overrides the function default.
-            sample_strategy = sample_strategy or "shortest_cot"
-            n_no_correct = 0  # dropped by strategy="random_correct"
+        async def _async_generate_with_retries():
+            async_generator = AsyncGenerator(config)
+            try:
+                return await _async_generate_inner(async_generator)
+            finally:
+                async_generator.close()
 
-            async def _async_generate_with_retries():
-                async_generator = AsyncGenerator(config)
-                try:
-                    return await _async_generate_inner(async_generator)
-                finally:
-                    async_generator.close()
+        async def _async_generate_inner(async_generator):
+            nonlocal n_no_correct
+            current_prompts = remaining_prompts
 
-            async def _async_generate_inner(async_generator):
-                nonlocal n_no_correct
-                current_prompts = remaining_prompts
-
-                for retry_attempt in range(max_retries + 1 if retry_truncated else 1):
-                    if retry_attempt > 0:
-                        config.seed = seed + retry_attempt * 1000
-                        # Filter to truncated only
-                        truncated_indices = {idx for idx, r in records_by_index.items() if r.get("finish_reason") == "length"}
-                        current_prompts = [p for p in prompts_data if p["index"] in truncated_indices]
-                        if not current_prompts:
-                            break
-                        print(f"\n=== Retry truncated attempt {retry_attempt}/{max_retries} (seed={config.seed}, {len(current_prompts)} prompts) ===")
-
-                    all_prompts = [p["prompt"] for p in current_prompts]
-                    print(f"Running async generation on {len(all_prompts)} prompts...")
-                    all_results = await async_generator.generate_async(all_prompts, num_samples=num_samples)
-
-                    for prompt_data, gen_samples in zip(current_prompts, all_results):
-                        primitive = {
-                            "index": prompt_data["index"],
-                            **prompt_data["ground_truth"],
-                            "variant": prompt_data.get("variant", "unknown"),
-                        }
-
-                        if num_samples > 1:
-                            _rng = random.Random((seed or 0) + prompt_data["index"])
-                            best_sample = select_best_sample(
-                                gen_samples, task, primitive,
-                                strategy=sample_strategy,
-                                exclude_exhausted=drop_exhausted,
-                                exclude_forced=drop_forced, rng=_rng)
-                            if best_sample is None:
-                                # random_correct: nothing correct -> drop the problem
-                                n_no_correct += 1
-                                records_by_index.pop(prompt_data["index"], None)
-                                continue
-                        else:
-                            sample = gen_samples[0]
-                            is_correct, meta = task.check_correctness(primitive, sample["text"])
-                            best_sample = {
-                                **sample,
-                                "correct": is_correct,
-                                "metadata": meta,
-                            }
-
-                        record = {
-                            "index": prompt_data["index"],
-                            "variant": prompt_data.get("variant", "unknown"),
-                            "prompt": prompt_data["prompt"],
-                            "generation": best_sample["text"],
-                            "correct": best_sample["correct"],
-                            "finish_reason": best_sample["finish_reason"],
-                            "token_count": best_sample["token_count"],
-                            "metadata": best_sample["metadata"],
-                            "extracted_hints": extract_generation_hints(best_sample["text"]),
-                            **{k: best_sample[k] for k in
-                               ("pass_rate", "num_correct_samples", "num_samples")
-                               if k in best_sample},
-                            "forced_answer": best_sample.get("forced_answer", False),
-                            "answer_truncated": best_sample.get("answer_truncated", False),
-                        }
-
-                        copy_source_fields(record, prompt_data)
-                        records_by_index[prompt_data["index"]] = record
-
-                    records = sorted(records_by_index.values(), key=lambda r: r["index"])
-                    save_json(output_path, records)
-
-                    correct = sum(1 for r in records if r["correct"])
-                    truncated_count = sum(1 for r in records if r.get("finish_reason") == "length")
-                    forced_count = sum(1 for r in records if r.get("forced_answer"))
-                    forced_note = f", {forced_count} forced" if forced_count else ""
-                    trunc = count_truncation(records)
-                    print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%), "
-                          f"{trunc['think']} think-truncated, {trunc['answer']} answer-truncated{forced_note}")
-                    print(f"Saved dataset to {output_path}")
-
-                    if truncated_count == 0 or not retry_truncated:
-                        if truncated_count == 0 and retry_attempt > 0:
-                            print(f"All records complete after {retry_attempt + 1} attempt(s).")
+            for retry_attempt in range(max_retries + 1 if retry_truncated else 1):
+                if retry_attempt > 0:
+                    config.seed = seed + retry_attempt * 1000
+                    # Filter to truncated only
+                    truncated_indices = {idx for idx, r in records_by_index.items() if r.get("finish_reason") == "length"}
+                    current_prompts = [p for p in prompts_data if p["index"] in truncated_indices]
+                    if not current_prompts:
                         break
+                    print(f"\n=== Retry truncated attempt {retry_attempt}/{max_retries} (seed={config.seed}, {len(current_prompts)} prompts) ===")
 
-            asyncio.run(_async_generate_with_retries())
-            if n_no_correct:
-                print(f"Dropped {n_no_correct} problem(s) with no correct sample "
-                      f"(--sample-strategy random_correct).")
-            return output_path
+                all_prompts = [p["prompt"] for p in current_prompts]
+                print(f"Running async generation on {len(all_prompts)} prompts...")
+                all_results = await async_generator.generate_async(all_prompts, num_samples=num_samples)
 
-        # Standard batch processing (sync)
-        for batch_idx in range(0, len(remaining_prompts), batch_size):
-            batch_prompts_data = remaining_prompts[batch_idx:batch_idx + batch_size]
-            batch_prompts = [p["prompt"] for p in batch_prompts_data]
-
-            # Generate batch
-            if multi_turn:
-                if num_samples > 1:
-                    expanded_prompts = [p for p in batch_prompts for _ in range(num_samples)]
-                    expanded_gts = [p["ground_truth"] for p in batch_prompts_data for _ in range(num_samples)]
-                    expanded_force = [fh for fh in force_hints_list[batch_idx:batch_idx + batch_size] for _ in range(num_samples)]
-                    expanded_results = generator.generate_with_hints(
-                        expanded_prompts,
-                        expanded_gts,
-                        force_hints=expanded_force,
-                    )
-                    batch_results = [
-                        [r[0] for r in expanded_results[i * num_samples:(i + 1) * num_samples]]
-                        for i in range(len(batch_prompts_data))
-                    ]
-                else:
-                    batch_ground_truths = [p["ground_truth"] for p in batch_prompts_data]
-                    batch_force_hints = force_hints_list[batch_idx:batch_idx + batch_size]
-                    batch_results = generator.generate_with_hints(
-                        batch_prompts,
-                        batch_ground_truths,
-                        force_hints=batch_force_hints,
-                    )
-            else:
-                batch_results = generator.generate(batch_prompts)
-
-            # Process results
-            sample_strategy = sample_strategy or ("most_hints" if multi_turn else "shortest_cot")
-            n_no_correct = 0  # dropped by strategy="random_correct"
-            batch_correct = 0
-            for prompt_data, gen_samples in zip(batch_prompts_data, batch_results):
-                primitive = {
-                    "index": prompt_data["index"],
-                    **prompt_data["ground_truth"],
-                    "variant": prompt_data.get("variant", "unknown"),
-                }
-
-                if num_samples > 1:
-                    # Seed per problem index so a rerun picks the same sample.
-                    _rng = random.Random((seed or 0) + prompt_data["index"])
-                    best_sample = select_best_sample(gen_samples, task, primitive,
-                                                     strategy=sample_strategy,
-                                                     exclude_exhausted=drop_exhausted,
-                                                     exclude_forced=drop_forced,
-                                                     rng=_rng)
-                    if best_sample is None:
-                        # strategy="random_correct" and nothing was correct.
-                        n_no_correct += 1
-                        records_by_index.pop(prompt_data["index"], None)
-                        continue
-                else:
-                    sample = gen_samples[0]
-                    is_correct, meta = task.check_correctness(primitive, sample["text"])
-                    best_sample = {
-                        **sample,
-                        "correct": is_correct,
-                        "metadata": meta,
+                for prompt_data, gen_samples in zip(current_prompts, all_results):
+                    primitive = {
+                        "index": prompt_data["index"],
+                        **prompt_data["ground_truth"],
+                        "variant": prompt_data.get("variant", "unknown"),
                     }
 
-                if best_sample["correct"]:
-                    batch_correct += 1
+                    if num_samples > 1:
+                        _rng = random.Random((seed or 0) + prompt_data["index"])
+                        best_sample = select_best_sample(
+                            gen_samples, task, primitive,
+                            strategy=sample_strategy,
+                            exclude_exhausted=drop_exhausted,
+                            exclude_forced=drop_forced, rng=_rng)
+                        if best_sample is None:
+                            # random_correct: nothing correct -> drop the problem
+                            n_no_correct += 1
+                            records_by_index.pop(prompt_data["index"], None)
+                            continue
+                    else:
+                        sample = gen_samples[0]
+                        is_correct, meta = task.check_correctness(primitive, sample["text"])
+                        best_sample = {
+                            **sample,
+                            "correct": is_correct,
+                            "metadata": meta,
+                        }
 
-                record = {
-                    "index": prompt_data["index"],
-                    "variant": prompt_data.get("variant", "unknown"),
-                    "prompt": prompt_data["prompt"],
-                    "generation": best_sample["text"],
-                    "correct": best_sample["correct"],
-                    "finish_reason": best_sample["finish_reason"],
-                    "token_count": best_sample["token_count"],
-                    "metadata": best_sample["metadata"],
-                    "extracted_hints": extract_generation_hints(best_sample["text"]),
-                    **{k: best_sample[k] for k in
-                       ("pass_rate", "num_correct_samples", "num_samples")
-                       if k in best_sample},
-                }
+                    record = {
+                        "index": prompt_data["index"],
+                        "variant": prompt_data.get("variant", "unknown"),
+                        "prompt": prompt_data["prompt"],
+                        "generation": best_sample["text"],
+                        "correct": best_sample["correct"],
+                        "finish_reason": best_sample["finish_reason"],
+                        "token_count": best_sample["token_count"],
+                        "metadata": best_sample["metadata"],
+                        "extracted_hints": extract_generation_hints(best_sample["text"]),
+                        **{k: best_sample[k] for k in
+                           ("pass_rate", "num_correct_samples", "num_samples")
+                           if k in best_sample},
+                        "forced_answer": best_sample.get("forced_answer", False),
+                        "answer_truncated": best_sample.get("answer_truncated", False),
+                    }
 
-                if "num_hints" in best_sample:
-                    record["num_hints"] = best_sample["num_hints"]
-                if "turns" in best_sample:
-                    record["turns"] = best_sample["turns"]
-                if "total_token_count" in best_sample:
-                    record["total_token_count"] = best_sample["total_token_count"]
+                    copy_source_fields(record, prompt_data)
+                    records_by_index[prompt_data["index"]] = record
 
-                copy_source_fields(record, prompt_data)
-                records_by_index[prompt_data["index"]] = record
+                records = sorted(records_by_index.values(), key=lambda r: r["index"])
+                save_json(output_path, records)
 
-            records = sorted(records_by_index.values(), key=lambda r: r["index"])
-            save_json(output_path, records)
+                correct = sum(1 for r in records if r["correct"])
+                truncated_count = sum(1 for r in records if r.get("finish_reason") == "length")
+                forced_count = sum(1 for r in records if r.get("forced_answer"))
+                forced_note = f", {forced_count} forced" if forced_count else ""
+                trunc = count_truncation(records)
+                print(f"Async generation complete: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%), "
+                      f"{trunc['think']} think-truncated, {trunc['answer']} answer-truncated{forced_note}")
+                print(f"Saved dataset to {output_path}")
 
-            batch_num = batch_idx // batch_size + 1
-            print(f"Batch {batch_num}/{total_batches}: {batch_correct}/{len(batch_results)} correct (saved)")
+                if truncated_count == 0 or not retry_truncated:
+                    if truncated_count == 0 and retry_attempt > 0:
+                        print(f"All records complete after {retry_attempt + 1} attempt(s).")
+                    break
 
-        # Final stats for this attempt
-        records = sorted(records_by_index.values(), key=lambda r: r["index"])
-        correct = sum(1 for r in records if r["correct"])
-        print(f"Generated {len(records)} examples: {correct}/{len(records)} correct ({100*correct/len(records):.1f}%)")
-        save_json(output_path, records)
-        print(f"Saved dataset to {output_path}")
-
-        if not retry_truncated:
-            break
-        truncated = sum(1 for r in records if r.get("finish_reason") == "length")
-        if truncated == 0:
-            print(f"All records complete after {attempt + 1} attempt(s).")
-            break
-        print(f"{truncated} truncated records remaining.")
+        asyncio.run(_async_generate_with_retries())
+        if n_no_correct:
+            print(f"Dropped {n_no_correct} problem(s) with no correct sample "
+                  f"(--sample-strategy random_correct).")
+        return output_path
 
     return output_path
 
@@ -1319,7 +1187,6 @@ def evaluate(
     split: str = "eval",
     prompts_path: Path | None = None,
     output_path: Path | None = None,
-    batch_size: int = 16,
     max_new_tokens: int = 2048,
     temperature: float = 1.0,
     top_p: float = 1.0,
@@ -1329,7 +1196,6 @@ def evaluate(
     gpu_memory_utilization: float = 0.9,
     verbose: bool = False,
     multi_turn: bool | None = None,
-    use_async: bool = False,
     seed: int | None = 42,
     no_hints: bool = False,
     answer_budget: int | None = None,
@@ -1348,7 +1214,6 @@ def evaluate(
         prompts_path: Path to eval prompts (default: data/{data_name}/problems_with_format/{split}__{method}.json)
         output_path: Where to save results (default: models/{models_name}/{method}_{sft,rl}/{run_id}/evals/{split}.json)
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
-        use_async: Use async generation for optimal throughput.
         no_hints: Counterfactual eval -- ban the hint request so the model must
             answer on its own. Everything else about the eval is unchanged, so
             the drop against a normal run measures what the hints were worth.
@@ -1374,8 +1239,8 @@ def evaluate(
     if multi_turn is None:
         multi_turn = method.multi_turn if method else False
 
-    answer_budget, answer_after_think, use_async = resolve_answer_forcing(
-        method, answer_budget, answer_after_think, use_async, multi_turn)
+    answer_budget, answer_after_think = resolve_answer_forcing(
+        method, answer_budget, answer_after_think, multi_turn)
 
     # Resolve model shortcuts (sft, rl)
     actual_model_name = model_name
@@ -1424,11 +1289,9 @@ def evaluate(
     # Initialize generator
     config = GenerationConfig(
         model_name=actual_model_name,
-        batch_size=batch_size,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         top_p=top_p,
-        num_samples=num_samples,
         tensor_parallel_size=tensor_parallel_size,
         data_parallel_size=data_parallel_size,
         gpu_memory_utilization=gpu_memory_utilization,
@@ -1439,25 +1302,19 @@ def evaluate(
         answer_budget=answer_budget,
         answer_after_think=answer_after_think,
     )
-    generator = Generator(config)
-
     # Generate
     prompts = [p["prompt"] for p in prompts_data]
 
     print(f"Evaluating {actual_model_name}...")
     if num_samples > 1:
         print(f"Multi-sample mode: {num_samples} samples per problem")
-    if use_async:
-        print("Async mode enabled (optimal throughput)")
     if multi_turn:
         print("Multi-turn mode enabled")
     if no_hints:
         print("Counterfactual mode: hint requests are blocked during decoding")
 
-    # Async multi-turn generation
-    if multi_turn and use_async:
-        import asyncio
-
+    async_generator = AsyncGenerator(config)
+    if multi_turn:
         ground_truths = [p["ground_truth"] for p in prompts_data]
 
         # generate_with_hints_async produces 1 trajectory per prompt,
@@ -1465,8 +1322,7 @@ def evaluate(
         if num_samples > 1:
             expanded_prompts = [p for p in prompts for _ in range(num_samples)]
             expanded_gts = [gt for gt in ground_truths for _ in range(num_samples)]
-            print(f"Running async multi-turn generation on {len(prompts)} prompts x {num_samples} samples...")
-            async_generator = AsyncGenerator(config)
+            print(f"Running multi-turn generation on {len(prompts)} prompts x {num_samples} samples...")
             expanded_results = asyncio.run(
                 async_generator.generate_with_hints_async(
                     expanded_prompts,
@@ -1479,52 +1335,18 @@ def evaluate(
                 for i in range(len(prompts))
             ]
         else:
-            print(f"Running async multi-turn generation on {len(prompts)} prompts...")
-            async_generator = AsyncGenerator(config)
+            print(f"Running multi-turn generation on {len(prompts)} prompts...")
             generations = asyncio.run(
                 async_generator.generate_with_hints_async(
                     prompts,
                     ground_truths,
                 )
             )
-
-    # Async regular generation
-    elif use_async and not multi_turn:
-        import asyncio
-
-        print(f"Running async generation on {len(prompts)} prompts...")
-        async_generator = AsyncGenerator(config)
+    else:
+        print(f"Running generation on {len(prompts)} prompts...")
         generations = asyncio.run(
             async_generator.generate_async(prompts, num_samples=num_samples)
         )
-
-    # Sync multi-turn generation
-    elif multi_turn:
-        ground_truths = [p["ground_truth"] for p in prompts_data]
-        if num_samples > 1:
-            expanded_prompts = [p for p in prompts for _ in range(num_samples)]
-            expanded_gts = [gt for gt in ground_truths for _ in range(num_samples)]
-            expanded_results = generator.generate_with_hints_batched(
-                expanded_prompts,
-                expanded_gts,
-            )
-            generations = [
-                [r[0] for r in expanded_results[i * num_samples:(i + 1) * num_samples]]
-                for i in range(len(prompts))
-            ]
-        else:
-            generations = generator.generate_with_hints_batched(
-                prompts,
-                ground_truths,
-            )
-
-    # Sync regular generation
-    else:
-        def progress_callback(batch_idx, _results):
-            total_batches = (len(prompts) + batch_size - 1) // batch_size
-            print(f"Batch {batch_idx + 1}/{total_batches} complete")
-
-        generations = generator.generate_batched(prompts, callback=progress_callback)
 
     # The ban has two layers and this reports on both. The sampler suppresses the
     # "request" token, which is best-effort -- bad_words bans a token id and BPE

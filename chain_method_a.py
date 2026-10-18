@@ -33,8 +33,8 @@ solver model exactly once, and checked against the ground truth with the
 task's own `check_correctness`.
 
 Each round hands vLLM the *whole* round's prompt list in one call and lets it
-do its own continuous batching/scheduling (sync `Generator.generate`, or
-`AsyncGenerator.generate_async` with `--async`) -- there's no manual
+do its own continuous batching/scheduling (`AsyncGenerator.generate_async`)
+-- there's no manual
 --batch-size chunking, since pre-slicing into fixed-size chunks and calling
 generate() once per chunk only stops vLLM from co-scheduling requests across
 chunks.
@@ -60,7 +60,6 @@ Usage:
         --solver-model models/${TASK}/method_ac_rl/${RUN_ID}/model \
         --num-samples 1 \
         --max-hints 5 \
-        --async \
         --output models/${TASK}/method_a_predictors/${RUN_ID}/evals/eval__chained_1s.json
 """
 
@@ -70,7 +69,7 @@ from datetime import datetime
 from pathlib import Path
 
 from pipeline.commands.inference import compute_hint_metrics, count_truncation, format_hint_metrics
-from pipeline.core.generator import AsyncGenerator, Generator, GenerationConfig
+from pipeline.core.generator import AsyncGenerator, GenerationConfig
 from pipeline.core.io import load_json, save_json
 from pipeline.core.method import Method
 from pipeline.core.utils import extract_answer
@@ -119,15 +118,13 @@ def hint_sequence_for_level(task_name: str, hints_list: list[str], level: int) -
 
 
 class RoundGenerator:
-    """One loaded model, generating across one or more rounds -- sync or async.
+    """One loaded model, generating across one or more rounds.
 
-    vLLM's LLM.generate() (sync) and AsyncLLMEngine (async, via
-    AsyncGenerator.generate_async) both already do their own continuous
-    batching over whatever prompt list they're handed, so `.run()` always
-    submits a full round in one call rather than chunking it into a
-    --batch-size.
+    AsyncLLMEngine (via AsyncGenerator.generate_async) does its own continuous
+    batching over whatever prompt list it's handed, so `.run()` always submits
+    a full round in one call.
 
-    In async mode, a single event loop is created lazily on the first `.run()`
+    A single event loop is created lazily on the first `.run()`
     call and reused for every subsequent round on this instance, rather than
     calling `asyncio.run()` fresh each time. AsyncLLMEngine spawns its
     background output-handler task bound to whichever loop is running when the
@@ -139,32 +136,26 @@ class RoundGenerator:
     `.close()`) avoids that.
     """
 
-    def __init__(self, config: GenerationConfig, use_async: bool):
-        self.use_async = use_async
-        self._gen = AsyncGenerator(config) if use_async else Generator(config)
+    def __init__(self, config: GenerationConfig):
+        self._gen = AsyncGenerator(config)
         self._loop = None
 
     def run(self, prompts: list[list[dict]]) -> list[list[dict]]:
         if not prompts:
             return []
-        if self.use_async:
-            if self._loop is None:
-                import asyncio
-                self._loop = asyncio.new_event_loop()
-            return self._loop.run_until_complete(self._gen.generate_async(prompts, num_samples=1))
-        return self._gen.generate(prompts)
+        if self._loop is None:
+            import asyncio
+            self._loop = asyncio.new_event_loop()
+        return self._loop.run_until_complete(self._gen.generate_async(prompts, num_samples=1))
 
     def close(self) -> None:
         """Release the loaded model and free its GPU memory."""
-        if self.use_async:
-            if self._loop is not None:
-                self._loop.run_until_complete(self._async_close())
-                self._loop.close()
-                self._loop = None
-            else:
-                self._gen.close()
+        if self._loop is not None:
+            self._loop.run_until_complete(self._async_close())
+            self._loop.close()
+            self._loop = None
         else:
-            self._gen._model = None
+            self._gen.close()
         del self._gen
         gc.collect()
         import torch
@@ -391,12 +382,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Independent rollouts per problem (default: 1)")
     p.add_argument("--max-hints", type=int, default=5,
         help="Cap on hint rounds; a problem with fewer available hints stops sooner (default: 5)")
-    p.add_argument("--async", dest="use_async", action="store_true",
-        help="Use vLLM's AsyncLLMEngine instead of the sync engine (optimal throughput; "
-             "required for --data-parallel-size > 1)")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
     p.add_argument("--data-parallel-size", type=int, default=1,
-        help="Independent model replicas, prompts sharded across them. Requires --async.")
+        help="Independent model replicas, prompts sharded across them.")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--seed", type=int, default=42, help="Random seed for generation")
     p.add_argument("--verifier-max-new-tokens", type=int, default=16,
@@ -436,14 +424,13 @@ def main():
         max_new_tokens=args.verifier_max_new_tokens,
         temperature=args.verifier_temperature,
         top_p=args.verifier_top_p,
-        num_samples=1,  # each rollout `t` is already one independent sample
         tensor_parallel_size=args.tensor_parallel_size,
         data_parallel_size=args.data_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         verbose=args.verbose,
         seed=args.seed,
     )
-    verifier = RoundGenerator(verifier_config, args.use_async)
+    verifier = RoundGenerator(verifier_config)
     run_verifier_rounds(task, args.task, verifier, verifier_template, items, checkpoint_path)
     verifier.close()
 
@@ -452,14 +439,13 @@ def main():
         max_new_tokens=args.solver_max_new_tokens,
         temperature=args.solver_temperature,
         top_p=args.solver_top_p,
-        num_samples=1,
         tensor_parallel_size=args.tensor_parallel_size,
         data_parallel_size=args.data_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         verbose=args.verbose,
         seed=args.seed,
     )
-    solver = RoundGenerator(solver_config, args.use_async)
+    solver = RoundGenerator(solver_config)
     solver_results = run_solver(task, args.task, solver, solver_template, items)
     solver.close()
 

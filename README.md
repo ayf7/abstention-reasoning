@@ -46,7 +46,7 @@ python -m pipeline create_prompts --task countdown --method baseline --split all
     --data-name countdown
 
 # Teacher rollouts -> SFT data
-python -m pipeline generate --task countdown --method baseline --async \
+python -m pipeline generate --task countdown --method baseline \
     --model Qwen/Qwen3-14B --split sft_train \
     --data-name countdown
 
@@ -59,7 +59,7 @@ python -m pipeline train_sft --task countdown --method baseline --run-id qwen2.5
 python -m pipeline train_rl --task countdown --method baseline --run-id qwen2.5-1.5b \
     --data-name countdown
 
-python -m pipeline evaluate --task countdown --method baseline --model rl --async \
+python -m pipeline evaluate --task countdown --method baseline --model rl \
     --run-id qwen2.5-1.5b --split eval \
     --data-name countdown
 ```
@@ -72,7 +72,7 @@ python -m pipeline create_prompts --task countdown --method method_b --split all
     --data-name countdown
 
 # Probe: how often does the teacher solve each problem unaided?
-python -m pipeline generate --task countdown --method baseline --async \
+python -m pipeline generate --task countdown --method baseline \
     --model Qwen/Qwen3-14B --split sft_train --no-hints --num-samples 8 \
     --data-name countdown \
     --output data/countdown/.scratch/sft_train__baseline__probe.json
@@ -80,7 +80,7 @@ python -m pipeline generate --task countdown --method baseline --async \
 # Schedule hints from that probe -- harder problems get more -- and oversample
 # until half the set is correct. The profile is derived in memory; only the
 # dataset is written.
-python -m pipeline generate --task countdown --method method_b --async \
+python -m pipeline generate --task countdown --method method_b \
     --model Qwen/Qwen3-14B --split sft_train \
     --hint-schedule data/countdown/.scratch/sft_train__baseline__probe.json \
     --hint-target-fraction 0.5 --max-hints 4 --target-correct-rate 0.5 \
@@ -101,12 +101,12 @@ python -m pipeline train_rl --task countdown --method method_b \
     --override algorithm.norm_adv_by_std_in_grpo=True \
     --data-name countdown
 
-python -m pipeline evaluate --task countdown --method method_b --model rl --async \
+python -m pipeline evaluate --task countdown --method method_b --model rl \
     --run-id qwen2.5-1.5b__quad-a0.5 --split eval \
     --data-name countdown
 ```
 
-Pass `--async` to `generate` and `evaluate` for the batched async vLLM path; it is the standard mode here. `--multi-turn` is read from the method config and does not need passing.
+`--multi-turn` is read from the method config and does not need passing.
 
 ## Tasks
 
@@ -164,8 +164,8 @@ Reward functions themselves live with the trainer, in `verl/recipe/{task}/reward
 
 | Command | Purpose |
 |---|---|
-| `generate` | Run a model over prompts to produce a dataset (`--async`, `--no-hints`, `--hint-schedule`, `--target-correct-rate`) |
-| `evaluate` | Evaluate a model (`--model sft`/`rl`, `--run-id`, `--num-samples`, `--async`) |
+| `generate` | Run a model over prompts to produce a dataset (`--no-hints`, `--hint-schedule`, `--target-correct-rate`) |
+| `evaluate` | Evaluate a model (`--model sft`/`rl`, `--run-id`, `--num-samples`) |
 | `analyze` | Report accuracy by variant for a dataset or results file |
 
 **Training**

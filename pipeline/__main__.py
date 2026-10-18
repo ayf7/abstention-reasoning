@@ -198,7 +198,6 @@ def cmd_generate(args):
         prompts_path=prompts_path,
         output_path=output_path,
         split=args.split,
-        batch_size=args.batch_size,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_p=args.top_p,
@@ -213,7 +212,6 @@ def cmd_generate(args):
         answer_after_think=args.answer_after_think,
         seed=getattr(args, "seed", 42),
         multi_turn=args.multi_turn,  # None = use method config
-        use_async=getattr(args, "use_async", False),
         force_hints_distribution=force_hints_distribution,
         force_hints_policy=force_hints_policy,
         sample_strategy=getattr(args, "sample_strategy", None),
@@ -255,7 +253,6 @@ def cmd_evaluate(args):
         split=args.split,
         prompts_path=prompts_path,
         output_path=output_path,
-        batch_size=args.batch_size,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_p=args.top_p,
@@ -265,7 +262,6 @@ def cmd_evaluate(args):
         gpu_memory_utilization=args.gpu_memory_utilization,
         verbose=args.verbose,
         multi_turn=args.multi_turn,  # None = use method config
-        use_async=getattr(args, "use_async", False),
         seed=args.seed,
         no_hints=args.no_hints,
         answer_budget=args.answer_budget,
@@ -406,7 +402,7 @@ def add_answer_forcing_args(p):
     """Answer-forcing flags shared by generate and evaluate."""
     p.add_argument("--answer-budget", type=int, default=None,
                    help="Tokens for a forced answer when reasoning hits --max-new-tokens "
-                        "(0 = off; default: method config). Implies --async.")
+                        "(0 = off; default: method config).")
     p.add_argument("--answer-after-think", action="store_true",
                    help="Opt-in: stop each sample at </think> and open <answer> for it, "
                         "spending --answer-budget on the answer")
@@ -525,7 +521,6 @@ def main():
     p.add_argument("--prompts", help="Path to prompts file (default: data/{data_name}/problems_with_format/{split}__{method}.json)")
     p.add_argument("--output", help="Output path (default: data/{data_name}/sft_datasets/{split}__{method}.json)")
     p.add_argument("--split", default="sft_train", help="Which split to generate from (default: sft_train)")
-    p.add_argument("--batch-size", type=int, default=16, help="Batch size")
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
     p.add_argument("--temperature", type=float, default=0.7, help="Temperature")
     p.add_argument("--top-p", type=float, default=0.9, help="Top-p")
@@ -552,7 +547,6 @@ def main():
     p.add_argument("--max-retries", type=int, default=10, help="Max retry iterations for --retry-truncated (default: 10)")
     p.add_argument("--seed", type=int, default=42, help="Starting seed for generation (default: 42)")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
-    p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput, processes all prompts concurrently)")
     add_answer_forcing_args(p)
     p.add_argument("--force-hints-distribution", type=str, default=None,
         help="Distribution of forced hint counts, e.g. '1:0.5,2:0.3,3:0.2'. "
@@ -615,7 +609,6 @@ def main():
     p.add_argument("--split", default="eval", help="Prompts split to evaluate (default: eval)")
     p.add_argument("--prompts", help="Path to eval prompts (default: data/{data_name}/problems_with_format/{split}__{method}.json)")
     p.add_argument("--output", help="Output path (default: models/{models_name}/{method}_{sft,rl}/{run_id}/evals/{split}.json)")
-    p.add_argument("--batch-size", type=int, default=16, help="Batch size")
     p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
     p.add_argument("--temperature", type=float, default=1.0, help="Temperature")
     p.add_argument("--top-p", type=float, default=1.0, help="Top-p")
@@ -628,7 +621,6 @@ def main():
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
-    p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation (optimal throughput)")
     add_answer_forcing_args(p)
     p.add_argument("--seed", type=int, default=42, help="Random seed for generation (default: 42)")
     p.add_argument("--no-hints", action="store_true", help="Counterfactual eval: block hint requests during decoding so the model must answer alone")
