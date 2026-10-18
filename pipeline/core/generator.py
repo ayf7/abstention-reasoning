@@ -173,11 +173,8 @@ class GenerationConfig:
     nested_request: bool = False  # Keep <request></request> inside the <think> block
     ban_hint_requests: bool = False  # Counterfactual eval: make asking for a hint
                                      # impossible, so the model has to answer alone
-    answer_budget: int = 0  # Tokens held back for a forced answer when a generation
-                            # runs out of room mid-thought. 0 disables forcing.
-    answer_after_think: bool = False  # Stop every sample at </think> and open <answer>
-                                      # ourselves, so the answer's layout never depends
-                                      # on the model. Uses answer_budget for the answer.
+    answer_budget: int = 0  # Tokens for a forced answer when a generation runs out
+                            # of max_new_tokens mid-thought. 0 disables forcing.
 
 
 class _SamplingParams:
@@ -329,7 +326,6 @@ class AsyncGenerator(_SamplingParams):
         # every prompt's single sample comes from the same shared draw, which
         # can badly skew any per-prompt binary decision (e.g. a verifier's
         # accept/reject rate) away from the model's true distribution.
-        stop = DEFAULT_STOP_STRINGS + (["</think>"] if self.config.answer_after_think else [])
         base_seed = self.config.seed
 
         def make_sampling_params(idx: int):
@@ -339,7 +335,7 @@ class AsyncGenerator(_SamplingParams):
                 max_tokens=self.config.max_new_tokens,
                 n=num_samples,
                 seed=(base_seed + idx) if base_seed is not None else None,
-                stop=stop,
+                stop=DEFAULT_STOP_STRINGS,
                 include_stop_str_in_output=True,
             )
 
@@ -407,26 +403,18 @@ class AsyncGenerator(_SamplingParams):
         RL already does this at rollout time (HintLoop.force_answers). Doing it
         here as well means the SFT model has seen the shape RL will impose on it,
         rather than meeting a forced </think> for the first time under GRPO.
-
-        With answer_after_think, samples that stopped at </think> are finished
-        the same way, with the answer opened for them. They are not truncations,
-        so they are not marked forced_answer.
         """
         import uuid
 
         targets = []
         for pi, samples in enumerate(results):
             for si, sample in enumerate(samples):
-                reason = sample.get("finish_reason")
-                if reason == "length":
-                    scaffold = _answer_scaffold(sample["text"])
-                elif self.config.answer_after_think and reason == "stop" and sample["text"].endswith("</think>"):
-                    scaffold = "\n\n<answer>\n"
-                else:
+                if sample.get("finish_reason") != "length":
                     continue
+                scaffold = _answer_scaffold(sample["text"])
                 if scaffold is None:
                     continue
-                targets.append((pi, si, scaffold, reason == "length"))
+                targets.append((pi, si, scaffold))
 
         if not targets:
             return 0
@@ -441,7 +429,7 @@ class AsyncGenerator(_SamplingParams):
             include_stop_str_in_output=True,
         )
 
-        async def finish(pi: int, si: int, scaffold: str, truncated: bool):
+        async def finish(pi: int, si: int, scaffold: str):
             sample = results[pi][si]
             prefix = self._format_prompt(prompts[pi], tokenizer) + sample["text"] + scaffold
             request_id = f"force_{pi}_{si}_{uuid.uuid4().hex[:8]}"
@@ -468,12 +456,11 @@ class AsyncGenerator(_SamplingParams):
             # --retry-truncated above all -- must stop treating it as unfinished.
             # forced_answer is what keeps the fact recoverable.
             sample["finish_reason"] = "stop"
-            sample["forced_answer"] = truncated
+            sample["forced_answer"] = True
 
         await asyncio.gather(*[finish(*t) for t in targets])
-        forced = sum(t[3] for t in targets)
-        print(f"Forced an answer for {forced} truncated generation(s); opened <answer> after </think> for {len(targets) - forced}")
-        return forced
+        print(f"Forced an answer for {len(targets)} truncated generation(s)")
+        return len(targets)
 
     async def generate_with_hints_async(
         self,

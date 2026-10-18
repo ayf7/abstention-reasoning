@@ -54,6 +54,7 @@ from pathlib import Path
 
 from pipeline.tasks import list_tasks
 from pipeline.core.method import Method
+from pipeline.core.utils import ForceAnswer
 from pipeline import commands
 
 
@@ -208,8 +209,7 @@ def cmd_generate(args):
         retry_incorrect=args.retry_incorrect,
         retry_truncated=getattr(args, "retry_truncated", False),
         max_retries=getattr(args, "max_retries", 10),
-        answer_budget=args.answer_budget,
-        answer_after_think=args.answer_after_think,
+        force_answer=args.force_answer,
         seed=getattr(args, "seed", 42),
         multi_turn=args.multi_turn,  # None = use method config
         force_hints_distribution=force_hints_distribution,
@@ -223,7 +223,6 @@ def cmd_generate(args):
         hint_target_fraction=getattr(args, "hint_target_fraction", None),
         max_hints=getattr(args, "max_hints", 4),
         drop_exhausted=getattr(args, "drop_exhausted", False),
-        drop_forced=getattr(args, "drop_forced", False),
         data_name=args.data_name,
         models_name=args.models_name,
     )
@@ -264,8 +263,7 @@ def cmd_evaluate(args):
         multi_turn=args.multi_turn,  # None = use method config
         seed=args.seed,
         no_hints=args.no_hints,
-        answer_budget=args.answer_budget,
-        answer_after_think=args.answer_after_think,
+        force_answer=args.force_answer,
         data_name=args.data_name,
         models_name=args.models_name,
     )
@@ -367,6 +365,7 @@ def cmd_train_rl(args):
         test_freq=args.test_freq,
         max_prompt_length=args.max_prompt_length,
         max_response_length=args.max_response_length,
+        force_answer=args.force_answer,
         max_model_len=args.max_model_len,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
@@ -398,14 +397,23 @@ def cmd_convert_checkpoint(args):
     )
 
 
-def add_answer_forcing_args(p):
-    """Answer-forcing flags shared by generate and evaluate."""
-    p.add_argument("--answer-budget", type=int, default=None,
-                   help="Tokens for a forced answer when reasoning hits --max-new-tokens "
-                        "(0 = off; default: method config).")
-    p.add_argument("--answer-after-think", action="store_true",
-                   help="Opt-in: stop each sample at </think> and open <answer> for it, "
-                        "spending --answer-budget on the answer")
+def _force_answer_arg(spec: str) -> ForceAnswer:
+    try:
+        return ForceAnswer.parse(spec)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
+MAX_NEW_TOKENS_EXCLUSIVE = "Mutually exclusive with --max-new-tokens."
+
+
+def add_force_answer_arg(p, budget_note: str):
+    """--force-answer, shared by generate, evaluate and train_rl."""
+    p.add_argument("--force-answer", type=_force_answer_arg, default=None, metavar="JSON",
+                   help="Separate think and answer budgets, e.g. "
+                        "'{\"think_tokens\": 2048, \"answer_tokens\": 512}'. A sample that "
+                        "runs out of think_tokens mid-thought gets </think> closed and "
+                        f"answer_tokens to answer in. {budget_note}")
 
 
 def main():
@@ -521,7 +529,8 @@ def main():
     p.add_argument("--prompts", help="Path to prompts file (default: data/{data_name}/problems_with_format/{split}__{method}.json)")
     p.add_argument("--output", help="Output path (default: data/{data_name}/sft_datasets/{split}__{method}.json)")
     p.add_argument("--split", default="sft_train", help="Which split to generate from (default: sft_train)")
-    p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
+    p.add_argument("--max-new-tokens", type=int, default=None,
+        help="One budget for thinking and answering (default: 2048)")
     p.add_argument("--temperature", type=float, default=0.7, help="Temperature")
     p.add_argument("--top-p", type=float, default=0.9, help="Top-p")
     p.add_argument("--num-samples", type=int, default=1, help="Number of samples per prompt (best selected by --sample-strategy)")
@@ -547,7 +556,7 @@ def main():
     p.add_argument("--max-retries", type=int, default=10, help="Max retry iterations for --retry-truncated (default: 10)")
     p.add_argument("--seed", type=int, default=42, help="Starting seed for generation (default: 42)")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
-    add_answer_forcing_args(p)
+    add_force_answer_arg(p, MAX_NEW_TOKENS_EXCLUSIVE)
     p.add_argument("--force-hints-distribution", type=str, default=None,
         help="Distribution of forced hint counts, e.g. '1:0.5,2:0.3,3:0.2'. "
              "Maps number of hints to probability. Probabilities must sum to 1.")
@@ -586,10 +595,6 @@ def main():
         help="Discard generations where the model asked past the last available "
              "hint and was served 'No more hints available.'. That placeholder is "
              "real training text; keeping it teaches the warm start to emit it.")
-    p.add_argument("--drop-forced", action="store_true",
-        help="Never keep an answer-forced sample (reasoning hit the budget). With "
-             "--answer-after-think this keeps only samples that finished thinking on "
-             "their own. Needs --sample-strategy random_correct.")
     p.add_argument("--target-correct-rate", type=float, default=None,
         help="Phase 3: keep resampling incorrect problems until this fraction is "
              "answered correctly (e.g. 0.5 for a majority). Stops early if a round "
@@ -609,7 +614,8 @@ def main():
     p.add_argument("--split", default="eval", help="Prompts split to evaluate (default: eval)")
     p.add_argument("--prompts", help="Path to eval prompts (default: data/{data_name}/problems_with_format/{split}__{method}.json)")
     p.add_argument("--output", help="Output path (default: models/{models_name}/{method}_{sft,rl}/{run_id}/evals/{split}.json)")
-    p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
+    p.add_argument("--max-new-tokens", type=int, default=None,
+        help="One budget for thinking and answering (default: 2048)")
     p.add_argument("--temperature", type=float, default=1.0, help="Temperature")
     p.add_argument("--top-p", type=float, default=1.0, help="Top-p")
     p.add_argument("--num-samples", type=int, default=1, help="Samples per problem (default: 1)")
@@ -621,7 +627,7 @@ def main():
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
     p.add_argument("--multi-turn", action="store_true", default=None, help="Enable multi-turn generation (auto-detected from method config)")
-    add_answer_forcing_args(p)
+    add_force_answer_arg(p, MAX_NEW_TOKENS_EXCLUSIVE)
     p.add_argument("--seed", type=int, default=42, help="Random seed for generation (default: 42)")
     p.add_argument("--no-hints", action="store_true", help="Counterfactual eval: block hint requests during decoding so the model must answer alone")
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
@@ -710,7 +716,11 @@ def main():
     p.add_argument("--save-freq", type=int, default=None, help="Checkpoint save frequency (default: 25, or off when --save-best is set)")
     p.add_argument("--test-freq", type=int, default=None, help="Validation/logging frequency (default: same as save-freq)")
     p.add_argument("--max-prompt-length", type=int, default=2048, help="Maximum prompt length in tokens")
-    p.add_argument("--max-response-length", type=int, default=2048, help="Maximum response length in tokens")
+    p.add_argument("--max-response-length", type=int, default=None,
+        help="Response tensor width (default: 2048, or think + answer + margin with "
+             "--force-answer). Without --force-answer it is also the decode budget.")
+    add_force_answer_arg(p, "--max-response-length, if given, must hold "
+                            "think + answer + margin; go larger for injected hint text.")
     p.add_argument("--max-model-len", type=int, default=8192, help="Maximum model context length (default: 8192). Set higher for multi-turn.")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.4, help="GPU memory utilization")

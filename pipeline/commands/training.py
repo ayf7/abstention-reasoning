@@ -9,6 +9,7 @@ from pathlib import Path
 
 from pipeline.core.io import load_json
 from pipeline.core.method import Method, resolve_data_name, resolve_models_name
+from pipeline.core.utils import ForceAnswer
 from pipeline.core.utils import model_short_name as _get_model_short_name
 from pipeline.tasks import get_task
 
@@ -280,7 +281,7 @@ def train_sft(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # Forced-answer records (generate --answer-budget) carry a scaffold the
+    # Forced-answer records (generate --force-answer) carry a scaffold the
     # model never wrote. Masking it needs a per-token loss mask, so these runs
     # pre-tokenize and always hand TRL completion_only_loss=True; the prompt's
     # mask bits then carry the --completion-only-loss choice instead.
@@ -692,7 +693,8 @@ def train_rl(
     save_freq: int | None = None,
     test_freq: int | None = None,
     max_prompt_length: int = 2048,
-    max_response_length: int = 2048,
+    max_response_length: int | None = None,
+    force_answer: ForceAnswer | None = None,
     max_model_len: int = 8192,
     tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.5,
@@ -734,7 +736,13 @@ def train_rl(
         save_freq: Checkpoint save frequency
         test_freq: Validation/logging frequency (default: same as save_freq)
         max_prompt_length: Maximum prompt length in tokens
-        max_response_length: Maximum response length in tokens
+        max_response_length: Width of the response tensor (default 2048). Without
+            forcing it is also the decode budget. With forcing it defaults to
+            think + answer + scaffold margin, and a larger value leaves room for
+            injected hint text.
+        force_answer: Separate think and answer budgets for rollouts, as in
+            generate. A rollout out of think_tokens mid-thought gets </think>
+            closed for it and answer_tokens to answer in.
         max_model_len: Maximum model context length (default: prompt + response length).
             Set higher than prompt + response for multi-turn hint mode.
         tensor_parallel_size: Tensor parallel size
@@ -881,7 +889,6 @@ def train_rl(
     interaction_name = None
     max_turns = 6
     max_hints = None
-    answer_budget = 0
     if method is not None:
         reward_function_name = method.reward_function
         reward_kwargs = {**method.reward_kwargs}
@@ -895,7 +902,6 @@ def train_rl(
         interaction_name = f"{task_name}_{method.name}" if method.multi_turn else None
         max_turns = method.max_turns
         max_hints = method.max_hints
-        answer_budget = method.answer_budget
         template_content = method.load_template(task_name, "rl")
 
     # Apply CLI overrides to reward kwargs
@@ -963,14 +969,22 @@ def train_rl(
     print(f"=================================")
 
     # Build verl command
-    # Answer forcing, as in generate/evaluate: max_response_length caps the
-    # reasoning, and a rollout cut off mid-think gets answer_budget more tokens
-    # behind a scaffold. The response tensor must hold all of it.
-    response_tensor_length = max_response_length
-    if answer_budget > 0:
-        response_tensor_length += answer_budget + FORCED_ANSWER_MARGIN
-        print(f"Answer forcing: {max_response_length}-token reasoning budget + "
-              f"{answer_budget}-token answer budget")
+    # Answer forcing, as in generate/evaluate: think_tokens caps the reasoning,
+    # and a rollout cut off mid-think gets answer_tokens more behind a scaffold.
+    # The response tensor must hold all of it.
+    if force_answer is None:
+        response_tensor_length = max_response_length or 2048
+    else:
+        forced_length = force_answer.think_tokens + force_answer.answer_tokens + FORCED_ANSWER_MARGIN
+        if max_response_length is not None and max_response_length < forced_length:
+            raise ValueError(
+                f"--max-response-length {max_response_length} cannot hold a forced "
+                f"rollout: think {force_answer.think_tokens} + answer "
+                f"{force_answer.answer_tokens} + margin {FORCED_ANSWER_MARGIN} = {forced_length}")
+        response_tensor_length = max_response_length or forced_length
+        print(f"Answer forcing: {force_answer.think_tokens}-token think budget + "
+              f"{force_answer.answer_tokens}-token answer budget, "
+              f"response tensor {response_tensor_length}")
 
     cmd = [
         "python3", "-m", "verl.trainer.main_ppo",
@@ -1060,9 +1074,9 @@ def train_rl(
     # hint exchanges instead of closing and reopening it around each one.
     if method is not None and method.nested_request:
         cmd.append("+actor_rollout_ref.rollout.nested_request=True")
-    if answer_budget > 0:
-        cmd.append(f"actor_rollout_ref.rollout.think_budget={max_response_length}")
-        cmd.append(f"actor_rollout_ref.rollout.answer_budget={answer_budget}")
+    if force_answer is not None:
+        cmd.append(f"actor_rollout_ref.rollout.think_budget={force_answer.think_tokens}")
+        cmd.append(f"actor_rollout_ref.rollout.answer_budget={force_answer.answer_tokens}")
 
     # Add reward kwargs if specified in method config
     # Use + prefix to add new config keys

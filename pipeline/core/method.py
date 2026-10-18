@@ -68,7 +68,6 @@ class Method:
     - reward_kwargs: Additional arguments for reward function
     - multi_turn: Enable multi-turn hint generation in RL (default: False)
     - mask_response_tokens: Mask <response>...</response> tokens during SFT (default: False)
-    - answer_budget: Tokens for a forced answer when reasoning hits its cap (default: 0 = off)
 
     Methods also provide auto-derived artifact paths based on task and method name.
     """
@@ -86,8 +85,6 @@ class Method:
                                   # forced hint request during SFT data generation. False
                                   # cuts the CoT silently instead, so nothing before
                                   # <request></request> telegraphs the request.
-    answer_budget: int = 0  # Default for generate/evaluate: tokens for a forced
-                            # answer when reasoning hits max_new_tokens (0 = off).
     nested_request: bool = False  # Keep <request></request> inside the <think> block
                                   # instead of after it, so </think> stays the single
                                   # irreversible commit point right before <answer>.
@@ -150,7 +147,6 @@ class Method:
             max_hints=data.get("max_hints"),
             hint_transition=data.get("hint_transition", True),
             nested_request=data.get("nested_request", False),
-            answer_budget=data.get("answer_budget", 0),
         )
 
     @staticmethod

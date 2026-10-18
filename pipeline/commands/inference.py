@@ -6,13 +6,14 @@ import asyncio
 import random
 import re
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
 from pipeline.core.io import load_json, save_json
 from pipeline.core.generator import GenerationConfig, AsyncGenerator
 from pipeline.core.method import Method, resolve_data_name, resolve_models_name
-from pipeline.core.utils import extract_answer, model_short_name
+from pipeline.core.utils import ForceAnswer, extract_answer, model_short_name
 from pipeline.tasks import get_task
 
 
@@ -51,7 +52,7 @@ def classify_truncation(record: dict) -> str | None:
     """Which stage the token budget cut off, or None if it did not.
 
     - "think": ran out before </think>. Benign -- RL rollouts (and generate
-      with --answer-budget) close the block and force a short answer, so only
+      with --force-answer) close the block and force a short answer, so only
       the reasoning is cut. Without forcing the sample is still malformed.
     - "answer": the answer itself is cut. Ran out after </think>, or the
       forced answer also ran out and the closing tag was appended. Nothing
@@ -66,27 +67,30 @@ def classify_truncation(record: dict) -> str | None:
     return "answer" if "</think>" in record.get("generation", "") else "think"
 
 
-def resolve_answer_forcing(
-    method: "Method | None",
-    answer_budget: int | None,
-    answer_after_think: bool,
-    multi_turn: bool,
-) -> tuple[int, bool]:
-    """(answer_budget, answer_after_think) after method defaults.
+DEFAULT_MAX_NEW_TOKENS = 2048
 
-    answer_budget None means "use the method config"; answer_after_think is
-    opt-in per call. Forcing lives in the single-turn path only.
+
+def resolve_token_budgets(
+    max_new_tokens: int | None,
+    force_answer: ForceAnswer | None,
+    multi_turn: bool,
+) -> tuple[int, int]:
+    """(max_new_tokens, answer_budget) for GenerationConfig.
+
+    Without forcing, max_new_tokens is one budget for thinking and answering.
+    With it, think_tokens takes its place and answer_tokens is spent only on a
+    forced answer. Forcing lives in the single-turn path only.
     """
-    if answer_budget is None:
-        answer_budget = method.answer_budget if method else 0
-    if answer_after_think and answer_budget <= 0:
-        raise ValueError("answer_after_think needs answer_budget > 0")
-    if answer_budget > 0:
-        if multi_turn:
-            raise ValueError("answer forcing is single-turn only; it cannot combine with multi_turn")
-        print(f"Answer forcing: {answer_budget}-token answer budget"
-              + (", <answer> opened after every </think>" if answer_after_think else ""))
-    return answer_budget, answer_after_think
+    if force_answer is None:
+        return (max_new_tokens or DEFAULT_MAX_NEW_TOKENS), 0
+    if max_new_tokens is not None:
+        raise ValueError("max_new_tokens and force_answer are mutually exclusive: "
+                         "force_answer sets its own think_tokens budget")
+    if multi_turn:
+        raise ValueError("answer forcing is single-turn only; it cannot combine with multi_turn")
+    print(f"Answer forcing: {force_answer.think_tokens}-token think budget + "
+          f"{force_answer.answer_tokens}-token answer budget")
+    return force_answer.think_tokens, force_answer.answer_tokens
 
 
 def count_truncation(records: list[dict]) -> dict[str, int]:
@@ -389,7 +393,6 @@ def select_best_sample(
     primitive: dict,
     strategy: str = "shortest_cot",
     exclude_exhausted: bool = False,
-    exclude_forced: bool = False,
     rng=None,
 ) -> dict | None:
     """
@@ -446,11 +449,6 @@ def select_best_sample(
         clean = [s for s in evaluated_samples if EXHAUSTED_MARKER not in s.get("text", "")]
         if clean:
             evaluated_samples = clean
-
-    # Answer-forced samples ran out of reasoning budget; with exclude_forced
-    # they never count, so random_correct drops a problem solved only that way.
-    if exclude_forced:
-        evaluated_samples = [s for s in evaluated_samples if not s.get("forced_answer")]
 
     # Separate correct and incorrect
     correct_samples = [s for s in evaluated_samples if s["correct"]]
@@ -526,7 +524,7 @@ def generate(
     prompts_path: Path | None = None,
     output_path: Path | None = None,
     split: str = "sft",
-    max_new_tokens: int = 2048,
+    max_new_tokens: int | None = None,
     temperature: float = 0.7,
     top_p: float = 0.9,
     num_samples: int = 1,
@@ -536,8 +534,7 @@ def generate(
     retry_incorrect: bool = False,
     retry_truncated: bool = False,
     max_retries: int = 10,
-    answer_budget: int | None = None,
-    answer_after_think: bool = False,
+    force_answer: ForceAnswer | None = None,
     seed: int | None = 42,
     multi_turn: bool | None = None,
     force_hints_distribution: dict[int, float] | None = None,
@@ -550,7 +547,6 @@ def generate(
     hint_target_fraction: float | None = None,
     max_hints: int = 4,
     drop_exhausted: bool = False,
-    drop_forced: bool = False,
     target_correct_rate: float | None = None,
     max_oversample: int = 5,
     data_name: str | None = None,
@@ -571,13 +567,12 @@ def generate(
         output_path: Where to save dataset (default: data/{data_name}/sft_datasets/{split}__{method}.json)
         split: Which split to generate from (default: sft)
         retry_incorrect: If True, re-run incorrect examples
-        answer_budget: Tokens held back for a forced answer. A generation that runs
-            out of room mid-thought gets </think> closed for it and this many tokens
-            to answer in, matching what RL does at rollout time. 0 disables forcing.
+        max_new_tokens: One budget for thinking and answering (default 2048).
+            Mutually exclusive with force_answer.
+        force_answer: Separate think and answer budgets. A generation that runs
+            out of think_tokens mid-thought gets </think> closed for it and
+            answer_tokens to answer in, matching what RL does at rollout time.
             Single-turn generation only.
-        answer_after_think: Stop every sample at </think> and open <answer> for
-            it, so the answer layout is fixed rather than left to the model.
-            Opt-in; requires answer_budget > 0.
         multi_turn: Enable multi-turn generation with hint injection. If None, uses method config.
         force_hints_distribution: Distribution of forced hint counts. Maps number of hints
             to probability, e.g. {1: 0.5, 2: 0.3, 3: 0.2}. Probabilities must sum to 1.
@@ -602,9 +597,6 @@ def generate(
             available hint and was served the "No more hints available."
             placeholder. That string is real training text, so leaving it in
             teaches the warm start to produce and expect it.
-        drop_forced: Never select an answer-forced sample (one whose reasoning
-            hit the budget). Needs sample_strategy "random_correct", which
-            drops a problem left with no correct sample.
         target_correct_rate: Keep resampling incorrect problems until this fraction
             is answered correctly (phase 3). None disables the loop.
         max_oversample: Cap on phase-3 resampling rounds.
@@ -641,10 +633,7 @@ def generate(
                   "graded pass rate (method config requested multi-turn).")
         multi_turn = False
 
-    answer_budget, answer_after_think = resolve_answer_forcing(
-        method, answer_budget, answer_after_think, multi_turn)
-    if drop_forced and sample_strategy != "random_correct":
-        raise ValueError("drop_forced needs sample_strategy 'random_correct'")
+    max_new_tokens, answer_budget = resolve_token_budgets(max_new_tokens, force_answer, multi_turn)
 
     # Resolve model shortcuts (sft, rl)
     actual_model_name = model_name
@@ -691,7 +680,6 @@ def generate(
         hint_transition=method.hint_transition if method else True,
         nested_request=method.nested_request if method else False,
         answer_budget=answer_budget,
-        answer_after_think=answer_after_think,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -870,7 +858,6 @@ def generate(
                     best_sample = select_best_sample(gen_samples, task, primitive,
                                                      strategy=sample_strategy,
                                                      exclude_exhausted=drop_exhausted,
-                                                     exclude_forced=drop_forced,
                                                      rng=_rng)
                     if best_sample is None:
                         # strategy="random_correct" and nothing was correct.
@@ -985,8 +972,7 @@ def generate(
                         best_sample = select_best_sample(
                             gen_samples, task, primitive,
                             strategy=sample_strategy,
-                            exclude_exhausted=drop_exhausted,
-                            exclude_forced=drop_forced, rng=_rng)
+                            exclude_exhausted=drop_exhausted, rng=_rng)
                         if best_sample is None:
                             # random_correct: nothing correct -> drop the problem
                             n_no_correct += 1
@@ -1187,7 +1173,7 @@ def evaluate(
     split: str = "eval",
     prompts_path: Path | None = None,
     output_path: Path | None = None,
-    max_new_tokens: int = 2048,
+    max_new_tokens: int | None = None,
     temperature: float = 1.0,
     top_p: float = 1.0,
     num_samples: int = 1,
@@ -1198,8 +1184,7 @@ def evaluate(
     multi_turn: bool | None = None,
     seed: int | None = 42,
     no_hints: bool = False,
-    answer_budget: int | None = None,
-    answer_after_think: bool = False,
+    force_answer: ForceAnswer | None = None,
     data_name: str | None = None,
     models_name: str | None = None,
 ) -> Path:
@@ -1217,7 +1202,7 @@ def evaluate(
         no_hints: Counterfactual eval -- ban the hint request so the model must
             answer on its own. Everything else about the eval is unchanged, so
             the drop against a normal run measures what the hints were worth.
-        answer_budget, answer_after_think: Answer forcing, as in generate.
+        max_new_tokens, force_answer: Token budgets, as in generate.
         data_name: Data directory name (default: task_name)
         models_name: Models directory name (default: data_name)
         ... generation config ...
@@ -1239,8 +1224,7 @@ def evaluate(
     if multi_turn is None:
         multi_turn = method.multi_turn if method else False
 
-    answer_budget, answer_after_think = resolve_answer_forcing(
-        method, answer_budget, answer_after_think, multi_turn)
+    max_new_tokens, answer_budget = resolve_token_budgets(max_new_tokens, force_answer, multi_turn)
 
     # Resolve model shortcuts (sft, rl)
     actual_model_name = model_name
@@ -1300,7 +1284,6 @@ def evaluate(
         nested_request=method.nested_request if method else False,
         ban_hint_requests=no_hints,
         answer_budget=answer_budget,
-        answer_after_think=answer_after_think,
     )
     # Generate
     prompts = [p["prompt"] for p in prompts_data]
@@ -1478,6 +1461,7 @@ def evaluate(
             "config": {
                 "temperature": temperature,
                 "max_new_tokens": max_new_tokens,
+                "force_answer": asdict(force_answer) if force_answer else None,
                 "top_p": top_p,
                 "num_samples": num_samples,
                 "multi_turn": multi_turn,
@@ -1555,6 +1539,7 @@ def evaluate(
         "config": {
             "temperature": temperature,
             "max_new_tokens": max_new_tokens,
+            "force_answer": asdict(force_answer) if force_answer else None,
             "top_p": top_p,
             "num_samples": 1,
             "multi_turn": multi_turn,

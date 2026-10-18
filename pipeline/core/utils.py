@@ -1,7 +1,38 @@
 """Shared utility functions."""
 
+import json
 import re
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class ForceAnswer:
+    """Answer forcing: separate token budgets for reasoning and the answer.
+
+    A generation that spends think_tokens without answering gets </think>
+    closed for it and answer_tokens more to answer in. If the forced answer
+    also runs out, the sample is incomplete. A model that closes </think> on
+    its own answers inside think_tokens, as RL rollouts do.
+    """
+    think_tokens: int
+    answer_tokens: int
+
+    @classmethod
+    def parse(cls, spec: str) -> "ForceAnswer":
+        """From JSON, e.g. '{"think_tokens": 2048, "answer_tokens": 512}'."""
+        try:
+            data = json.loads(spec)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"not valid JSON ({e}): {spec}") from None
+        keys = {"think_tokens", "answer_tokens"}
+        if not isinstance(data, dict) or set(data) != keys:
+            raise ValueError(f"needs exactly the keys {sorted(keys)}, got: {spec}")
+        for key in keys:
+            value = data[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{key} must be a positive integer, got {value!r}")
+        return cls(**data)
 
 
 def tokenize_with_response_mask(
