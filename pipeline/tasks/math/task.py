@@ -190,6 +190,10 @@ class MathTask(BaseTask):
             "correct_answer": correct_answer,
         }
 
+    def hint_sequence(self, hints: list, level: int) -> str:
+        """Hints 1..level: each prefix hint extends the one before it."""
+        return "\n".join(hints[:level]) if level else super().hint_sequence(hints, level)
+
     def get_ground_truth(self, primitive: dict) -> dict:
         """Extract ground truth for embedding in prompts and RL interactions.
 

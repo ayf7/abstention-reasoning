@@ -467,8 +467,8 @@ def main():
     p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
     p.add_argument("--num-hints", type=int, default=None,
-        help="Maximum hint level. method_ac samples one level for SFT/RL and "
-             "creates every level for eval; other methods include the first N hints.")
+        help="Maximum hint level. method_ac and method_a sample two distinct levels per "
+             "problem (favoring fewer hints) in every split; other methods include the first N hints.")
     p.add_argument("--json", action="store_true", help="Force JSON output for all splits (instead of parquet for RL)")
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.set_defaults(func=cmd_create_prompts)

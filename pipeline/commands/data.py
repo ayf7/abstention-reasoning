@@ -234,20 +234,6 @@ def create_prompts(
     )
 
 
-def _extract_hints_list(primitive: dict) -> list[str]:
-    """Hint text per level, from whichever field the task populates:
-    `hint_exprs` (list, e.g. countdown) or `prefix_hints` (dict `hint_1..hint_6`,
-    e.g. math)."""
-    hints_list = primitive.get("hint_exprs", [])
-    if not hints_list:
-        prefix_hints = primitive.get("prefix_hints", {})
-        for i in range(1, 7):
-            key = f"hint_{i}"
-            if key in prefix_hints:
-                hints_list.append(prefix_hints[key])
-    return hints_list
-
-
 def _sample_hint_levels(
     rng: random.Random,
     max_hint_level: int,
@@ -274,14 +260,6 @@ def _sample_hint_levels(
                 pool.pop(i)
                 break
     return chosen
-
-
-def _hint_sequence_for_level(hints_list: list[str], hint_level: int, task_name: str) -> str:
-    if hint_level == 0:
-        return "No partial solution"
-    if task_name == "math":
-        return "\n".join(hints_list[:hint_level])
-    return hints_list[hint_level - 1]
 
 
 def _create_prompts_single(
@@ -366,7 +344,7 @@ def _create_prompts_single(
         hints_list = None
         hint_levels = [None]
         if num_hints is not None:
-            hints_list = _extract_hints_list(primitive)
+            hints_list = task.get_hints(primitive)
             if uses_fixed_hint_levels:
                 max_hint_level = min(num_hints, len(hints_list))
                 hint_levels = _sample_hint_levels(
@@ -388,7 +366,7 @@ def _create_prompts_single(
 
         for i, hint_level in enumerate(hint_levels):
             hint_sequence = (
-                _hint_sequence_for_level(hints_list, hint_level, task_name)
+                task.hint_sequence(hints_list, hint_level)
                 if hint_level is not None
                 else None
             )

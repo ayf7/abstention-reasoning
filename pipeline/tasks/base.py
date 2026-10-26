@@ -67,6 +67,24 @@ class BaseTask:
         (leetcode's verifier) start it here and add its address to `env`."""
         yield
 
+    # Fixed-hint methods (method_ac, method_a) reveal hints 0..len(get_hints)
+    # and render each level with hint_sequence.
+
+    def get_hints(self, primitive: dict) -> list:
+        """Hints in reveal order, from `hint_exprs` (countdown) or
+        `prefix_hints` (math, dict `hint_1..hint_6`)."""
+        hints = list(primitive.get("hint_exprs", []))
+        if not hints:
+            prefix_hints = primitive.get("prefix_hints", {})
+            hints = [prefix_hints[f"hint_{i}"] for i in range(1, 7) if f"hint_{i}" in prefix_hints]
+        return hints
+
+    def hint_sequence(self, hints: list, level: int) -> str:
+        """Partial-solution text at `level`. Default: hint `level` alone."""
+        if level == 0:
+            return "No partial solution"
+        return hints[level - 1]
+
     def check_correctness_batch(self, primitives: list[dict], generations: list[str]) -> list[tuple[bool, dict]]:
         """Score many generations at once. Override when batching is cheaper
         (leetcode sends one request to its verifier service)."""

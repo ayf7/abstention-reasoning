@@ -449,6 +449,23 @@ class LeetCodeTask(BaseTask):
         # carry only what the template uses (tests live in ground_truth).
         return {"index": primitive["index"], "variant": primitive["variant"], **self._prompt_fields(primitive)}
 
+    def get_hints(self, primitive: dict) -> list:
+        """`hint_steps`: {insight, code} per insight, code being the gold partial
+        after that insight (`# TODO` lines hide the rest). The last step's code
+        is None so the full gold is never shown."""
+        return primitive.get("hint_steps", [])
+
+    def hint_sequence(self, hints: list, level: int) -> str:
+        """Insights 1..level, then the latest partial code revealed so far."""
+        if level == 0:
+            return super().hint_sequence(hints, level)
+        shown = hints[:level]
+        text = "\n".join(f"Insight {i}: {h['insight']}" for i, h in enumerate(shown, 1))
+        code = next((h["code"] for h in reversed(shown) if h["code"]), None)
+        if code:
+            text += f"\n\nCode so far (each `# TODO` line hides code still to be written):\n```python\n{code}\n```"
+        return text
+
     def format_prompt(self, primitive: dict, template: str, include_assistant_prefix: bool = True) -> list[dict]:
         content = template
         for key, value in self._prompt_fields(primitive).items():
