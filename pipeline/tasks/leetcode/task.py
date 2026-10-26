@@ -31,6 +31,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from pipeline.core.utils import extract_answer
+from pipeline.tasks.leetcode.statement import repair_statement
 from pipeline.tasks.leetcode.verifier import service
 from pipeline.tasks.leetcode.verifier.verifier import PASS
 from pipeline.tasks.leetcode.verifier.sandbox import encode
@@ -278,7 +279,7 @@ class LeetCodeTask(BaseTask):
             "variant": rec["difficulty"],
             "tags": rec["tags"],
             "source_split": source,
-            "problem": rec["problem_description"].strip(),
+            "problem": repair_statement(rec["question_id"], rec["problem_description"].strip()),
             "starter_code": rec["starter_code"].rstrip(),
             "mode": "call",
             "checker": "value",
