@@ -35,6 +35,7 @@ from concurrent.futures import Future
 from multiprocessing.connection import Client, Listener
 
 from pipeline.tasks.leetcode.verifier import verifier, worker
+from pipeline.tasks.leetcode.verifier.sandbox import READY
 from pipeline.tasks.leetcode.verifier.verifier import INFRA_ERROR, MALFORMED, PASS, TOO_SLOW
 
 SOCKET_ENV = "VERIFIER_SOCKET"
@@ -207,6 +208,25 @@ class VerifierPool:
         decoded = {h: [json.loads(e) for e in s["expected"]] for h, s in problems.items()}
         self._ensure_gold(problems, decoded)
         return {h: self._gold[h] for h in problems}
+
+    def gold_outputs(self, spec: dict, timeout_s: float | None = None) -> list[dict]:
+        """Run gold on each test alone: [{"expected": json str or None, "cpu_s"}], None where gold fails.
+
+        For building expected outputs of new tests; `spec["expected"]` is not read.
+        """
+        timeout_s = self.timeout_s if timeout_s is None else timeout_s
+        futs = [self._submit([self._job({**spec, "tests": [t]}, spec["gold"], timeout_s)]) for t in spec["tests"]]
+        out = []
+        for f in futs:
+            run, rec = f.result()[0], None
+            if run and run["outcome"] == "exited" and run["stdout"].startswith(READY):
+                try:
+                    rec = json.loads(run["stdout"][len(READY):].split(b"\n")[0])
+                except ValueError:
+                    pass
+            ok = isinstance(rec, dict) and "out" in rec
+            out.append({"expected": json.dumps(rec["out"]) if ok else None, "cpu_s": run["cpu_s"] if run else None})
+        return out
 
     def _limit(self, t_gold) -> float | None:
         return None if t_gold is None else max(self.k * t_gold, self.floor_s)
