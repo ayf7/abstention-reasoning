@@ -335,7 +335,10 @@ class AsyncGenerator(_SamplingParams):
                 max_tokens=self.config.max_new_tokens,
                 n=num_samples,
                 seed=(base_seed + idx) if base_seed is not None else None,
-                stop=DEFAULT_STOP_STRINGS,
+                # With forcing, stop at </think> too: _force_answers opens <answer>
+                # there, so a teacher that would write its code in a markdown
+                # fence (malformed) answers in the tag instead.
+                stop=DEFAULT_STOP_STRINGS + (["</think>"] if self.config.answer_budget > 0 else []),
                 include_stop_str_in_output=True,
             )
 
@@ -394,6 +397,9 @@ class AsyncGenerator(_SamplingParams):
     async def _force_answers(self, engine, tokenizer, prompts, results) -> int:
         """Give each truncated sample a short, separate budget to answer in.
 
+        Samples that stopped at </think> on their own get <answer> opened and
+        the same budget; they are not truncations, so forced_answer stays unset.
+
         Running out of room mid-thought otherwise costs the sample entirely: the
         SFT filter keeps only correct generations, and a truncated one cannot be
         correct. That silently biases the training set toward the problems the
@@ -409,7 +415,8 @@ class AsyncGenerator(_SamplingParams):
         targets = []
         for pi, samples in enumerate(results):
             for si, sample in enumerate(samples):
-                if sample.get("finish_reason") != "length":
+                closed = sample.get("finish_reason") == "stop" and sample["text"].endswith("</think>")
+                if sample.get("finish_reason") != "length" and not closed:
                     continue
                 scaffold = _answer_scaffold(sample["text"])
                 if scaffold is None:
@@ -455,12 +462,15 @@ class AsyncGenerator(_SamplingParams):
             # The sample is complete now, so downstream truncation handling --
             # --retry-truncated above all -- must stop treating it as unfinished.
             # forced_answer is what keeps the fact recoverable.
-            sample["finish_reason"] = "stop"
-            sample["forced_answer"] = True
+            if sample["finish_reason"] == "length":
+                sample["finish_reason"] = "stop"
+                sample["forced_answer"] = True
 
         await asyncio.gather(*[finish(*t) for t in targets])
-        print(f"Forced an answer for {len(targets)} truncated generation(s)")
-        return len(targets)
+        forced = sum(results[pi][si].get("forced_answer", False) for pi, si, _ in targets)
+        print(f"Forced an answer for {forced} truncated generation(s); "
+              f"opened <answer> after </think> for {len(targets) - forced}")
+        return forced
 
     async def generate_with_hints_async(
         self,
