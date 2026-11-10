@@ -31,3 +31,17 @@ artifacts/
 SCOPE.md
 .project_scope/
 reports/
+
+# SQL database files (real .sqlite files under data/sql/raw/, plus the
+# curated databases/ symlink trees in data/sql_conceptual/ and
+# data/sql_partial_sql/) are kept on shared/PVC storage, not in git -- see
+# DATABASE_PATH env var in launch_scripts/initialization_script.sh.
+data/sql/raw/*/databases/
+data/sql/raw/*/**/database/
+data/sql_conceptual/databases
+data/sql_partial_sql/databases
+
+# Generated scratch artifacts (e.g. generate_tree intermediate outputs) --
+# large, regeneratable, kept on disk only.
+.scratch/
+**/.scratch/

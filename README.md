@@ -115,9 +115,9 @@ Pass `--async` to `generate` and `evaluate` for the batched async vLLM path; it 
 
 Initialize from a `method_ac_rl` checkpoint. `train_rl --method method_d`
 uses the existing verl rollout/checkpoint infrastructure, but performs **SFT
-only** by default. It reuses `rl_train__baseline.parquet` and
-`rl_val__baseline.parquet` (including shards); explicit `--train-prompts` and
-`--val-prompts` override these paths.
+only** by default. It reuses the full `rl_train__method_ac.parquet` and
+`rl_val__method_ac.parquet` datasets (including shards), not the `rl_gen_*`
+splits; explicit `--train-prompts` and `--val-prompts` override these paths.
 
 ```bash
 python -m pipeline train_rl --task math --method method_d \
@@ -156,7 +156,7 @@ oversized example errors rather than silently truncating its final-output exampl
 ### Method E: single-pass trajectory classification
 
 Method E initializes from a `method_ac_rl` checkpoint and uses the same online
-correctness labels and baseline prompt datasets as Method D, but adds a randomly
+correctness labels and full `method_ac` prompt datasets as Method D, but adds a randomly
 initialized **two-output classification head**
 (`0`/`1`) to the causal transformer's hidden states instead of using the
 generation head. Each SFT microbatch processes full trajectories once, with
@@ -200,6 +200,19 @@ Method E supports synchronous vLLM, FSDP/FSDP2, unfused logits, and sequence
 parallel size 1; LoRA is unsupported. Full prompt + response must fit the model's
 context window. Its artifacts live under `models/{models_name}/method_e_rl/`
 even for SFT-only runs, because it uses the `train_rl` infrastructure.
+
+For both methods, validation also breaks down classification accuracy separately
+by **input hint level** and by the **first/final supervised positions**:
+`sft_val/hint_0/accuracy`, `sft_val/hint_1/accuracy`, ...,
+`sft_val/position_first/accuracy`, and `sft_val/position_final/accuracy`.
+Method D additionally reports `token_accuracy` under each of these groups.
+Each group includes `num_examples`; aggregation weights supervised positions
+equally across batches and GPUs and excludes distributed padding. Hint groups
+use input `hint_level`, not the number of hints requested during generation.
+Inputs without hint-level metadata default to zero; explicitly null levels
+are reported as `hint_unknown`. A trajectory with only one supervised position
+counts in both first and final groups. These breakdowns are validation-only,
+with no hint-by-position cross-product and no changes to overall metrics.
 
 ## Tasks
 
