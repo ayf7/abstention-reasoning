@@ -1,0 +1,773 @@
+[
+ {
+  "index": 157,
+  "split": "sft_train",
+  "name": "IsIsomorphic",
+  "input": [
+   "s, t: strings of the same length"
+  ],
+  "output": "true if the characters of s can be replaced one-to-one to get t, else false",
+  "steps": [
+   {
+    "d": 0,
+    "note": "Each character of s must always map to the same character of t, and no two characters of s may map to the same one, so check the mapping in both directions."
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "sToT, tToS <- two empty character maps",
+    "lo": [
+     "sToT <- empty map",
+     "tToS <- empty map"
+    ]
+   },
+   {
+    "d": 0,
+    "core": true,
+    "hi": "Walk s and t together; RETURN false at the first pair that contradicts either map, else record the pair",
+    "mid": [
+     "FOR each position i of s",
+     "    Let a be s[i] and b be t[i]",
+     "    IF sToT maps a to something other than b, or tToS maps b to something other than a, THEN",
+     "        RETURN false",
+     "    Map a to b in sToT and b to a in tToS"
+    ],
+    "lo": [
+     "FOR i FROM 0 TO length of s - 1",
+     "    a <- s[i]",
+     "    b <- t[i]",
+     "    IF (a is in sToT AND sToT[a] ≠ b) OR (b is in tToS AND tToS[b] ≠ a) THEN",
+     "        RETURN false",
+     "    sToT[a] <- b",
+     "    tToS[b] <- a"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "RETURN true",
+    "lo": [
+     "RETURN true"
+    ]
+   }
+  ]
+ },
+ {
+  "index": 2057,
+  "split": "sft_train",
+  "name": "CircularGameLosers",
+  "input": [
+   "n: number of friends, numbered 1 to n clockwise",
+   "k: the step size"
+  ],
+  "output": "the friends who never receive the ball, in increasing order",
+  "steps": [
+   {
+    "d": 0,
+    "note": "Number the seats 0 to n - 1. On turn p the ball moves p * k seats clockwise, so the next seat is (seat + p * k) mod n. The game ends at the first seat that gets the ball twice."
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": [
+     "visited <- no seat has had the ball yet",
+     "seat <- 0 (the ball starts there)",
+     "p <- 1 (the turn number)"
+    ],
+    "lo": [
+     "visited <- array of n false values",
+     "seat <- 0",
+     "p <- 1"
+    ]
+   },
+   {
+    "d": 0,
+    "core": true,
+    "hi": "Pass the ball around the circle, marking each seat, until it reaches a seat that already had it",
+    "mid": [
+     "WHILE seat is not yet marked in visited",
+     "    Mark seat in visited",
+     "    Move seat forward p * k places, wrapping past n - 1 back to 0",
+     "    Add one to p"
+    ],
+    "lo": [
+     "WHILE visited[seat] is false",
+     "    visited[seat] <- true",
+     "    seat <- (seat + p * k) mod n",
+     "    p <- p + 1"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "RETURN the 1-based numbers of the unvisited seats, in increasing order",
+    "lo": [
+     "RETURN the list of i + 1 for each i FROM 0 TO n - 1 where visited[i] is false"
+    ]
+   }
+  ]
+ },
+ {
+  "index": 2253,
+  "split": "sft_train",
+  "name": "LongestGoodSubarray",
+  "input": [
+   "nums: array of integers",
+   "k: the frequency limit"
+  ],
+  "output": "the length of the longest subarray in which every value occurs at most k times",
+  "steps": [
+   {
+    "d": 0,
+    "note": "After adding nums[i], only nums[i] can occur more than k times, so shrink the window from the left until it does not; the window is then good."
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": [
+     "count <- empty frequency map of the window nums[left..i]",
+     "left <- 0",
+     "ans <- 0"
+    ],
+    "lo": [
+     "count <- empty map where a missing value counts as 0",
+     "left <- 0",
+     "ans <- 0"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "FOR EACH index i and value x IN nums",
+    "lo": [
+     "FOR EACH index i and value x IN nums"
+    ]
+   },
+   {
+    "d": 1,
+    "core": false,
+    "hi": "Add x to the window",
+    "lo": [
+     "count[x] <- count[x] + 1"
+    ]
+   },
+   {
+    "d": 1,
+    "core": true,
+    "hi": "Shrink the window from the left until x occurs at most k times",
+    "mid": [
+     "WHILE the count of x is more than k",
+     "    Decrement the count of nums[left]",
+     "    Add one to left"
+    ],
+    "lo": [
+     "WHILE count[x] > k",
+     "    count[nums[left]] <- count[nums[left]] - 1",
+     "    left <- left + 1"
+    ]
+   },
+   {
+    "d": 1,
+    "core": false,
+    "hi": "ans <- max(ans, length of the window)",
+    "lo": [
+     "ans <- max(ans, i - left + 1)"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "RETURN ans",
+    "lo": [
+     "RETURN ans"
+    ]
+   }
+  ]
+ },
+ {
+  "index": 2657,
+  "split": "lab",
+  "name": "MaxPizzaWeight",
+  "input": [
+   "pizzas: array of weights; its length is a multiple of 4"
+  ],
+  "output": "the maximum total weight gained over all days",
+  "steps": [
+   {
+    "d": 0,
+    "core": false,
+    "hi": [
+     "Sort pizzas",
+     "days <- number of days; odd, even <- how many of them are odd and even days"
+    ],
+    "lo": [
+     "Sort pizzas in increasing order",
+     "days <- (length of pizzas) div 4",
+     "odd <- (days + 1) div 2",
+     "even <- days - odd"
+    ]
+   },
+   {
+    "d": 0,
+    "note": "An odd day gains its heaviest pizza, so the odd days take the odd heaviest pizzas. An even day gains its second-heaviest pizza, so it uses the next two heaviest: the heavier one is that day's top pizza and the lighter one is the gain. The lightest pizzas fill the remaining slots."
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "ans <- sum of the odd heaviest pizzas",
+    "lo": [
+     "ans <- sum of the last odd elements of pizzas"
+    ]
+   },
+   {
+    "d": 0,
+    "core": true,
+    "hi": "Add the lighter pizza of each of the next even pairs, going down from just below the odd heaviest",
+    "mid": [
+     "Set i to the length of pizzas minus odd minus 2",
+     "REPEAT even times",
+     "    Add pizzas[i] to ans",
+     "    Subtract 2 from i"
+    ],
+    "lo": [
+     "i <- (length of pizzas) - odd - 2",
+     "REPEAT even times",
+     "    ans <- ans + pizzas[i]",
+     "    i <- i - 2"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "RETURN ans",
+    "lo": [
+     "RETURN ans"
+    ]
+   }
+  ]
+ },
+ {
+  "index": 318,
+  "split": "sft_train",
+  "name": "PathSum",
+  "input": [
+   "root: root of a binary tree (possibly empty)",
+   "targetSum: integer"
+  ],
+  "output": "the number of downward paths whose values sum to targetSum",
+  "steps": [
+   {
+    "d": 0,
+    "note": "A downward path ending at a node sums to targetSum exactly when an earlier prefix sum on the root-to-node route equals (current prefix sum - targetSum). Count prefix sums for the current route only: add one on the way down, remove it on the way back up."
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "count <- how often each prefix sum occurs on the current route, starting with the empty prefix (sum 0, once)",
+    "lo": [
+     "count <- map with count[0] = 1, where a missing sum counts as 0"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "DEFINE dfs(node, s), returning the number of target paths that end in node's subtree; s is the prefix sum above node",
+    "lo": [
+     "DEFINE dfs(node, s), returning the number of target paths that end in node's subtree; s is the prefix sum above node"
+    ]
+   },
+   {
+    "d": 1,
+    "core": false,
+    "hi": "IF node is empty THEN RETURN 0",
+    "lo": [
+     "IF node is null THEN RETURN 0"
+    ]
+   },
+   {
+    "d": 1,
+    "core": true,
+    "hi": "Count the target paths ending at node, using the prefix sums on the route above it",
+    "mid": [
+     "Add node's value to s",
+     "Set ans to the count of the prefix sum s - targetSum"
+    ],
+    "lo": [
+     "s <- s + node.val",
+     "ans <- count[s - targetSum]"
+    ]
+   },
+   {
+    "d": 1,
+    "core": false,
+    "hi": [
+     "Add s to the route's prefix sums",
+     "ans <- ans + dfs of both children",
+     "Remove s from the route's prefix sums",
+     "RETURN ans"
+    ],
+    "lo": [
+     "count[s] <- count[s] + 1",
+     "ans <- ans + dfs(node.left, s) + dfs(node.right, s)",
+     "count[s] <- count[s] - 1",
+     "RETURN ans"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "RETURN dfs(root, 0)",
+    "lo": [
+     "RETURN dfs(root, 0)"
+    ]
+   }
+  ]
+ },
+ {
+  "index": 1437,
+  "split": "sft_train",
+  "name": "WonderfulSubstrings",
+  "input": [
+   "word: string of letters 'a' to 'j'"
+  ],
+  "output": "the number of substrings in which at most one letter occurs an odd number of times",
+  "steps": [
+   {
+    "d": 0,
+    "note": "For each prefix, keep a 10-bit mask of which letters a..j have appeared an odd number of times. A substring is wonderful when its two endpoint masks are equal (no odd letter) or differ in exactly one bit (one odd letter)."
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": [
+     "count <- how many earlier prefixes had each mask, starting with the empty prefix (mask 0, once)",
+     "mask <- 0",
+     "ans <- 0"
+    ],
+    "lo": [
+     "count <- map with count[0] = 1, where a missing mask counts as 0",
+     "mask <- 0",
+     "ans <- 0"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "FOR EACH letter c IN word",
+    "lo": [
+     "FOR EACH letter c IN word"
+    ]
+   },
+   {
+    "d": 1,
+    "core": true,
+    "hi": "Add c to mask, then count earlier prefixes whose mask equals it or differs from it in one bit",
+    "mid": [
+     "Flip the bit of c's alphabet position (a = 0) in mask",
+     "Add the count of mask to ans",
+     "FOR each bit b from 0 to 9",
+     "    Add the count of mask with bit b flipped to ans"
+    ],
+    "lo": [
+     "mask <- mask with bit (position of c in the alphabet, a = 0) flipped",
+     "ans <- ans + count[mask]",
+     "FOR b FROM 0 TO 9",
+     "    ans <- ans + count[mask with bit b flipped]"
+    ]
+   },
+   {
+    "d": 1,
+    "core": false,
+    "hi": "Record mask in count",
+    "lo": [
+     "count[mask] <- count[mask] + 1"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "RETURN ans",
+    "lo": [
+     "RETURN ans"
+    ]
+   }
+  ]
+ },
+ {
+  "index": 537,
+  "split": "sft_train",
+  "name": "NetworkDelayTime",
+  "input": [
+   "times: directed edges (u, v, t), travel time t from u to v",
+   "n: number of nodes, labeled 1 to n",
+   "k: the source node"
+  ],
+  "output": "the time until every node has the signal, or -1 if some node never gets it",
+  "steps": [
+   {
+    "d": 0,
+    "note": "All times are nonnegative, so the unfinished node with the smallest tentative arrival time is final (Dijkstra). With n ≤ 100, finding it by scanning all nodes is fast enough."
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": [
+     "w <- n by n table of edge times, infinity where there is no edge",
+     "dist <- infinity for every node, except 0 for the source k",
+     "done <- no node is finished yet"
+    ],
+    "lo": [
+     "w <- n by n table of infinity",
+     "FOR EACH (u, v, t) IN times",
+     "    w[u - 1][v - 1] <- t",
+     "dist <- array of n infinity values",
+     "dist[k - 1] <- 0",
+     "done <- array of n false values"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "REPEAT n times",
+    "lo": [
+     "REPEAT n times"
+    ]
+   },
+   {
+    "d": 1,
+    "core": true,
+    "hi": "Finish the unfinished node u with the smallest dist, then shorten dist through u where that is faster",
+    "mid": [
+     "Set u to -1 (no node chosen)",
+     "FOR each node j from 0 to n - 1",
+     "    IF j is not done and (u is -1 or dist[j] is less than dist[u]) THEN set u to j",
+     "Mark u done",
+     "FOR each node j from 0 to n - 1",
+     "    Set dist[j] to the smaller of dist[j] and dist[u] plus w[u][j]"
+    ],
+    "lo": [
+     "u <- -1",
+     "FOR j FROM 0 TO n - 1",
+     "    IF done[j] is false AND (u = -1 OR dist[j] < dist[u]) THEN u <- j",
+     "done[u] <- true",
+     "FOR j FROM 0 TO n - 1",
+     "    dist[j] <- min(dist[j], dist[u] + w[u][j])"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": [
+     "ans <- the largest dist",
+     "RETURN -1 if ans is infinity (some node is unreachable), else ans"
+    ],
+    "lo": [
+     "ans <- maximum of dist",
+     "IF ans is infinity THEN RETURN -1",
+     "RETURN ans"
+    ]
+   }
+  ]
+ },
+ {
+  "index": 2014,
+  "split": "sft_train",
+  "name": "MinimumTimeToEatGrains",
+  "input": [
+   "hens: hen positions on a line",
+   "grains: grain positions on a line"
+  ],
+  "output": "the minimum number of seconds for the hens to eat every grain",
+  "steps": [
+   {
+    "d": 0,
+    "note": "If every grain can be eaten within t seconds, it can also be eaten within any longer time, so binary search the smallest feasible t. To test a t, sort both lists and let the hens, from left to right, each eat the longest run of leftmost uneaten grains it can reach."
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": [
+     "Sort hens and grains",
+     "m <- number of grains"
+    ],
+    "lo": [
+     "Sort hens and grains in increasing order",
+     "m <- number of grains"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "DEFINE canFinish(t), returning whether every grain can be eaten within t seconds",
+    "lo": [
+     "DEFINE canFinish(t), returning whether every grain can be eaten within t seconds"
+    ]
+   },
+   {
+    "d": 1,
+    "core": false,
+    "hi": [
+     "j <- the first uneaten grain, starting at 0",
+     "FOR EACH hen position x, left to right",
+     "    IF every grain is eaten THEN RETURN true"
+    ],
+    "lo": [
+     "j <- 0",
+     "FOR EACH x IN hens",
+     "    IF j = m THEN RETURN true"
+    ]
+   },
+   {
+    "d": 2,
+    "core": true,
+    "hi": [
+     "This hen eats the longest run of leftmost uneaten grains it can reach within t,",
+     "going left first or right first, whichever is cheaper; RETURN false if the first one is out of reach"
+    ],
+    "mid": [
+     "Let y be grains[j]",
+     "IF y is at or left of x THEN",
+     "    Let d be x minus y",
+     "    IF d is more than t THEN RETURN false",
+     "    WHILE j is less than m and grains[j] is at or left of x",
+     "        Add one to j",
+     "    WHILE j is less than m and the smaller of d and (grains[j] minus x), plus (grains[j] minus y), is at most t",
+     "        Add one to j",
+     "ELSE",
+     "    WHILE j is less than m and grains[j] is at most t to the right of x",
+     "        Add one to j"
+    ],
+    "lo": [
+     "y <- grains[j]",
+     "IF y <= x THEN",
+     "    d <- x - y",
+     "    IF d > t THEN RETURN false",
+     "    WHILE j < m AND grains[j] <= x",
+     "        j <- j + 1",
+     "    WHILE j < m AND min(d, grains[j] - x) + grains[j] - y <= t",
+     "        j <- j + 1",
+     "ELSE",
+     "    WHILE j < m AND grains[j] - x <= t",
+     "        j <- j + 1"
+    ]
+   },
+   {
+    "d": 1,
+    "core": false,
+    "hi": "RETURN whether every grain was eaten",
+    "lo": [
+     "RETURN j = m"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": [
+     "Binary search the smallest t with canFinish(t) true, between 0 and an upper bound",
+     "    (the bound: walk from the first hen to the first grain, then across all grains)",
+     "RETURN that t"
+    ],
+    "lo": [
+     "low <- 0",
+     "high <- |hens[0] - grains[0]| + grains[m - 1] - grains[0]",
+     "WHILE low < high",
+     "    mid <- (low + high) div 2",
+     "    IF canFinish(mid) THEN high <- mid ELSE low <- mid + 1",
+     "RETURN low"
+    ]
+   }
+  ]
+ },
+ {
+  "index": 2508,
+  "split": "lab",
+  "name": "MaxGridScore",
+  "input": [
+   "grid: matrix of positive integers"
+  ],
+  "output": "the maximum sum of selected cells, with at most one cell per row and no repeated value",
+  "steps": [
+   {
+    "d": 0,
+    "core": false,
+    "hi": [
+     "rowsOf[x] <- the set of rows that contain value x (empty if none)",
+     "mx <- the largest value in grid",
+     "allRows <- the mask with every row"
+    ],
+    "lo": [
+     "rowsOf <- empty map where a missing value gives the empty set",
+     "mx <- 0",
+     "FOR EACH row index i and row IN grid",
+     "    FOR EACH value x IN row",
+     "        Add i to rowsOf[x]",
+     "        mx <- max(mx, x)",
+     "m <- number of rows in grid",
+     "allRows <- mask with bits 0 to m - 1 set"
+    ]
+   },
+   {
+    "d": 0,
+    "note": "best[v][mask] = the best score using only values 1..v, each taken from a different row in mask. Each value is used at most once, so going value by value, either skip it or take it from one row in mask."
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "best <- table over values 0 to mx and all row masks, every entry 0",
+    "lo": [
+     "best <- table with rows 0 to mx and one column for each mask from 0 to allRows, all 0"
+    ]
+   },
+   {
+    "d": 0,
+    "core": true,
+    "hi": "Fill best value by value: for every mask, either skip v or take it from one row of mask that contains v",
+    "mid": [
+     "FOR each v from 1 to mx",
+     "    FOR each mask from 0 to allRows",
+     "        Copy best[v - 1][mask] into best[v][mask]",
+     "        FOR each row r in rowsOf[v]",
+     "            IF bit r of mask is 1 THEN",
+     "                Raise best[v][mask] to best[v - 1][mask with bit r cleared] plus v, if that is larger"
+    ],
+    "lo": [
+     "FOR v FROM 1 TO mx",
+     "    FOR mask FROM 0 TO allRows",
+     "        best[v][mask] <- best[v - 1][mask]",
+     "        FOR EACH row r IN rowsOf[v]",
+     "            IF bit r of mask is 1 THEN",
+     "                best[v][mask] <- max(best[v][mask], best[v - 1][mask with bit r cleared] + v)"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "RETURN the score for all values with every row allowed",
+    "lo": [
+     "RETURN best[mx][allRows]"
+    ]
+   }
+  ]
+ },
+ {
+  "index": 952,
+  "split": "lab",
+  "name": "MinPushBox",
+  "input": [
+   "grid: matrix of '#' (wall), '.' (floor), 'S' (player), 'B' (box), 'T' (target)"
+  ],
+  "output": "the minimum number of pushes to move the box onto the target, or -1 if impossible",
+  "steps": [
+   {
+    "d": 0,
+    "core": false,
+    "hi": [
+     "(si, sj), (bi, bj) <- the player cell and the box cell",
+     "isOpen(cell) <- the cell is inside the grid and not a wall",
+     "id(cell) <- one integer per cell, so a (player, box) pair can index a seen table"
+    ],
+    "lo": [
+     "m <- number of rows",
+     "n <- number of columns",
+     "id(i, j) = i * n + j",
+     "isOpen(i, j) = (0 <= i < m AND 0 <= j < n AND grid[i][j] is not '#')",
+     "FOR EACH cell (i, j) IN grid",
+     "    IF grid[i][j] = 'S' THEN (si, sj) <- (i, j)",
+     "    IF grid[i][j] = 'B' THEN (bi, bj) <- (i, j)"
+    ]
+   },
+   {
+    "d": 0,
+    "note": "A state is (player cell, box cell, pushes). Walking costs 0 pushes and pushing costs 1, so a double-ended queue that takes walks at the front and pushes at the back stays ordered by pushes (0-1 BFS)."
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": [
+     "q <- deque holding the start state with 0 pushes",
+     "Mark (player, box) seen"
+    ],
+    "lo": [
+     "seen <- (m * n) by (m * n) table of false",
+     "q <- deque holding (id(si, sj), id(bi, bj), 0)",
+     "seen[id(si, sj)][id(bi, bj)] <- true"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "WHILE q is not empty",
+    "lo": [
+     "WHILE q is not empty"
+    ]
+   },
+   {
+    "d": 1,
+    "core": false,
+    "hi": "(si, sj), (bi, bj), pushes <- the state at the front of q, removed",
+    "lo": [
+     "(s, b, pushes) <- remove from the left end of q",
+     "(si, sj) <- (s div n, s mod n)",
+     "(bi, bj) <- (b div n, b mod n)"
+    ]
+   },
+   {
+    "d": 1,
+    "core": false,
+    "hi": "IF the box is on the target THEN RETURN pushes",
+    "lo": [
+     "IF grid[bi][bj] = 'T' THEN RETURN pushes"
+    ]
+   },
+   {
+    "d": 1,
+    "core": false,
+    "hi": [
+     "FOR EACH of the 4 directions (di, dj)",
+     "    (sx, sy) <- the player's next cell; skip it if it is not open"
+    ],
+    "lo": [
+     "FOR EACH (di, dj) IN up, right, down, left",
+     "    (sx, sy) <- (si + di, sj + dj)",
+     "    IF NOT isOpen(sx, sy) THEN CONTINUE"
+    ]
+   },
+   {
+    "d": 2,
+    "core": true,
+    "hi": [
+     "If the next cell is the box, push it (one more push, back of q);",
+     "otherwise walk there (same pushes, front of q); skip states already seen"
+    ],
+    "mid": [
+     "IF (sx, sy) is the box cell (bi, bj) THEN",
+     "    Let (bx, by) be (bi + di, bj + dj)",
+     "    Skip this direction if (bx, by) is not open or seen[id(sx, sy)][id(bx, by)] is true",
+     "    Set seen[id(sx, sy)][id(bx, by)] to true",
+     "    Append (id(sx, sy), id(bx, by), pushes + 1) to the right end of q",
+     "ELSE IF seen[id(sx, sy)][id(bi, bj)] is false THEN",
+     "    Set seen[id(sx, sy)][id(bi, bj)] to true",
+     "    Append (id(sx, sy), id(bi, bj), pushes) to the left end of q"
+    ],
+    "lo": [
+     "IF (sx, sy) = (bi, bj) THEN",
+     "    (bx, by) <- (bi + di, bj + dj)",
+     "    IF NOT isOpen(bx, by) OR seen[id(sx, sy)][id(bx, by)] THEN CONTINUE",
+     "    seen[id(sx, sy)][id(bx, by)] <- true",
+     "    Append (id(sx, sy), id(bx, by), pushes + 1) to the right end of q",
+     "ELSE IF NOT seen[id(sx, sy)][id(bi, bj)] THEN",
+     "    seen[id(sx, sy)][id(bi, bj)] <- true",
+     "    Append (id(sx, sy), id(bi, bj), pushes) to the left end of q"
+    ]
+   },
+   {
+    "d": 0,
+    "core": false,
+    "hi": "RETURN -1",
+    "lo": [
+     "RETURN -1"
+    ]
+   }
+  ]
+ }
+]
