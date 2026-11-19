@@ -4,7 +4,7 @@ The service is stateless with respect to problems: each request carries the
 problem specs it needs, so RL and evaluation callers share one process without
 loading a bank. It caches only gold-solution timings, keyed by spec hash.
 
-    spec = {"mode": "call" | "stdio", "checker": str, "setup": str, "entry": str,
+    spec = {"mode": "call" | "module" | "stdio", "checker": str, "setup": str, "entry": str,
             "tests": [args_src or stdin text], "expected": [json_str], "gold": str}
     verify(problems={key: spec}, jobs=[(key, code or None)]) -> [result]
 
@@ -15,6 +15,8 @@ Timing gate: a correct submission passes if its CPU time <= max(k * t_gold,
 floor). t_gold is the median of `gold_runs` gold runs on this pool. A correct
 submission over the limit is re-run back to back with gold on one worker, and
 that pair decides, which cancels clock drift between workers and over time.
+Timeouts follow from gold too: a submission is killed at max(4 * limit, 1 s).
+Gold runs under `gold_timeout_s`, which only guards against a runaway gold.
 
 Run as a process (never forked from Ray/vLLM):
     python -m pipeline.tasks.leetcode.verifier --socket /path/v.sock --cpus 0,2,4
@@ -134,8 +136,8 @@ class _Slot:
 
 class VerifierPool:
     def __init__(self, cpus: list[int], memory_mb: int = 2048, k: float = 3.0, floor_s: float = 0.05,
-                 gold_runs: int = 3, timeout_s: float = 10.0):
-        self.k, self.floor_s, self.gold_runs, self.timeout_s = k, floor_s, gold_runs, timeout_s
+                 gold_runs: int = 3, gold_timeout_s: float = 120.0):
+        self.k, self.floor_s, self.gold_runs, self.gold_timeout_s = k, floor_s, gold_runs, gold_timeout_s
         ctx = mp.get_context("spawn")
         self._slots = [_Slot(ctx, cpu, memory_mb) for cpu in cpus]
         self._tasks: queue.Queue = queue.Queue()
@@ -193,7 +195,7 @@ class VerifierPool:
         """Measure gold for every spec not yet cached; all runs go out in parallel."""
         with self._gold_lock:
             todo = {h: problems[h] for h in problems if h not in self._gold}
-        futs = {h: [self._submit([self._job(s, s["gold"], self.timeout_s)]) for _ in range(self.gold_runs)]
+        futs = {h: [self._submit([self._job(s, s["gold"], self.gold_timeout_s)]) for _ in range(self.gold_runs)]
                 for h, s in todo.items()}
         for h, fs in futs.items():
             results = [self._judge(f.result()[0], decoded[h], todo[h]["checker"]) for f in fs]
@@ -214,7 +216,7 @@ class VerifierPool:
 
         For building expected outputs of new tests; `spec["expected"]` is not read.
         """
-        timeout_s = self.timeout_s if timeout_s is None else timeout_s
+        timeout_s = self.gold_timeout_s if timeout_s is None else timeout_s
         futs = [self._submit([self._job({**spec, "tests": [t]}, spec["gold"], timeout_s)]) for t in spec["tests"]]
         out = []
         for f in futs:
@@ -241,7 +243,7 @@ class VerifierPool:
         # early keeps a step's slowest sample from stalling the batch.
         def timeout_for(h):
             lim = self._limit(self._gold[h]["t"])
-            return self.timeout_s if lim is None else min(self.timeout_s, max(4 * lim, 1.0))
+            return self.gold_timeout_s if lim is None else max(4 * lim, 1.0)
 
         futs = [None if code is None else self._submit([self._job(problems[h], code, timeout_for(h))])
                 for h, code in jobs]
@@ -262,7 +264,7 @@ class VerifierPool:
 
     def _recheck(self, spec, code, expected, timeout_s, meta):
         """Gold then submission on one worker; that pair alone sets the verdict."""
-        g_run, s_run = self._submit([self._job(spec, spec["gold"], self.timeout_s),
+        g_run, s_run = self._submit([self._job(spec, spec["gold"], self.gold_timeout_s),
                                      self._job(spec, code, timeout_s)]).result()
         g, r = self._judge(g_run, expected, spec["checker"]), self._judge(s_run, expected, spec["checker"])
         limit = self._limit(g["cpu_s"]) if g["verdict"] == PASS else meta["limit_s"]
@@ -389,13 +391,13 @@ def main() -> None:
     p.add_argument("--k", type=float, default=3.0)
     p.add_argument("--floor-s", type=float, default=0.05)
     p.add_argument("--gold-runs", type=int, default=3)
-    p.add_argument("--timeout-s", type=float, default=10.0)
+    p.add_argument("--gold-timeout-s", type=float, default=120.0)
     args = p.parse_args()
     cpus = [int(c) for c in args.cpus.split(",")] if args.cpus else physical_cores()
     # The dispatcher shares the workers' cores; it mostly waits on pipes.
     os.sched_setaffinity(0, cpus)
     pool = VerifierPool(cpus, memory_mb=args.memory_mb, k=args.k, floor_s=args.floor_s,
-                        gold_runs=args.gold_runs, timeout_s=args.timeout_s)
+                        gold_runs=args.gold_runs, gold_timeout_s=args.gold_timeout_s)
     print(f"verifier: {len(cpus)} workers on cpus {cpus}, socket {args.socket}", flush=True)
     serve(pool, args.socket)
 

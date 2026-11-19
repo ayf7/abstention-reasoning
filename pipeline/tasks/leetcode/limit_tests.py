@@ -11,7 +11,9 @@ valid, only less demanding); too large is caught when gold fails on it.
 
 The original LeetCode tests are tiny, so a brute-force solution passes them.
 `main` appends generated tests (gold run on each) to every problem file of a
-corpus, in place, and records their count as `limit_tests`:
+corpus, in place, and records their count as `limit_tests`; a rerun replaces
+the tests an earlier run added. Every input gold solves is kept, however slow:
+the verifier derives its limits and timeouts from gold's time on the full set.
 
     python -m pipeline.tasks.leetcode.limit_tests data/leetcode/problems
 """
@@ -24,8 +26,6 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import lru_cache
 
 SMALL, MAX = 10, 3   # generated inputs per problem
-MAX_GOLD_S = 0.8     # drop a max input whose gold run is slower: with ~3 per problem the
-                     # 3x-gold limit stays under the verifier's 10 s timeout
 
 LIST_CAP = 200_000   # elements per list argument (rows * cols for matrices)
 STR_CAP = 1_000_000  # characters per string argument
@@ -57,20 +57,35 @@ def fix_numbers(s: str) -> str:
     return s.strip().rstrip(".").strip()
 
 
-def signature(starter: str) -> dict[str, str]:
-    m = re.search(r"def \w+\(self,?(.*?)\)\s*(->|:)", starter, re.S)
+def params(starter: str) -> list[tuple[str, str]]:
+    """(name, annotation) per parameter of the Solution method; comments (node class stubs) skipped."""
+    m = re.search(r"def \w+\s*\(self,?(.*?)\)\s*(->|:)", re.sub(r"#.*", "", starter), re.S)
     if not m:
         raise Unsupported("no signature")
-    args = {}
+    out = []
     for part in re.split(r",\s*(?=\w+\s*:)", " ".join(m.group(1).split())):
-        if not part.strip():
-            continue
-        name, _, t = part.partition(":")
-        t = t.strip().replace(" ", "")
+        if part.strip():
+            name, _, t = part.partition(":")
+            t = re.sub(r"\blist\[", "List[", t.strip().replace(" ", ""))  # newer starters use PEP 585 names
+            out.append((name.strip(), t))
+    return out
+
+
+def signature(starter: str) -> dict[str, str]:
+    args = dict(params(starter))
+    for t in args.values():
         if t not in TYPES:
             raise Unsupported(f"type {t or '?'}")
-        args[name.strip()] = t
     return args
+
+
+NODE_BUILDERS = {"ListNode": "list_node", "TreeNode": "tree_node"}  # defined in the LeetCode setup
+
+
+def node_args(starter: str) -> dict[str, str]:
+    """Parameters typed ListNode or TreeNode -> the setup function that builds one from its list form."""
+    return {a: NODE_BUILDERS[c] for a, t in params(starter)
+            if (c := re.sub(r"^Optional\[(.*)\]$", r"\1", t).strip("'\"")) in NODE_BUILDERS}
 
 
 @lru_cache(maxsize=None)
@@ -445,6 +460,104 @@ class Spec:
     def _positions(self, a):
         return sorted(int(k.split(":")[2]) for k in self.bounds if k.startswith(f"pos:{a}:"))
 
+    # --- checking ---
+
+    def check(self, args: dict) -> str | None:
+        """Why `args` breaks a constraint, or None. A bound that cannot be evaluated is skipped."""
+        if set(args) != set(self.args):
+            return f"arguments {sorted(args)}"
+        V = {}
+        for a, t in self.args.items():
+            v = args[a]
+            if not _typed(v, t):
+                return f"{a} is not {t}"
+            if t == "int":
+                V[self.find(f"int:{a}")] = v
+            else:
+                V[self.find(f"len:{a}")] = len(v)
+                widths = {len(x) for x in v} if t in ("List[str]", "List[List[int]]") else set()
+                if len(widths) == 1:
+                    V.setdefault(self.find(f"inner:{a}"), widths.pop())
+                elif widths and self._rect(a):
+                    return f"rows of {a} differ in length"
+        for k, v in V.items():
+            if not self._ok(k, v, V):
+                return f"{k} = {v}"
+        if not all(self._val(V, p) for p in self._evaluable(self.preds, V)):
+            return "scalar predicate"
+        for a, t in self.args.items():
+            if why := self._check_arg(a, t, args[a], V):
+                return why
+        if self.zip_distinct and len(set(zip(*(args[a] for a in self.zip_distinct)))) < len(args[self.zip_distinct[0]]):
+            return "points not distinct"
+        return None
+
+    def _ok(self, key, v, V, row=None):
+        lo, hi, _ = self._range(key, V, row)
+        return (lo is None or lo <= v) and (hi is None or v <= hi)
+
+    def _evaluable(self, preds, V, row=None):
+        for p in preds:
+            try:
+                self._val(V, p, row)
+            except (KeyError, TypeError, IndexError):
+                continue
+            yield p
+
+    def _check_arg(self, a, t, v, V):
+        fl = self.flags[a]
+        if t == "int":
+            return None
+        if t == "str":
+            if a in self.alphabet and set(v) - set(self.alphabet[a]):
+                return f"{a} has characters outside its alphabet"
+            if "nolead" in fl and len(v) > 1 and v[0] == "0":
+                return f"{a} has a leading zero"
+            return None
+        if t == "List[str]":
+            if a in self.choices:
+                return None if set(v) <= set(self.choices[a]) else f"{a} has a word outside its choices"
+            al = set(self.alphabet.get(a, ""))
+            if any(set(w) - al for w in v):
+                return f"{a} has characters outside its alphabet"
+            if not all(self._ok(self.find(f"inner:{a}"), len(w), V) for w in v):
+                return f"a word of {a} has a bad length"
+            if a in self.sum_cap and sum(map(len, v)) > self._val(V, self.sum_cap[a]):
+                return f"{a} exceeds its total length"
+        elif t == "List[int]":
+            if "tree" in fl:
+                return None if _is_parent_tree(v) else f"{a} is not a parent array of a tree"
+            if "perm" in fl:
+                return None if sorted(v) == list(range(self.perm_start[a], self.perm_start[a] + len(v))) \
+                    else f"{a} is not a permutation"
+            if a in self.choices and set(v) - set(self.choices[a]):
+                return f"{a} has a value outside its choices"
+            if not all(self._ok(f"elem:{a}", x, V) for x in v):
+                return f"an element of {a} is out of range"
+            if "prime" in fl and not all(_is_prime(x) for x in v):
+                return f"{a} has a non-prime"
+            if "sorted" in fl and v != sorted(v):
+                return f"{a} is not sorted"
+        else:
+            if "tree" in fl:
+                return None if _is_edge_tree(v) else f"{a} is not a tree"
+            for r in v:
+                if a in self.choices and any(x not in self.choices[a] for i, x in enumerate(r)
+                                             if self._pkey(a, i) not in self.bounds):
+                    return f"{a} has a value outside its choices"
+                if not self._rect(a) and not self._ok(self.find(f"inner:{a}"), len(r), V):
+                    return f"a row of {a} has a bad length"
+                if not all(self._ok(self._pkey(a, i), x, V, r) for i, x in enumerate(r)):
+                    return f"a value in {a} is out of range"
+                if not all(self._val(V, p, r) for p in self._evaluable(self.row_preds.get(a, []), V, r)):
+                    return f"a row of {a} breaks a row constraint"
+            if a in self.diag and any(r[i] != self.diag[a] for i, r in enumerate(v) if i < len(r)):
+                return f"diagonal of {a}"
+            # a sorted matrix is sorted by a key the spec does not record, so it is not checked
+        if "distinct" in fl and len(set(map(lambda x: x if isinstance(x, (int, str)) else tuple(x), v))) < len(v):
+            return f"{a} is not distinct"
+        return None
+
     # --- sampling ---
 
     def _scalars(self):
@@ -709,6 +822,38 @@ class Spec:
         return par
 
 
+def _typed(v, t: str) -> bool:
+    ints = lambda xs: isinstance(xs, list) and all(type(x) is int for x in xs)
+    return {"int": lambda: type(v) is int,
+            "str": lambda: isinstance(v, str),
+            "List[int]": lambda: ints(v),
+            "List[str]": lambda: isinstance(v, list) and all(isinstance(x, str) for x in v),
+            "List[List[int]]": lambda: isinstance(v, list) and all(ints(r) for r in v)}[t]()
+
+
+def _connected(n, edges):
+    root = list(range(n))
+
+    def find(x):
+        while root[x] != x:
+            root[x] = root[root[x]]
+            x = root[x]
+        return x
+    for u, w in edges:
+        if not (0 <= u < n and 0 <= w < n) or find(u) == find(w):
+            return False
+        root[find(u)] = find(w)
+    return True
+
+
+def _is_edge_tree(edges) -> bool:
+    return all(len(e) >= 2 for e in edges) and _connected(len(edges) + 1, [e[:2] for e in edges])
+
+
+def _is_parent_tree(par) -> bool:
+    return bool(par) and par[0] == -1 and _connected(len(par), [(i, p) for i, p in enumerate(par) if i])
+
+
 class _Lookup(dict):
     def __init__(self, V, find):
         super().__init__(V)
@@ -718,8 +863,9 @@ class _Lookup(dict):
         return dict.__getitem__(self, self._find(k))
 
 
-def render(args: dict) -> str:
-    return ", ".join(f"{k}={v!r}" for k, v in args.items())
+def render(args: dict, nodes: dict[str, str] = {}) -> str:
+    """Argument string; `nodes` (from node_args) wraps list forms in their node builders."""
+    return ", ".join(f"{k}={nodes[k]}({v!r})" if k in nodes else f"{k}={v!r}" for k, v in args.items())
 
 
 def sample_inputs(problem: str, starter: str, seed: int) -> tuple[list[str], list[str]]:
@@ -740,27 +886,28 @@ def _inputs(p: dict) -> tuple[int, list[str] | None, str | None]:
     return p["index"], [t for t in small if t not in have] + big, None
 
 
-def main() -> None:
-    from pathlib import Path
-    from pipeline.core.io import save_json
+def _strip(row: dict) -> dict:
+    """Remove the tests an earlier run appended, in place."""
+    if n := row.pop("limit_tests", 0):
+        row["tests"], row["expected"] = list(row["tests"])[:-n], list(row["expected"])[:-n]
+    return row
+
+
+def generate(problems: list[dict]) -> tuple[dict, Counter, list[float]]:
+    """{index: (tests, expected)} for every call-mode problem, gold run on each input.
+
+    Also returns how each problem fared and gold's CPU seconds per problem.
+    """
     from pipeline.tasks.leetcode.task import spec_of
     from pipeline.tasks.leetcode.verifier import service
 
-    ap = argparse.ArgumentParser(description="Append generated limit tests to a corpus's problem files")
-    ap.add_argument("problems_dir", help="holds primitives.json and the partition files")
-    a = ap.parse_args()
-
-    files = sorted(Path(a.problems_dir).glob("*.json"))
-    problems = json.load(open(Path(a.problems_dir) / "primitives.json"))
-    if any("limit_tests" in p for p in problems):
-        raise SystemExit("limit tests already added")
-    calls = [p for p in problems if p.get("mode", "call") == "call"]
+    calls = [p for p in problems if p.get("mode", "call") != "stdio"]
     cpus = service.physical_cores()
     with ProcessPoolExecutor(len(cpus)) as ex:
         gen = {i: (tests, err) for i, tests, err in ex.map(_inputs, calls, chunksize=4)}
 
     pool = service.VerifierPool(cpus)
-    added, why = {}, Counter()
+    added, why, gold_s = {}, Counter(), []
     for n, p in enumerate(calls):
         tests, err = gen[p["index"]]
         if err:
@@ -769,13 +916,45 @@ def main() -> None:
             continue
         runs = pool.gold_outputs({**spec_of(p), "tests": tests})
         is_max = [j >= len(tests) - MAX for j in range(len(tests))]
-        keep = [(t, g["expected"], m) for t, g, m in zip(tests, runs, is_max)
-                if g["expected"] is not None and not (m and g["cpu_s"] > MAX_GOLD_S)]
+        keep = [(t, g["expected"], m) for t, g, m in zip(tests, runs, is_max) if g["expected"] is not None]
         added[p["index"]] = ([t for t, _, _ in keep], [e for _, e, _ in keep])
+        gold_s.append(sum(g["cpu_s"] for g in runs if g["expected"] is not None))
         why[f"parsed, {sum(m for _, _, m in keep)}/{MAX} max inputs kept"] += 1
         if n % 200 == 0:
             print(f"  gold {n}/{len(calls)}", flush=True)
     pool.close()
+    return added, why, gold_s
+
+
+def append(row: dict, added: dict) -> dict:
+    """Replace the row's generated tests with `added[row["index"]]`, in place."""
+    _strip(row)
+    tests, expected = added[row["index"]]
+    row["tests"], row["expected"] = list(row["tests"]) + tests, list(row["expected"]) + expected
+    row["limit_tests"] = len(tests)
+    return row
+
+
+def report(why: Counter, gold_s: list[float]) -> None:
+    for k, v in sorted(why.items()):
+        print(f"  {v:>5} {k}")
+    gold_s = sorted(gold_s)
+    if gold_s:
+        q = {f"p{x}": gold_s[min(len(gold_s) - 1, len(gold_s) * x // 100)] for x in (50, 90, 99, 100)}
+        print("  gold cpu s on generated tests, per problem: " + ", ".join(f"{k} {v:.2f}" for k, v in q.items()))
+
+
+def main() -> None:
+    from pathlib import Path
+    from pipeline.core.io import save_json
+
+    ap = argparse.ArgumentParser(description="Append generated limit tests to a corpus's problem files")
+    ap.add_argument("problems_dir", help="holds primitives.json and the partition files")
+    a = ap.parse_args()
+
+    files = sorted(Path(a.problems_dir).glob("*.json"))
+    problems = [_strip(p) for p in json.load(open(Path(a.problems_dir) / "primitives.json"))]
+    added, why, gold_s = generate(problems)
 
     text = {p["index"]: p["problem"] for p in problems}
     for f in files:
@@ -784,13 +963,10 @@ def main() -> None:
             if r["index"] not in added:
                 continue
             assert r["problem"] == text[r["index"]], f"{f.name}: index {r['index']} differs from primitives.json"
-            tests, expected = added[r["index"]]
-            r["tests"], r["expected"] = list(r["tests"]) + tests, list(r["expected"]) + expected
-            r["limit_tests"] = len(tests)
+            append(r, added)
         save_json(f, rows)
         print(f"{f}: {sum(r['index'] in added for r in rows)} problems patched", flush=True)
-    for k, v in sorted(why.items()):
-        print(f"  {v:>5} {k}")
+    report(why, gold_s)
 
 
 if __name__ == "__main__":

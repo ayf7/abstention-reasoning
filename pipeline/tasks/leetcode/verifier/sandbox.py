@@ -10,6 +10,8 @@ so nothing the submission can inspect reveals the answers.
 Two job modes:
   - "call" (default): exec `setup` + the code, then eval `entry(args)` per test
     and return the canonical value (see `encode`).
+  - "module": the code is a standalone file. It gets none of `setup`, which
+    only builds the test arguments, then eval `entry(args)` per test
   - "stdio": run the code as `__main__` once per test with that test's input
     on stdin, and return what it printed. Each input sits in its own memfd,
     written before confinement; RLIMIT_FSIZE=0 then makes them read-only.
@@ -253,17 +255,21 @@ class Sandbox:
         write, dumps, _exit = self._write_all, json.dumps, os._exit
         try:
             sys.setrecursionlimit(100_000)
+            standalone = job.get("mode", "call") == "module"
             ns = {"__name__": "solution", "__builtins__": __builtins__}
-            exec(compile(job["setup"], "<setup>", "exec"), ns)
+            scope = {"__builtins__": __builtins__} if standalone else ns
+            exec(compile(job["setup"], "<setup>", "exec"), scope)
             calls = [compile(f"({job['entry']})({args})", "<test>", "eval") for args in job["tests"]]
             exec(compile(job["code"], "<solution>", "exec"), ns)
+            if standalone:
+                scope = {**ns, **scope}
         except BaseException as e:
             write(wfd, dumps({"error": type(e).__name__, "stage": "load"}).encode() + b"\n")
             _exit(0)
 
         for call in calls:
             try:
-                line = dumps({"out": encode(eval(call, ns))})
+                line = dumps({"out": encode(eval(call, scope))})
             except BaseException as e:
                 write(wfd, dumps({"error": type(e).__name__}).encode() + b"\n")
                 _exit(0)

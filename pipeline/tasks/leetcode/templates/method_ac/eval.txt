@@ -4,6 +4,8 @@ Solve this programming problem in Python.
 
 {interface}
 
+Your solution must be implemented in {runtime} time complexity to be considered correct.
+
 To help you solve this problem, an expert may have provided a partial solution. If provided, assume that this partial solution is correct and build on it to solve the problem.
 
 Partial Solution:

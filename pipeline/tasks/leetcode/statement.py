@@ -13,8 +13,12 @@ intact ("10^5", "2^31 - 1", "10^9 + 7", "10^-5", "O(n^2)", "2^n"):
   - Everything else (prose powers, "2n", "n2", examples): a per-problem table,
     checked by hand. Look-alikes that are genuine values ("231" as a
     permutation, "2n people", "10-13 digits") are left alone.
+
+html_to_text renders the HTML statements of leetcode-complete in the same plain
+form, with each <sup> written in caret form directly, so they need no repair.
 """
 import re
+from html.parser import HTMLParser
 
 _POW10 = r"10(?:1[0-8]|[3-9])"
 _POW2 = r"2(?:31|32|63|64)"
@@ -95,3 +99,44 @@ def repair_statement(question_id: int, text: str) -> str:
             raise ValueError(f"question {question_id}: {old!r} not in statement")
         text = text.replace(old, new)
     return text
+
+
+class _Text(HTMLParser):
+    BLOCK = {"p", "div", "pre", "ul", "ol", "li", "br", "h1", "h2", "h3", "h4", "table", "tr", "blockquote"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out, self.sup = [], None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.BLOCK:
+            self.out.append("\n")
+        elif tag == "sup":
+            self.sup = []
+        elif tag in ("td", "th"):
+            self.out.append(" ")
+
+    def handle_endtag(self, tag):
+        if tag == "sup" and self.sup is not None:
+            t = "".join(self.sup).strip()
+            if t:  # some statements hold an empty <sup> (#3659, #3766)
+                self.out.append(f"^{t}" if re.fullmatch(r"-?\w+", t) else f"^({t})")
+            else:
+                self.out.append("".join(self.sup))
+            self.sup = None
+        elif tag in self.BLOCK:
+            self.out.append("\n")
+
+    def handle_data(self, data):
+        if not data.strip() and self.out and self.out[-1] in ("\n", " "):
+            return  # layout whitespace between tags
+        (self.sup if self.sup is not None else self.out).append(data)
+
+
+def html_to_text(html: str) -> str:
+    parser = _Text()
+    parser.feed(html)
+    parser.close()
+    text = "".join(parser.out).replace("\r", "").replace("\u200b", "")
+    text = "\n".join(" ".join(line.split()) for line in text.split("\n"))
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
