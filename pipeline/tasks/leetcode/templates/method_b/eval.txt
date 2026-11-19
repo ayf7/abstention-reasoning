@@ -1,0 +1,24 @@
+Solve this programming problem in Python.
+
+{problem}
+
+{interface}
+
+Your solution must be implemented in {runtime} time complexity to be considered correct.
+
+You have access to a hint system. You can request up to 4 progressive hints: two key insights, then a partial solution with the remaining lines marked `# TODO`, then the full solution. If you get stuck, request a hint.
+
+Do all of your reasoning inside a single <think> </think> block. To request a hint, write <request></request> without leaving the think block. The system will respond with a hint in <response>...</response> tags, and you continue reasoning in the same think block.
+
+When you are finished thinking, close with </think> and IMMEDIATELY provide your final answer in <answer> </answer> tags with no text in between. The answer must be {answer_kind} as plain Python code, with no markdown fences.
+
+Example format:
+<think>
+...reasoning...
+<request></request>
+<response>...hint 1...</response>
+...reasoning...
+</think>
+<answer>
+...code...
+</answer>

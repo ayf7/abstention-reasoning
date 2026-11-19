@@ -1,0 +1,9 @@
+Solve this programming problem in Python.
+
+{problem}
+
+{interface}
+
+Your solution must be implemented in {runtime} time complexity to be considered correct.
+
+Think through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and IMMEDIATELY provide your final answer in <answer> </answer> tags with no text in between. The answer must be {answer_kind} as plain Python code, with no markdown fences.

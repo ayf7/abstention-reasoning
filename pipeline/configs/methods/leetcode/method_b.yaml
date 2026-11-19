@@ -1,0 +1,17 @@
+template_variant: method_b
+reward_function: compute_score_hint
+multi_turn: true
+max_turns: 6
+mask_response_tokens: true
+# As math/method_b: no canned lead-in before a forced request, and the request
+# lives inside the think block. Use with --data-name leetcode_o2 (the prompt states
+# gold's time complexity).
+hint_transition: false
+nested_request: true
+reward_kwargs:
+  hint_penalty: 0.1
+  format_score: 0.1
+  # As math/method_b: requests made after the 4 hints ran out cost 0.2 each;
+  # more than 2 of them scores 0.
+  exhausted_penalty: 0.2
+  max_exhausted_requests: 2

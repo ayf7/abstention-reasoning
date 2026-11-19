@@ -1,0 +1,13 @@
+Consider this programming problem.
+
+{problem}
+
+{interface}
+
+Your solution must be implemented in {runtime} time complexity to be considered correct.
+
+The following solution was generated for this problem:
+
+Solution: {solution}
+
+You need to verify whether this solution is correct: it must return the right answer on every valid input and run within the time limit. Think through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and output <answer>1</answer> if the solution is correct, or <answer>0</answer> if incorrect. Output no other text within the <answer> </answer> tags.

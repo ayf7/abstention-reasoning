@@ -1,0 +1,4 @@
+template_variant: baseline_o2
+reward_function: compute_score
+# States gold's time complexity in the prompt; use with --data-name leetcode_o2.
+reward_kwargs: {}
