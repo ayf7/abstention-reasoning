@@ -83,40 +83,6 @@ SOLVER_METHOD_NAME = "method_ac"
 VERIFIER_METHOD_NAME = "method_a"
 
 
-def get_hints_list(primitive: dict) -> list[str]:
-    """Available hints for a primitive, countdown or math.
-
-    Mirrors pipeline/commands/data.py's extraction exactly: countdown carries
-    a flat `hint_exprs` list (each entry already the full cumulative partial
-    expression up to that point); math carries a `prefix_hints`
-    dict of up to 6 standalone steps (`hint_1`..`hint_6`).
-    """
-    hints_list = list(primitive.get("hint_exprs", []))
-    if not hints_list:
-        prefix_hints = primitive.get("prefix_hints", {})
-        for i in range(1, 7):
-            key = f"hint_{i}"
-            if key in prefix_hints:
-                hints_list.append(prefix_hints[key])
-    return hints_list
-
-
-def hint_sequence_for_level(task_name: str, hints_list: list[str], level: int) -> str:
-    """Render the `{hint_sequence}` placeholder text for a given hint level.
-
-    Matches pipeline/commands/data.py exactly. Level 0 has no partial
-    solution. math's hints are independent steps, so the partial
-    solution is every step up to `level` concatenated; countdown's hint_exprs
-    are each already the full cumulative expression, so only the single entry
-    at `level` is shown.
-    """
-    if level == 0:
-        return "No partial solution"
-    if task_name == "math":
-        return "\n".join(hints_list[:level])
-    return hints_list[level - 1]
-
-
 class RoundGenerator:
     """One loaded model, generating across one or more rounds.
 
@@ -197,7 +163,7 @@ class ChainItem:
 def build_items(task, primitives: list[dict], num_samples: int, max_hints: int) -> list[ChainItem]:
     items = []
     for primitive in primitives:
-        hints_list = get_hints_list(primitive)
+        hints_list = task.get_hints(primitive)
         local_max_hints = min(max_hints, len(hints_list))
         ground_truth = task.get_ground_truth(primitive)
         for t in range(num_samples):
@@ -254,7 +220,6 @@ def restore_from_checkpoint(items: list[ChainItem], checkpoint_data: list[dict])
 
 def run_verifier_rounds(
     task,
-    task_name: str,
     verifier: RoundGenerator,
     verifier_template: str,
     items: list[ChainItem],
@@ -283,7 +248,7 @@ def run_verifier_rounds(
 
         prompts = []
         for it in round_items:
-            hint_seq = hint_sequence_for_level(task_name, it.hints_list, level)
+            hint_seq = task.hint_sequence(it.hints_list, level)
             rendered = verifier_template.replace("{hint_sequence}", hint_seq)
             prompts.append(task.format_prompt(it.primitive, rendered, include_assistant_prefix=False))
 
@@ -330,10 +295,10 @@ def run_verifier_rounds(
     save_checkpoint(checkpoint_path, items)
 
 
-def run_solver(task, task_name: str, solver: RoundGenerator, solver_template: str, items: list[ChainItem]):
+def run_solver(task, solver: RoundGenerator, solver_template: str, items: list[ChainItem]):
     prompts = []
     for it in items:
-        hint_seq = hint_sequence_for_level(task_name, it.hints_list, it.selected_level)
+        hint_seq = task.hint_sequence(it.hints_list, it.selected_level)
         rendered = solver_template.replace("{hint_sequence}", hint_seq)
         prompts.append(task.format_prompt(it.primitive, rendered, include_assistant_prefix=True))
 
@@ -342,11 +307,11 @@ def run_solver(task, task_name: str, solver: RoundGenerator, solver_template: st
 
 
 def build_details(task, items: list[ChainItem], solver_results: list[list[dict]]) -> list[dict]:
+    gens = [samples[0] for samples in solver_results]
+    checks = task.check_correctness_batch(
+        [{"index": it.source_index, **it.ground_truth} for it in items], [g["text"] for g in gens])
     details = []
-    for it, samples in zip(items, solver_results):
-        gen = samples[0]
-        primitive_for_check = {"index": it.source_index, **it.ground_truth}
-        is_correct, meta = task.check_correctness(primitive_for_check, gen["text"])
+    for it, gen, (is_correct, meta) in zip(items, gens, checks):
 
         detail = {
             "index": it.source_index,
@@ -372,7 +337,7 @@ def build_details(task, items: list[ChainItem], solver_results: list[list[dict]]
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--task", required=True, help="Task name (countdown, math)")
+    p.add_argument("--task", required=True, help="Task name (countdown, math, leetcode)")
     p.add_argument("--eval-dataset", required=True, type=Path,
         help="Path to the raw eval partition (data/{task}/problems/eval.json)")
     p.add_argument("--verifier-model", required=True, help="Verifier (method_a) model path")
@@ -392,6 +357,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--verifier-temperature", type=float, default=1.0)
     p.add_argument("--verifier-top-p", type=float, default=1.0)
     p.add_argument("--solver-max-new-tokens", type=int, default=2048)
+    p.add_argument("--solver-answer-budget", type=int, default=0,
+        help="Tokens for a forced answer when the solver runs out of --solver-max-new-tokens "
+             "mid-thought, as in evaluate --force-answer (default: 0, no forcing)")
     p.add_argument("--solver-temperature", type=float, default=1.0)
     p.add_argument("--solver-top-p", type=float, default=1.0)
     p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
@@ -431,12 +399,13 @@ def main():
         seed=args.seed,
     )
     verifier = RoundGenerator(verifier_config)
-    run_verifier_rounds(task, args.task, verifier, verifier_template, items, checkpoint_path)
+    run_verifier_rounds(task, verifier, verifier_template, items, checkpoint_path)
     verifier.close()
 
     solver_config = GenerationConfig(
         model_name=args.solver_model,
         max_new_tokens=args.solver_max_new_tokens,
+        answer_budget=args.solver_answer_budget,
         temperature=args.solver_temperature,
         top_p=args.solver_top_p,
         tensor_parallel_size=args.tensor_parallel_size,
@@ -446,7 +415,7 @@ def main():
         seed=args.seed,
     )
     solver = RoundGenerator(solver_config)
-    solver_results = run_solver(task, args.task, solver, solver_template, items)
+    solver_results = run_solver(task, solver, solver_template, items)
     solver.close()
 
     details = build_details(task, items, solver_results)
@@ -470,6 +439,7 @@ def main():
             },
             "solver": {
                 "max_new_tokens": args.solver_max_new_tokens,
+                "answer_budget": args.solver_answer_budget,
                 "temperature": args.solver_temperature,
                 "top_p": args.solver_top_p,
             },
