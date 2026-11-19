@@ -44,6 +44,7 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
+    accuracy_by_hint_level,
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
@@ -672,6 +673,7 @@ class RayPPOTrainer:
     def _validate(self):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
+        val_groups: dict[str, list] = defaultdict(list)  # per-sample prompt hint level and difficulty
 
         # Lists to collect samples for the table
         sample_inputs = []
@@ -772,6 +774,9 @@ class RayPPOTrainer:
                 sample_turns.append(test_batch.non_tensor_batch["__num_turns__"])
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
+            for key in ("hint_level", "variant"):
+                if key in test_batch.non_tensor_batch:
+                    val_groups[key].extend(test_batch.non_tensor_batch[key])
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
@@ -808,6 +813,11 @@ class RayPPOTrainer:
                         metric_sec = "val-aux"
                     pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                     metric_dict[pfx] = metric_val
+
+        if "correct" in reward_extra_infos_dict and len(val_groups["hint_level"]) == len(sample_scores) \
+                and len(val_groups["variant"]) == len(sample_scores):
+            metric_dict.update(accuracy_by_hint_level(
+                reward_extra_infos_dict["correct"], val_groups["hint_level"], val_groups["variant"], "val-accuracy"))
 
         if len(sample_turns) > 0:
             sample_turns = np.concatenate(sample_turns)

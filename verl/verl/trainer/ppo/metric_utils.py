@@ -77,6 +77,33 @@ def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
     )
 
 
+def _hint_label(level: int) -> str:
+    return "1_hint" if level == 1 else f"{level}_hints"
+
+
+def accuracy_by_hint_level(correct, hint_level, difficulty, prefix: str) -> Dict[str, float]:
+    """Accuracy overall and per prompt hint level, then the same per difficulty.
+
+    hint_level is the level shown in the prompt (method_ac), not the count of
+    hints injected mid-rollout. Keys: {prefix}/overall, {prefix}/{k}_hints and
+    {prefix}/{difficulty}/... with difficulty lowercased (easy, medium, hard).
+    """
+    correct = np.asarray(correct, dtype=np.float64) > 0
+    levels = np.asarray(hint_level, dtype=np.int64)
+    difficulty = np.asarray([str(d).lower() for d in difficulty])
+    metrics = {}
+    groups = [(prefix, np.ones(len(correct), dtype=bool))]
+    groups += [(f"{prefix}/{d}", difficulty == d) for d in sorted(set(difficulty))]
+    for name, group in groups:
+        if not group.any():
+            continue
+        metrics[f"{name}/overall"] = float(correct[group].mean())
+        for level in sorted(set(levels[group])):
+            mask = group & (levels == level)
+            metrics[f"{name}/{_hint_label(int(level))}"] = float(correct[mask].mean())
+    return metrics
+
+
 def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str, Any]:
     """
     Computes various metrics from a batch of data for PPO training.
@@ -290,6 +317,11 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
             mask_6plus = (num_hints_arr >= 6)
             if mask_6plus.sum() > 0:
                 metrics[f"accuracy/hints_6plus"] = float(correct_arr[mask_6plus].mean())
+
+    # Accuracy by the hint level shown in the prompt and by difficulty (method_ac).
+    if correct is not None and "hint_level" in batch.non_tensor_batch and "variant" in batch.non_tensor_batch:
+        metrics.update(accuracy_by_hint_level(
+            correct, batch.non_tensor_batch["hint_level"], batch.non_tensor_batch["variant"], "accuracy"))
 
     # Abstention metrics
     if abstained is not None:

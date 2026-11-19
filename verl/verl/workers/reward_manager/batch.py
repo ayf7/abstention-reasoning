@@ -59,6 +59,8 @@ class BatchRewardManager:
         data_sources = data.non_tensor_batch[self.reward_fn_key]
         extras = data.non_tensor_batch.get("extra_info", [None] * len(data))
         uids = data.non_tensor_batch.get("uid", None)
+        # Which rollouts ran out of think budget and had an answer forced (rollout answer forcing).
+        forced = {"forced": data.non_tensor_batch["forced_answer"]} if "forced_answer" in data.non_tensor_batch else {}
 
         scores = self.compute_score(
             data_sources=data_sources,
@@ -66,6 +68,7 @@ class BatchRewardManager:
             ground_truths=ground_truths,
             extra_infos=extras,
             uids=uids,
+            **forced,
             **self.reward_kwargs,
         )
 
