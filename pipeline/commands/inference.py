@@ -5,6 +5,7 @@ Inference commands - generation and evaluation.
 import asyncio
 import random
 import re
+import shutil
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime
@@ -13,7 +14,7 @@ from pathlib import Path
 from pipeline.core.io import load_json, save_json
 from pipeline.core.generator import GenerationConfig, AsyncGenerator
 from pipeline.core.method import Method, resolve_data_name, resolve_models_name
-from pipeline.core.utils import ForceAnswer, extract_answer, model_short_name
+from pipeline.core.utils import ForceAnswer, extract_answer, min_words_after_hints, model_short_name
 from pipeline.tasks import get_task
 
 
@@ -393,6 +394,7 @@ def select_best_sample(
     primitive: dict,
     strategy: str = "shortest_cot",
     exclude_exhausted: bool = False,
+    min_words_after_hint: int = 0,
     rng=None,
 ) -> dict | None:
     """
@@ -404,7 +406,8 @@ def select_best_sample(
     - "most_hints": Among correct samples, pick the one with most hint requests.
       Falls back to most hints among incorrect if none correct. Useful for
       generating SFT data that teaches models to use hints.
-    - "random_correct": Pick uniformly at random among correct samples, and
+    - "random_correct": Pick uniformly at random among correct samples, preferring
+      ones that finished on their own over forced or cut-off ones, and
       return None when none are correct so the caller can drop the problem.
       The other strategies all fall back to an incorrect sample, and the
       argmax ones bias the result: "most_hints" keeps the hint-richest correct
@@ -450,6 +453,14 @@ def select_best_sample(
         if clean:
             evaluated_samples = clean
 
+    # Unlike exhausted samples, short ones are never kept: a problem whose every
+    # sample chained requests or answered straight off a hint is dropped (None).
+    if min_words_after_hint > 0:
+        evaluated_samples = [s for s in evaluated_samples
+                             if (w := min_words_after_hints(s["text"])) is None or w >= min_words_after_hint]
+        if not evaluated_samples:
+            return None
+
     # Separate correct and incorrect
     correct_samples = [s for s in evaluated_samples if s["correct"]]
     incorrect_samples = [s for s in evaluated_samples if not s["correct"]]
@@ -460,7 +471,10 @@ def select_best_sample(
         if rng is None:
             import random as _random
             rng = _random.Random(0)
-        best_sample = rng.choice(correct_samples)
+        # A forced or cut-off sample is kept only if the problem has nothing better,
+        # or a later finished-on-its-own filter would lose a problem it could keep.
+        natural = [s for s in correct_samples if s.get("finish_reason") == "stop" and not s.get("forced_answer")]
+        best_sample = rng.choice(natural or correct_samples)
     elif strategy == "random":
         if rng is None:
             import random as _random
@@ -546,10 +560,12 @@ def generate(
     hint_target_fraction: float | None = None,
     max_hints: int = 4,
     drop_exhausted: bool = False,
+    min_words_after_hint: int = 0,
     target_correct_rate: float | None = None,
     max_oversample: int = 5,
     data_name: str | None = None,
     models_name: str | None = None,
+    checkpoint_every: int = 100,
 ) -> Path:
     """
     Generate model outputs on prompts.
@@ -572,6 +588,8 @@ def generate(
             out of think_tokens mid-thought gets </think> closed for it and
             answer_tokens to answer in, matching what RL does at rollout time.
             Single-turn generation only.
+        checkpoint_every: Async generation saves the output after every this many
+            prompts, so a requeued job resumes where it stopped.
         force_hints_distribution: Distribution of forced hint counts. Maps number of hints
             to probability, e.g. {1: 0.5, 2: 0.3, 3: 0.2}. Probabilities must sum to 1.
             If None, no hints are forced.
@@ -595,6 +613,8 @@ def generate(
             available hint and was served the "No more hints available."
             placeholder. That string is real training text, so leaving it in
             teaches the warm start to produce and expect it.
+        min_words_after_hint: Resample post-hint turns, then drop samples, with
+            fewer words of reasoning after a hint than this (0 disables).
         target_correct_rate: Keep resampling incorrect problems until this fraction
             is answered correctly (phase 3). None disables the loop.
         max_oversample: Cap on phase-3 resampling rounds.
@@ -676,6 +696,7 @@ def generate(
         hint_transition=method.hint_transition if method else True,
         nested_request=method.nested_request if method else False,
         answer_budget=answer_budget,
+        min_words_after_hint=min_words_after_hint,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -854,9 +875,10 @@ def generate(
                     best_sample = select_best_sample(gen_samples, task, primitive,
                                                      strategy=sample_strategy,
                                                      exclude_exhausted=drop_exhausted,
+                                                     min_words_after_hint=min_words_after_hint,
                                                      rng=_rng)
                     if best_sample is None:
-                        # strategy="random_correct" and nothing was correct.
+                        # Nothing correct (random_correct), or every sample short of min_words_after_hint.
                         n_no_correct += 1
                         records_by_index.pop(prompt_data["index"], None)
                         continue
@@ -897,7 +919,8 @@ def generate(
             records = sorted(records_by_index.values(), key=lambda r: r["index"])
             if n_no_correct:
                 print(f"Dropped {n_no_correct} problem(s) with no correct sample "
-                      f"(--sample-strategy random_correct).")
+                      f"(--sample-strategy random_correct) or none with "
+                      f"--min-words-after-hint {min_words_after_hint} words after each hint.")
             if drop_exhausted:
                 records, n_dropped = drop_exhausted_records(records)
                 if n_dropped:
@@ -952,59 +975,63 @@ def generate(
                         break
                     print(f"\n=== Retry truncated attempt {retry_attempt}/{max_retries} (seed={config.seed}, {len(current_prompts)} prompts) ===")
 
-                all_prompts = [p["prompt"] for p in current_prompts]
-                print(f"Running async generation on {len(all_prompts)} prompts...")
-                all_results = await async_generator.generate_async(all_prompts, num_samples=num_samples)
+                # Generate in chunks and save after each, so a requeued job resumes where it stopped.
+                print(f"Running async generation on {len(current_prompts)} prompts, saving every {checkpoint_every}...")
+                for start in range(0, len(current_prompts), checkpoint_every):
+                    chunk = current_prompts[start:start + checkpoint_every]
+                    all_results = await async_generator.generate_async([p["prompt"] for p in chunk], num_samples=num_samples)
 
-                for prompt_data, gen_samples in zip(current_prompts, all_results):
-                    primitive = {
-                        "index": prompt_data["index"],
-                        **prompt_data["ground_truth"],
-                        "variant": prompt_data.get("variant", "unknown"),
-                    }
-
-                    if num_samples > 1:
-                        _rng = random.Random((seed or 0) + prompt_data["index"])
-                        best_sample = select_best_sample(
-                            gen_samples, task, primitive,
-                            strategy=sample_strategy,
-                            exclude_exhausted=drop_exhausted, rng=_rng)
-                        if best_sample is None:
-                            # random_correct: nothing correct -> drop the problem
-                            n_no_correct += 1
-                            records_by_index.pop(prompt_data["index"], None)
-                            continue
-                    else:
-                        sample = gen_samples[0]
-                        is_correct, meta = task.check_correctness(primitive, sample["text"])
-                        best_sample = {
-                            **sample,
-                            "correct": is_correct,
-                            "metadata": meta,
+                    for prompt_data, gen_samples in zip(chunk, all_results):
+                        primitive = {
+                            "index": prompt_data["index"],
+                            **prompt_data["ground_truth"],
+                            "variant": prompt_data.get("variant", "unknown"),
                         }
 
-                    record = {
-                        "index": prompt_data["index"],
-                        "variant": prompt_data.get("variant", "unknown"),
-                        "prompt": prompt_data["prompt"],
-                        "generation": best_sample["text"],
-                        "correct": best_sample["correct"],
-                        "finish_reason": best_sample["finish_reason"],
-                        "token_count": best_sample["token_count"],
-                        "metadata": best_sample["metadata"],
-                        "extracted_hints": extract_generation_hints(best_sample["text"]),
-                        **{k: best_sample[k] for k in
-                           ("pass_rate", "num_correct_samples", "num_samples")
-                           if k in best_sample},
-                        "forced_answer": best_sample.get("forced_answer", False),
-                        "answer_truncated": best_sample.get("answer_truncated", False),
-                    }
+                        if num_samples > 1:
+                            _rng = random.Random((seed or 0) + prompt_data["index"])
+                            best_sample = select_best_sample(
+                                gen_samples, task, primitive,
+                                strategy=sample_strategy,
+                                exclude_exhausted=drop_exhausted,
+                                min_words_after_hint=min_words_after_hint, rng=_rng)
+                            if best_sample is None:
+                                # random_correct: nothing correct -> drop the problem
+                                n_no_correct += 1
+                                records_by_index.pop(prompt_data["index"], None)
+                                continue
+                        else:
+                            sample = gen_samples[0]
+                            is_correct, meta = task.check_correctness(primitive, sample["text"])
+                            best_sample = {
+                                **sample,
+                                "correct": is_correct,
+                                "metadata": meta,
+                            }
 
-                    copy_source_fields(record, prompt_data)
-                    records_by_index[prompt_data["index"]] = record
+                        record = {
+                            "index": prompt_data["index"],
+                            "variant": prompt_data.get("variant", "unknown"),
+                            "prompt": prompt_data["prompt"],
+                            "generation": best_sample["text"],
+                            "correct": best_sample["correct"],
+                            "finish_reason": best_sample["finish_reason"],
+                            "token_count": best_sample["token_count"],
+                            "metadata": best_sample["metadata"],
+                            "extracted_hints": extract_generation_hints(best_sample["text"]),
+                            **{k: best_sample[k] for k in
+                               ("pass_rate", "num_correct_samples", "num_samples")
+                               if k in best_sample},
+                            "forced_answer": best_sample.get("forced_answer", False),
+                            "answer_truncated": best_sample.get("answer_truncated", False),
+                        }
 
-                records = sorted(records_by_index.values(), key=lambda r: r["index"])
-                save_json(output_path, records)
+                        copy_source_fields(record, prompt_data)
+                        records_by_index[prompt_data["index"]] = record
+
+                    records = sorted(records_by_index.values(), key=lambda r: r["index"])
+                    save_json(output_path, records)
+                    print(f"Saved {start + len(chunk)}/{len(current_prompts)} prompts to {output_path}", flush=True)
 
                 correct = sum(1 for r in records if r["correct"])
                 truncated_count = sum(1 for r in records if r.get("finish_reason") == "length")
@@ -1178,6 +1205,7 @@ def evaluate(
     force_answer: ForceAnswer | None = None,
     data_name: str | None = None,
     models_name: str | None = None,
+    checkpoint_every: int = 100,
 ) -> Path:
     """
     Evaluate a model on prompts and compute metrics.
@@ -1195,6 +1223,8 @@ def evaluate(
         max_new_tokens, force_answer: Token budgets, as in generate.
         data_name: Data directory name (default: task_name)
         models_name: Models directory name (default: data_name)
+        checkpoint_every: Generate this many prompts at a time and save each
+            chunk next to the output, so a requeued job resumes where it stopped.
         ... generation config ...
 
     Returns:
@@ -1285,39 +1315,62 @@ def evaluate(
         print("Counterfactual mode: hint requests are blocked during decoding")
 
     async_generator = AsyncGenerator(config)
-    if multi_turn:
-        ground_truths = [p["ground_truth"] for p in prompts_data]
+    ground_truths = [p["ground_truth"] for p in prompts_data]
+    # generate_with_hints_async produces 1 trajectory per prompt, so prompts are
+    # duplicated for num_samples > 1; the generator seeds by position in that list.
+    expand = num_samples if multi_turn else 1
 
-        # generate_with_hints_async produces 1 trajectory per prompt,
-        # so duplicate prompts for num_samples > 1
-        if num_samples > 1:
-            expanded_prompts = [p for p in prompts for _ in range(num_samples)]
-            expanded_gts = [gt for gt in ground_truths for _ in range(num_samples)]
-            print(f"Running multi-turn generation on {len(prompts)} prompts x {num_samples} samples...")
-            expanded_results = asyncio.run(
-                async_generator.generate_with_hints_async(
-                    expanded_prompts,
-                    expanded_gts,
-                )
+    async def generate_chunk(chunk_prompts, chunk_gts):
+        if multi_turn:
+            expanded_results = await async_generator.generate_with_hints_async(
+                [p for p in chunk_prompts for _ in range(expand)],
+                [gt for gt in chunk_gts for _ in range(expand)],
             )
-            # Group back: every num_samples consecutive results belong to the same prompt
-            generations = [
-                [r[0] for r in expanded_results[i * num_samples:(i + 1) * num_samples]]
-                for i in range(len(prompts))
+            # Group back: every `expand` consecutive results belong to the same prompt
+            return [
+                [r[0] for r in expanded_results[i * expand:(i + 1) * expand]]
+                for i in range(len(chunk_prompts))
             ]
-        else:
-            print(f"Running multi-turn generation on {len(prompts)} prompts...")
-            generations = asyncio.run(
-                async_generator.generate_with_hints_async(
-                    prompts,
-                    ground_truths,
-                )
-            )
-    else:
-        print(f"Running generation on {len(prompts)} prompts...")
-        generations = asyncio.run(
-            async_generator.generate_async(prompts, num_samples=num_samples)
-        )
+        return await async_generator.generate_async(chunk_prompts, num_samples=num_samples)
+
+    # Generations are saved one chunk at a time beside the output and reloaded on
+    # a rerun: results are written only after every sample is graded, so without
+    # this a job requeued late in a long eval loses all of its generation.
+    partial_dir = output_path.parent / f".{output_path.stem}.partial"
+    run_key = {
+        "model": actual_model_name, "prompts": str(prompts_path), "num_prompts": len(prompts),
+        "num_samples": num_samples, "temperature": temperature, "top_p": top_p,
+        "max_new_tokens": max_new_tokens, "answer_budget": answer_budget, "seed": seed,
+        "no_hints": no_hints, "multi_turn": multi_turn, "checkpoint_every": checkpoint_every,
+    }
+    partial_dir.mkdir(parents=True, exist_ok=True)
+    key_path = partial_dir / "run.json"
+    if key_path.exists() and load_json(key_path) != run_key:
+        raise ValueError(f"{partial_dir} holds generations from a different eval configuration; "
+                         f"delete it or change --output")
+    save_json(key_path, run_key)
+
+    async def generate_all():
+        generations = []
+        for start in range(0, len(prompts), checkpoint_every):
+            end = min(start + checkpoint_every, len(prompts))
+            chunk_path = partial_dir / f"{start:06d}-{end:06d}.json"
+            if chunk_path.exists():
+                generations.extend(load_json(chunk_path))
+                print(f"Prompts {start}-{end}: loaded from {chunk_path}")
+                continue
+            print(f"Prompts {start}-{end} of {len(prompts)}" + (" (multi-turn)" if multi_turn else ""))
+            # The generator seeds each prompt by its position in the list it is given;
+            # offsetting by the chunk start keeps every prompt's seed what it would be unchunked.
+            if seed is not None:
+                async_generator.config.seed = seed + start * expand
+            chunk = await generate_chunk(prompts[start:end], ground_truths[start:end])
+            save_json(chunk_path, chunk)
+            generations.extend(chunk)
+        async_generator.config.seed = seed
+        return generations
+
+    generations = asyncio.run(generate_all())
 
     # The ban has two layers and this reports on both. The sampler suppresses the
     # "request" token, which is best-effort -- bad_words bans a token id and BPE
@@ -1463,6 +1516,7 @@ def evaluate(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         save_json(output_path, results)
         print(f"\nSaved results to {output_path}")
+        shutil.rmtree(partial_dir)
 
         return output_path
 
@@ -1554,6 +1608,7 @@ def evaluate(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_json(output_path, results)
     print(f"\nSaved results to {output_path}")
+    shutil.rmtree(partial_dir)
 
     return output_path
 
@@ -1747,6 +1802,43 @@ def _combine_verifier_eval_multisample(
             }
             final_details.append(detail)
     return final_details
+
+
+def _runtime_verdict(job: tuple) -> dict:
+    from pipeline.tasks.leetcode.verifier import runtime
+
+    index, sample, spec, code, tests = job
+    return {"index": index, "sample": sample, **runtime.evaluate(spec, code, tests, tests["gold"])}
+
+
+def evaluate_runtime(results_path: Path, data_name: str, output_path: Path | None = None, workers: int = 8) -> Path:
+    """Compare the correct leetcode answers in an evaluate results file with gold on data/{data_name}/runtime_tests.json."""
+    from concurrent.futures import ProcessPoolExecutor
+
+    from pipeline.core.method import DATA_ROOT
+    from pipeline.tasks.leetcode import limit_tests
+    from pipeline.tasks.leetcode.task import extract_code
+
+    results = load_json(results_path)
+    tests = load_json(DATA_ROOT / data_name / "runtime_tests.json")
+    problems = {p["index"]: p for p in load_json(DATA_ROOT / data_name / "problems" / "primitives.json")}
+    jobs = []
+    for d in results["details"]:
+        index = d.get("source_index", d["index"])  # method_ac gives each hint level of a problem its own `index`
+        p = problems[index]
+        spec = dict(setup=p["setup"], entry=p["entry"], nodes=limit_tests.node_args(p["starter_code"]))
+        for i, sample in enumerate(d.get("samples", [d])):  # one sample per problem is stored on the detail itself
+            code = sample["correct"] and extract_code(sample["generation"])
+            if code:
+                jobs.append((index, i, spec, code, tests[str(index)]))
+    with ProcessPoolExecutor(workers) as ex:
+        verdicts = list(ex.map(_runtime_verdict, jobs))
+    slower = sum(v["slower"] for v in verdicts)
+    print(f"{slower} of {len(verdicts)} correct answers are slower than gold")
+    output_path = output_path or results_path.with_name(f"{results_path.stem}_runtime.json")
+    save_json(output_path, {"results": str(results_path), "num_correct": len(verdicts), "num_slower": slower, "details": verdicts})
+    print(f"Saved results to {output_path}")
+    return output_path
 
 
 def combine_verifier_eval(

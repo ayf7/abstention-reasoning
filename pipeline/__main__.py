@@ -126,6 +126,8 @@ def cmd_create_prompts(args):
         num_hints=args.num_hints,
         force_json=args.json,
         data_name=args.data_name,
+        all_hint_levels=args.all_hint_levels,
+        levels_per_problem=args.levels_per_problem,
     )
 
 
@@ -221,6 +223,7 @@ def cmd_generate(args):
         hint_target_fraction=getattr(args, "hint_target_fraction", None),
         max_hints=getattr(args, "max_hints", 4),
         drop_exhausted=getattr(args, "drop_exhausted", False),
+        min_words_after_hint=getattr(args, "min_words_after_hint", 0),
         data_name=args.data_name,
         models_name=args.models_name,
     )
@@ -263,6 +266,7 @@ def cmd_evaluate(args):
         force_answer=args.force_answer,
         data_name=args.data_name,
         models_name=args.models_name,
+        checkpoint_every=args.checkpoint_every,
     )
 
 
@@ -274,6 +278,16 @@ def cmd_combine_verifier_eval(args):
         verifier_results_path=Path(args.verifier_results),
         output_path=Path(args.output),
         max_hints=args.max_hints,
+    )
+
+
+def cmd_evaluate_runtime(args):
+    """Compare correct leetcode answers with gold on the runtime tests."""
+    commands.evaluate_runtime(
+        results_path=Path(args.results),
+        data_name=args.data_name,
+        output_path=Path(args.output) if args.output else None,
+        workers=args.workers,
     )
 
 
@@ -469,6 +483,12 @@ def main():
     p.add_argument("--num-hints", type=int, default=None,
         help="Maximum hint level. method_ac and method_a sample two distinct levels per "
              "problem (favoring fewer hints) in every split; other methods include the first N hints.")
+    p.add_argument("--all-hint-levels", action="store_true",
+        help="method_ac / method_a: every level 0..--num-hints per problem instead of two sampled ones; "
+             "written as {split}__{method}__all_levels")
+    p.add_argument("--levels-per-problem", type=int, default=2,
+        help="method_ac / method_a: hint levels sampled per problem (default 2); "
+             "other values are written as {split}__{method}__{k}level")
     p.add_argument("--json", action="store_true", help="Force JSON output for all splits (instead of parquet for RL)")
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.set_defaults(func=cmd_create_prompts)
@@ -590,6 +610,10 @@ def main():
         help="Discard generations where the model asked past the last available "
              "hint and was served 'No more hints available.'. That placeholder is "
              "real training text; keeping it teaches the warm start to emit it.")
+    p.add_argument("--min-words-after-hint", type=int, default=0,
+        help="Forced-hint generation: resample a turn that follows a hint with fewer "
+             "words of reasoning than this, then drop samples still short of it, so "
+             "the teacher cannot chain requests or answer straight off a hint. 0 disables.")
     p.add_argument("--target-correct-rate", type=float, default=None,
         help="Phase 3: keep resampling incorrect problems until this fraction is "
              "answered correctly (e.g. 0.5 for a majority). Stops early if a round "
@@ -624,9 +648,18 @@ def main():
     add_force_answer_arg(p, MAX_NEW_TOKENS_EXCLUSIVE)
     p.add_argument("--seed", type=int, default=42, help="Random seed for generation (default: 42)")
     p.add_argument("--no-hints", action="store_true", help="Counterfactual eval: block hint requests during decoding so the model must answer alone")
+    p.add_argument("--checkpoint-every", type=int, default=100, metavar="N",
+                   help="Save generations every N prompts so a requeued job resumes instead of starting over (default: 100)")
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.add_argument("--models-name", help="Models directory name under models/ (default: data-name)")
     p.set_defaults(func=cmd_evaluate)
+
+    p = subparsers.add_parser("evaluate_runtime", help="Compare correct leetcode answers with gold on the runtime tests")
+    p.add_argument("--results", required=True, help="Results file from evaluate")
+    p.add_argument("--data-name", default="leetcode_o2", help="Data directory holding runtime_tests.json (default: leetcode_o2)")
+    p.add_argument("--output", help="Output path (default: {results}_runtime.json)")
+    p.add_argument("--workers", type=int, default=8, help="Answers evaluated at once (default: 8)")
+    p.set_defaults(func=cmd_evaluate_runtime)
 
     # combine_verifier_eval
     p = subparsers.add_parser(

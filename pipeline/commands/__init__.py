@@ -16,7 +16,7 @@ from .data import (
     create_prompts,
     create_verification_data,
 )
-from .inference import analyze, combine_verifier_eval, evaluate, generate, generate_until_target
+from .inference import analyze, combine_verifier_eval, evaluate, evaluate_runtime, generate, generate_until_target
 from .training import train_sft, train_rl, convert_checkpoint
 
 __all__ = [
@@ -31,6 +31,7 @@ __all__ = [
     "generate",
     "generate_until_target",
     "evaluate",
+    "evaluate_runtime",
     "combine_verifier_eval",
     "analyze",
     # Training commands

@@ -903,6 +903,12 @@ def train_rl(
         max_turns = method.max_turns
         max_hints = method.max_hints
         template_content = method.load_template(task_name, "rl")
+        # verl leaves a field the rows lack as literal text in the prompt.
+        if "{runtime}" in template_content:
+            import pyarrow.parquet as pq
+
+            if "runtime" not in pq.ParquetFile(train_prompts_path).schema_arrow.field("primitive").type.names:
+                raise ValueError(f"{train_prompts_path} has no `runtime` field; render it from a dataset with complexity labels")
 
     # Apply CLI overrides to reward kwargs
     if reward_kwargs_overrides:

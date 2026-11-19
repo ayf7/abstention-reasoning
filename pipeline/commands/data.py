@@ -113,7 +113,7 @@ def create_partitions(
     return written
 
 
-def _prompts_filename(split: str, method, force_json: bool) -> str:
+def _prompts_filename(split: str, method, force_json: bool, desc: str | None = None) -> str:
     """Filename for one split's prompts.
 
     Prompt files for every method share a single prompts/ directory, so the
@@ -123,7 +123,7 @@ def _prompts_filename(split: str, method, force_json: bool) -> str:
     inspection.
     """
     ext = ".json" if force_json else (".parquet" if split.startswith("rl") else ".json")
-    stem = method.artifact_stem(split) if method is not None else split
+    stem = method.artifact_stem(split, desc) if method is not None else split
     return f"{stem}{ext}"
 
 
@@ -138,6 +138,8 @@ def create_prompts(
     num_hints: int | None = None,
     force_json: bool = False,
     data_name: str | None = None,
+    all_hint_levels: bool = False,
+    levels_per_problem: int = HINT_LEVELS_PER_PROBLEM,
 ) -> Path | dict[str, Path]:
     """
     Create prompts from primitives for a given split (or all splits).
@@ -156,6 +158,12 @@ def create_prompts(
         include_assistant_prefix: Whether to include assistant's opening
         num_hints: Number of hints to extract from prefix_hints (0-6). If None, no hint injection.
         data_name: Data directory name (default: task_name)
+        all_hint_levels: method_ac / method_a only: emit every level 0..num_hints per
+            problem instead of sampling HINT_LEVELS_PER_PROBLEM of them. Written as
+            `{split}__{method}__all_levels` so the sampled files stay in place.
+        levels_per_problem: method_ac / method_a only: how many levels to sample per
+            problem. A value other than HINT_LEVELS_PER_PROBLEM is written as
+            `{split}__{method}__{k}level`.
 
     Returns:
         Path to created prompts file, or dict of paths if split="all"
@@ -189,6 +197,12 @@ def create_prompts(
         template_variant = getattr(task, "default_template_variant", None)
 
     assistant_prefix = getattr(task, "assistant_prefix", None)
+    if all_hint_levels:
+        desc = "all_levels"
+    elif levels_per_problem != HINT_LEVELS_PER_PROBLEM:
+        desc = f"{levels_per_problem}level"
+    else:
+        desc = None
 
     # Handle "all" splits
     if split_name == "all":
@@ -199,7 +213,7 @@ def create_prompts(
         splits = task.supported_splits()
         results = {}
         for split in splits:
-            output_path = output_dir / _prompts_filename(split, method, force_json)
+            output_path = output_dir / _prompts_filename(split, method, force_json, desc)
             results[split] = _create_prompts_single(
                 task=task,
                 task_name=task_name,
@@ -213,11 +227,13 @@ def create_prompts(
                 assistant_prefix=assistant_prefix,
                 method=method,
                 num_hints=num_hints,
+                all_hint_levels=all_hint_levels,
+                levels_per_problem=levels_per_problem,
             )
         return results
 
     # Single split
-    output_path = output_dir / _prompts_filename(split_name, method, force_json)
+    output_path = output_dir / _prompts_filename(split_name, method, force_json, desc)
     return _create_prompts_single(
         task=task,
         task_name=task_name,
@@ -231,6 +247,8 @@ def create_prompts(
         assistant_prefix=assistant_prefix,
         method=method,
         num_hints=num_hints,
+        all_hint_levels=all_hint_levels,
+        levels_per_problem=levels_per_problem,
     )
 
 
@@ -275,6 +293,8 @@ def _create_prompts_single(
     method: "Method | None" = None,
     num_hints: int | None = None,
     data_name: str | None = None,
+    all_hint_levels: bool = False,
+    levels_per_problem: int = HINT_LEVELS_PER_PROBLEM,
 ) -> Path:
     """Apply a method's template to one materialized partition."""
     data_name = resolve_data_name(task_name, data_name)
@@ -301,6 +321,10 @@ def _create_prompts_single(
         raise ValueError(f"num_hints must be non-negative, got {num_hints}")
     if uses_fixed_hint_levels and num_hints == 0:
         raise ValueError(f"{method.name} requires --num-hints to be greater than 0")
+    if all_hint_levels and not uses_fixed_hint_levels:
+        raise ValueError("all_hint_levels applies only to method_ac and method_a")
+    # Record indices are primitive index * stride + position, distinct within a file.
+    index_stride = num_hints + 1 if all_hint_levels else levels_per_problem
 
     is_parquet = fmt == "parquet"
 
@@ -347,8 +371,12 @@ def _create_prompts_single(
             hints_list = task.get_hints(primitive)
             if uses_fixed_hint_levels:
                 max_hint_level = min(num_hints, len(hints_list))
-                hint_levels = _sample_hint_levels(
-                    random.Random(seed + primitive["index"]), max_hint_level
+                hint_levels = (
+                    list(range(max_hint_level + 1))
+                    if all_hint_levels
+                    else _sample_hint_levels(
+                        random.Random(seed + primitive["index"]), max_hint_level, k=levels_per_problem
+                    )
                 )
             if not is_parquet:
                 # json path renders `{hints}` (if the template uses it) from the raw list
@@ -373,7 +401,7 @@ def _create_prompts_single(
             # Every sampled hint level for a primitive needs a distinct record
             # index; non-fixed-hint methods emit exactly one record per primitive.
             record_index = (
-                primitive["index"] * HINT_LEVELS_PER_PROBLEM + i
+                primitive["index"] * index_stride + i
                 if uses_fixed_hint_levels
                 else primitive["index"]
             )
@@ -446,6 +474,13 @@ def _create_prompts_single(
     return output_path
 
 
+def _source_primitives(data_name: str) -> dict[int, dict]:
+    """Primitives by index. Verifier prompts are formatted from the primitive a
+    solve came from (`source_index`), as create_prompts does: a generation's
+    ground truth need not carry the prompt fields (leetcode's holds only tests)."""
+    return {p["index"]: p for p in load_json(get_primitives_path(data_name))}
+
+
 def _create_verification_data_method_c(
     task_name: str,
     generations_path: Path,
@@ -487,6 +522,7 @@ def _create_verification_data_method_c(
     task = get_task(task_name)
     template = method.load_template(task_name, "sft")
     generations = load_json(generations_path)
+    primitives = _source_primitives(data_name)
     assistant_prefix = getattr(task, "assistant_prefix", None)
 
     rng = random.Random(seed)
@@ -501,11 +537,8 @@ def _create_verification_data_method_c(
 
     for pos, source in enumerate(generations):
         index = source.get("index")
-        ground_truth = source.get("ground_truth")
         generation_text = source.get("generation")
         is_correct = source.get("correct")
-        if not isinstance(ground_truth, dict):
-            raise ValueError(f"Index {index}: missing ground_truth")
         if generation_text is None:
             raise ValueError(f"Index {index}: missing generation")
         if not isinstance(is_correct, bool):
@@ -515,8 +548,9 @@ def _create_verification_data_method_c(
         n_correct += label
         record_ground_truth = {"correct": label}
 
+        primitive = primitives[source.get("source_index", index)]
         rendered_template = template.replace("{solution}", generation_text)
-        prompt = task.format_prompt(ground_truth, rendered_template, include_assistant_prefix=True)
+        prompt = task.format_prompt(primitive, rendered_template, include_assistant_prefix=True)
 
         if pos in sft_positions:
             sft_records.append({
@@ -532,7 +566,8 @@ def _create_verification_data_method_c(
                 "index": index,
                 "run_id": run_id,
                 "primitive": {
-                    "problem": ground_truth.get("problem"),
+                    **(task.enrich_primitive_for_rl(primitive) if hasattr(task, "enrich_primitive_for_rl")
+                       else {"problem": primitive["problem"]}),
                     "solution": generation_text,
                 },
                 "ground_truth": record_ground_truth,
@@ -592,6 +627,7 @@ def create_verification_data(
     method = Method.load(method_name, task_name)
     template = method.load_template(task_name, "sft")
     generations = load_json(generations_path)
+    primitives = _source_primitives(resolve_data_name(task_name, data_name))
 
     records = []
     positives = 0
@@ -625,15 +661,12 @@ def create_verification_data(
             )
 
         hint_sequence = source.get("hint_sequence")
-        ground_truth = source.get("ground_truth")
         if hint_sequence is None:
             raise ValueError(f"Index {index}: missing hint_sequence")
-        if not isinstance(ground_truth, dict):
-            raise ValueError(f"Index {index}: missing ground_truth")
 
         rendered_template = template.replace("{hint_sequence}", hint_sequence)
         prompt = task.format_prompt(
-            ground_truth,
+            primitives[source.get("source_index", index)],
             rendered_template,
             include_assistant_prefix=False,
         )

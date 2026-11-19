@@ -93,9 +93,10 @@ def tokenize_with_response_mask(
 
 
 # What the generator inserts when it forces an answer out of a truncated
-# generation (_answer_scaffold's mid-think case plus the newline that opens the
-# answer body), as it reads after canonicalization.
-FORCED_ANSWER_SCAFFOLD = "\n</think>\n\n<answer>\n"
+# generation (_answer_scaffold's mid-think case), plus the newline that opens a
+# multi-line answer body after canonicalization. A one-line answer such as a
+# verifier's 0/1 label has no such newline.
+FORCED_ANSWER_SCAFFOLD = "\n</think>\n\n<answer>"
 
 
 def tokenize_with_forced_scaffold_mask(
@@ -112,6 +113,8 @@ def tokenize_with_forced_scaffold_mask(
     head, scaffold, tail = text.rpartition(FORCED_ANSWER_SCAFFOLD)
     if not scaffold:
         raise ValueError("forced_answer record has no forced-answer scaffold")
+    if tail.startswith("\n"):
+        scaffold, tail = scaffold + "\n", tail[1:]
     tokens, mask = [], []
     for segment, value in ((head, 1), (scaffold, 0), (tail, 1)):
         ids = tokenizer.encode(segment, add_special_tokens=False)
@@ -124,6 +127,22 @@ def extract_answer(text: str) -> str | None:
     """Extract content between <answer> and </answer> tags."""
     match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL | re.IGNORECASE)
     return match.group(1).strip() if match else None
+
+
+_AFTER_HINT_END = re.compile(r"<request>|</think>|<answer>")
+
+
+def min_words_after_hints(text: str) -> int | None:
+    """Fewest words of reasoning written after any hint, or None if no hint was served.
+
+    A segment runs from a </response> to the next request, the end of thinking,
+    or the answer. A teacher that chains requests or answers straight off a hint
+    scores 0.
+    """
+    segments = text.split("</response>")[1:]
+    if not segments:
+        return None
+    return min(len(_AFTER_HINT_END.split(s.replace("<think>", ""), 1)[0].split()) for s in segments)
 
 
 def safe_eval(expr: str) -> Any:

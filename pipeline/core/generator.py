@@ -4,6 +4,8 @@ import asyncio
 import re
 from dataclasses import dataclass
 
+from pipeline.core.utils import min_words_after_hints
+
 _RESPONSE_TAG_RE = re.compile(r'<response>.*?</response>', re.DOTALL)
 
 
@@ -175,6 +177,12 @@ class GenerationConfig:
                                      # impossible, so the model has to answer alone
     answer_budget: int = 0  # Tokens for a forced answer when a generation runs out
                             # of max_new_tokens mid-thought. 0 disables forcing.
+    min_words_after_hint: int = 0  # Forced-hint generation: resample a turn that follows
+                                   # a hint with fewer words than this. 0 disables.
+
+
+# Attempts at a post-hint turn before keeping a short one (selection then rejects it).
+_MAX_TURN_RESAMPLES = 8
 
 
 class _SamplingParams:
@@ -719,6 +727,7 @@ class AsyncGenerator(_SamplingParams):
         num_prompts = len(prompts)
         think_tag = "</think>"
         max_budget = self.config.max_new_tokens
+        base_seed = self.config.seed
 
         results = [None] * num_prompts
         completed_count = [0]
@@ -753,7 +762,6 @@ class AsyncGenerator(_SamplingParams):
                         n=1,
                         stop=[request_tag, think_tag],
                         include_stop_str_in_output=True,
-                        seed=self.config.seed,
                     )
                 else:
                     params = self._sampling_params(
@@ -763,16 +771,26 @@ class AsyncGenerator(_SamplingParams):
                         n=1,
                         stop=[request_tag, answer_tag],
                         include_stop_str_in_output=True,
-                        seed=self.config.seed,
                     )
 
                 formatted = self._format_prompt(messages, tokenizer)
-                request_id = f"req_{idx}_{turns}_{uuid.uuid4().hex[:8]}"
-
-                final_output = None
-                async for output in engine.generate(formatted, params, request_id):
-                    if output.finished:
-                        final_output = output
+                # A turn right after a hint is resampled while it reasons less than
+                # min_words_after_hint: the teacher tends to chain the next request
+                # or answer straight off the hint. A turn the cap cut off reasoned.
+                after_hint = self.config.min_words_after_hint > 0 and accumulated_text.rstrip().endswith("</response>")
+                for attempt in range(_MAX_TURN_RESAMPLES if after_hint else 1):
+                    # Replicas of one prompt are separate samples, so each gets its own seed.
+                    if base_seed is not None:
+                        params.seed = base_seed + idx + attempt * num_prompts
+                    request_id = f"req_{idx}_{turns}_{uuid.uuid4().hex[:8]}"
+                    final_output = None
+                    async for output in engine.generate(formatted, params, request_id):
+                        if output.finished:
+                            final_output = output
+                            break
+                    if (final_output is None or final_output.outputs[0].finish_reason == "length"
+                            or min_words_after_hints("</response>" + final_output.outputs[0].text)
+                            >= self.config.min_words_after_hint):
                         break
 
                 if final_output is None:
